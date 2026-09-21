@@ -1,18 +1,19 @@
 const fs = require("fs-extra");
 const path = require("path");
 const { dataDir, ensureStore } = require("./store");
-const { bundledTelegramApi } = require("./bundledTelegramApi");
 
 const settingsPath = path.join(dataDir, "settings.json");
 
+// 单一事实源：登录前展示的 Telegram 服务条款与账号观察提示。
+const TELEGRAM_LEGAL_NOTICE = "使用本应用即表示你已阅读并同意遵守 Telegram 服务条款。第三方客户端登录的账号会被 Telegram 自动观察；请勿滥用、刷量或违反平台规则，否则可能导致账号受限或封禁。你必须提供自有的 api_id / api_hash（于 my.telegram.org 申请），本应用绝不内置任何默认凭据。";
+
 function envDefaults() {
   const dataRoot = process.env.DATA_DIR || "/data";
-  const bundled = bundledTelegramApi();
   return {
     appPassword: process.env.APP_PASSWORD || "",
     publicBaseUrl: process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${process.env.APP_PORT || 3088}`,
-    telegramApiId: process.env.TELEGRAM_API_ID || bundled.telegramApiId,
-    telegramApiHash: process.env.TELEGRAM_API_HASH || bundled.telegramApiHash,
+    telegramApiId: process.env.TELEGRAM_API_ID || "",
+    telegramApiHash: process.env.TELEGRAM_API_HASH || "",
     cacheBaseDir: process.env.CACHE_BASE_DIR || process.env.DOWNLOAD_DIR || `${dataRoot}/downloads`,
     imageCacheDir: process.env.IMAGE_CACHE_DIR || "",
     videoCacheDir: process.env.VIDEO_CACHE_DIR || "",

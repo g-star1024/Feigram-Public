@@ -500,7 +500,7 @@ async function telegramConfig() {
   const apiId = Number(settings.telegramApiId || 0);
   const apiHash = settings.telegramApiHash || "";
   if (!apiId || !apiHash || apiHash.includes("put-your")) {
-    const err = new Error("Telegram API 配置不可用，请在管理员后台覆盖 API 设置");
+    const err = new Error("Telegram API 凭据未配置：必须通过 fnOS 安装向导或管理员后台填写你自有的 api_id / api_hash（my.telegram.org 申请）。本应用禁止使用内置默认凭据，缺失凭据时拒绝启动登录。");
     err.status = 500;
     throw err;
   }

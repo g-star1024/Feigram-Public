@@ -348,7 +348,7 @@ function AuthGate({ onReady }) {
   );
 }
 
-function AccountLogin({ socket, onDone }) {
+function AccountLogin({ socket, onDone, legalNotice }) {
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState("phone");
   const [label, setLabel] = useState("");
@@ -430,6 +430,7 @@ function AccountLogin({ socket, onDone }) {
       <div className="modal">
         <button className="close" onClick={() => setOpen(false)} title="关闭"><X size={18} /></button>
         <h2>登录 Telegram</h2>
+        {legalNotice ? <p className="legal-notice">{legalNotice}</p> : null}
         {step === "phone" && <form onSubmit={start} className="stack">
           <label><span>账号名称</span><input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="我的账号" /></label>
           <label><span>手机号</span><input value={phoneNumber} onChange={(e) => setPhoneNumber(e.target.value)} placeholder="+86..." required /></label>
@@ -456,6 +457,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
     publicBaseUrl: "",
     telegramApiId: "",
     telegramApiHash: "",
+    telegramLegalNotice: "",
     cacheBaseDir: "",
     imageCacheDir: "",
     videoCacheDir: "",
@@ -516,6 +518,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
       setSettings({
         publicBaseUrl: nextSettings.publicBaseUrl || "",
         telegramApiId: "",
+        telegramLegalNotice: nextSettings.telegramLegalNotice || "",
         telegramApiHash: "",
         cacheBaseDir: nextSettings.cacheBaseDir || "",
         imageCacheDir: nextSettings.imageCacheDir || "",
@@ -792,7 +795,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
           </>}
           <h3>Telegram 账号管理</h3>
           <div className="account-admin-head">
-            {socket && <AccountLogin socket={socket} onDone={() => onAccountsChanged?.()} />}
+            {socket && <AccountLogin socket={socket} legalNotice={settings.telegramLegalNotice} onDone={() => onAccountsChanged?.()} />}
           </div>
           <div className="account-admin-list">
             {accounts.map((account) => {
@@ -825,6 +828,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
           <label><span>公开访问地址</span><input value={settings.publicBaseUrl} onChange={(e) => setSettings({ ...settings, publicBaseUrl: e.target.value })} placeholder="https://feigram.example.com" required /></label>
           <label><span>Telegram API ID</span><input type="password" inputMode="numeric" autoComplete="off" value={settings.telegramApiId} onChange={(e) => setSettings({ ...settings, telegramApiId: e.target.value })} placeholder={apiIdPlaceholder} /></label>
           <label><span>Telegram API Hash</span><input type="password" value={settings.telegramApiHash} onChange={(e) => setSettings({ ...settings, telegramApiHash: e.target.value })} placeholder={hashPlaceholder} /></label>
+          {settings.telegramLegalNotice ? <p className="legal-notice">{settings.telegramLegalNotice}</p> : null}
           <h3>缓存下载设置</h3>
           <label><span>基础缓存下载位置</span><input value={settings.cacheBaseDir} onChange={(e) => setSettings({ ...settings, cacheBaseDir: e.target.value })} placeholder="/data/downloads" required /></label>
           <label><span>图片缓存位置</span><input value={settings.imageCacheDir} onChange={(e) => setSettings({ ...settings, imageCacheDir: e.target.value })} placeholder="留空则使用 基础缓存/images" /></label>

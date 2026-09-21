@@ -1996,3 +1996,20 @@ textarea {
     grid-template-columns: 1fr;
   }
 }
+
+.legal-notice {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted, #6b7280);
+  background: var(--surface-2, #f1f5f9);
+  border: 1px solid var(--border, #e5e7eb);
+}
+
+:root.dark .legal-notice {
+  color: #9aa4b2;
+  background: #1c2530;
+  border-color: #2a3645;
+}
