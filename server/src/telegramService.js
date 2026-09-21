@@ -10,6 +10,7 @@ const { dataDir, downloadTasksPath, readAccounts, removeAccount, safeId, silentC
 const { readSettings } = require("./settings");
 const { decryptText, encryptText } = require("./cryptoBox");
 const downloaderSidecar = require("./downloaderSidecar");
+const { goMessageToNodeMessage, findNativeMessage } = require("./nativeMediaAdapter");
 
 const clients = new Map();
 const cacheClients = new Map();
@@ -1574,6 +1575,24 @@ async function mediaMessage(userId, accountId, peerId, messageId) {
   return { client, entity, message };
 }
 
+// M4.1 子步：原生账号（authMode=native）不再持有 GramJS 客户端——getClient 对 native 直接抛 409，
+// 因此原生下载元数据不能走 mediaMessage（GramJS），必须改经 Go 原生 MTProto（/messages + /peer）获取。
+// 这里复用 M4.2 的 resolveNativePeerEntity（内部用 syntheticNativeEntity 合成 entity），
+// 再用 nativeMediaAdapter 把 Go 序列化消息映射为与 mediaMessage 兼容的 { entity, message } 形状，
+// 供 ensureGoDownloadTask / mediaNativeMetadata / cacheLargeVideosInChatGo 直接消费。
+async function nativeMediaMeta(userId, accountId, peerId, messageId) {
+  const entity = await resolveNativePeerEntity(userId, accountId, peerId);
+  const items = await downloaderSidecar.accountMessages({
+    userId, accountId, peer: peerId, limit: 20, around: Number(messageId)
+  });
+  const item = findNativeMessage(items, messageId);
+  if (!item || !item.media || !item.media.hasPreview) {
+    throw Object.assign(new Error("这条消息没有可下载媒体"), { status: 404 });
+  }
+  const message = goMessageToNodeMessage(item);
+  return { client: null, entity, message };
+}
+
 function silentPartSizeKb() {
   const rate = Number(silentCacheRateLimitBps || 0);
   if (!rate) return 512;
@@ -2742,7 +2761,11 @@ async function goAllTasks() {
 }
 
 async function ensureGoDownloadTask(userId, accountId, peerId, messageId, options = {}) {
-  const { entity, message } = await mediaMessage(userId, accountId, peerId, messageId);
+  // M4.1 子步：原生账号经 Go 原生 MTProto 取消息元数据（nativeMediaMeta），避免 GramJS 的 409。
+  const native = await nativeAccountRecord(userId, accountId);
+  const { entity, message } = native
+    ? await nativeMediaMeta(userId, accountId, peerId, messageId)
+    : await mediaMessage(userId, accountId, peerId, messageId);
   const contentType = message.photo ? "image/jpeg" : message.document?.mimeType || "";
   const kind = mediaKind(message, contentType);
   const size = Number(message.file?.size || message.document?.size || 0);
@@ -2784,7 +2807,11 @@ async function ensureGoDownloadTask(userId, accountId, peerId, messageId, option
 }
 
 async function mediaNativeMetadata(userId, accountId, peerId, messageId) {
-  const { entity, message } = await mediaMessage(userId, accountId, peerId, messageId);
+  // M4.1 子步：原生账号经 Go 原生 MTProto 取消息元数据（nativeMediaMeta）。
+  const native = await nativeAccountRecord(userId, accountId);
+  const { entity, message } = native
+    ? await nativeMediaMeta(userId, accountId, peerId, messageId)
+    : await mediaMessage(userId, accountId, peerId, messageId);
   const contentType = message.photo ? "image/jpeg" : message.document?.mimeType || "";
   const kind = mediaKind(message, contentType);
   const file = message.file || {};
@@ -2942,6 +2969,21 @@ async function cacheVideoSilentlyGo(userId, accountId, peerId, message) {
 
 async function cacheLargeVideosInChatGo(userId, accountId, peerId, io = realtimeIo) {
   realtimeIo = io || realtimeIo;
+  // M4.1 子步：原生账号不持有 GramJS 客户端（getClient 抛 409），
+  // 改经 Go 原生 MTProto 拉取近期消息并筛出大视频静默缓存。
+  if (await nativeAccountRecord(userId, accountId)) {
+    const items = await downloaderSidecar.accountMessages({
+      userId, accountId, peer: peerId, limit: 120
+    }).catch(() => []);
+    const recent = Array.isArray(items) ? items : [];
+    let queued = 0;
+    for (const item of recent) {
+      if (!item || !item.media || !item.media.hasPreview) continue;
+      const message = goMessageToNodeMessage(item);
+      if (await cacheVideoSilentlyGo(userId, accountId, peerId, message)) queued += 1;
+    }
+    return { queued };
+  }
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
   const recent = await client.getMessages(entity, { limit: 120 }).catch(() => []);
