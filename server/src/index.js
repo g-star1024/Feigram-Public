@@ -53,28 +53,8 @@ app.post("/api/login", rateLimit({ windowMs: 60000, max: 12 }), asyncRoute(login
 app.get("/api/policies", asyncRoute(async (_req, res) => res.json(await readPolicies())));
 app.get("/api/about", asyncRoute(async (_req, res) => res.json(readAbout())));
 
-app.get("/api/internal/media/:user/:account/:peer/:messageId", asyncRoute(async (req, res) => {
-  const expected = process.env.FEIGRAM_INTERNAL_TOKEN || "";
-  const provided = req.query.token || req.get("x-feigram-internal-token") || "";
-  if (!expected || provided !== expected) {
-    res.status(403).json({ error: "forbidden" });
-    return;
-  }
-  const streamed = await tg.streamVideoMedia(req.params.user, req.params.account, req.params.peer, req.params.messageId, req.headers.range, res);
-  if (!streamed && !res.headersSent) {
-    res.status(404).json({ error: "media is not streamable" });
-  }
-}));
-
-app.get("/api/internal/media-meta/:user/:account/:peer/:messageId", asyncRoute(async (req, res) => {
-  const expected = process.env.FEIGRAM_INTERNAL_TOKEN || "";
-  const provided = req.query.token || req.get("x-feigram-internal-token") || "";
-  if (!expected || provided !== expected) {
-    res.status(403).json({ error: "forbidden" });
-    return;
-  }
-  res.json(await tg.mediaNativeMetadata(req.params.user, req.params.account, req.params.peer, req.params.messageId));
-}));
+// M4.1：移除 Node 侧 GramJS 内部媒体桥（原 internal/media* 路由）；
+// 媒体字节流改由 Go 原生 blob 端点（/api/accounts/:id/blob）提供，元数据由 Go 账户 API 提供。
 
 app.use("/api", authMiddleware());
 

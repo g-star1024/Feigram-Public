@@ -2645,18 +2645,15 @@ function goDownloaderTaskId(userId, accountId, peerId, messageId) {
   return downloadTaskId(userId, accountId, peerId, messageId);
 }
 
-function internalMediaSourceUrl(userId, accountId, peerId, messageId) {
-  const token = process.env.FEIGRAM_INTERNAL_TOKEN || "";
-  if (!token) throw Object.assign(new Error("内部下载令牌未初始化，请重启 Feigram"), { status: 500 });
-  const port = Number(process.env.APP_PORT || 3088);
-  return `http://127.0.0.1:${port}/api/internal/media/${encodeURIComponent(userId)}/${encodeURIComponent(accountId)}/${encodeURIComponent(peerId)}/${encodeURIComponent(messageId)}?token=${encodeURIComponent(token)}`;
-}
-
-function internalMediaMetadataUrl(userId, accountId, peerId, messageId) {
-  const token = process.env.FEIGRAM_INTERNAL_TOKEN || "";
-  if (!token) throw Object.assign(new Error("内部下载令牌未初始化，请重启 Feigram"), { status: 500 });
-  const port = Number(process.env.APP_PORT || 3088);
-  return `http://127.0.0.1:${port}/api/internal/media-meta/${encodeURIComponent(userId)}/${encodeURIComponent(accountId)}/${encodeURIComponent(peerId)}/${encodeURIComponent(messageId)}?token=${encodeURIComponent(token)}`;
+// M4.1：Go 下载器的 http-bridge 回退源直接指向 Go 原生 blob 端点，
+// 不再经由 Node 侧 GramJS 内部媒体桥（该桥已移除）。
+function goBlobSourceUrl(userId, accountId, peerId, messageId) {
+  const search = new URLSearchParams({
+    userId: String(userId),
+    peer: String(peerId),
+    messageId: String(messageId)
+  });
+  return `${downloaderSidecar.baseUrl()}/api/accounts/${encodeURIComponent(accountId)}/blob?${search.toString()}`;
 }
 
 function base64Buffer(value) {
@@ -2776,8 +2773,7 @@ async function ensureGoDownloadTask(userId, accountId, peerId, messageId, option
     source,
     autoCache: Boolean(options.autoCache || source === "auto"),
     transport,
-    sourceUrl: internalMediaSourceUrl(userId, accountId, peerId, messageId),
-    metadataUrl: internalMediaMetadataUrl(userId, accountId, peerId, messageId),
+    sourceUrl: goBlobSourceUrl(userId, accountId, peerId, messageId),
     inlineUrl: `/api/media/${accountId}/${encodeURIComponent(peerId)}/${messageId}?inline=1`,
     nativeFile: nativeFileLocation(peerId, message, contentType, fileName, kind),
     nativePeer: nativePeerLocation(peerId, entity),

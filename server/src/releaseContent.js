@@ -79,7 +79,7 @@ const announcements = [
       "公告排序改为按版本号优先，避免发布时间填写差异导致旧版本置顶。",
       "Go 下载任务补齐 native peer 元数据，后续原生模式可直接在 Go 侧重取消息。",
       "Go 原生下载遇到 FILE_REFERENCE_EXPIRED 时，优先使用 gotd 重新读取 Telegram 消息并刷新 document fileReference。",
-      "旧任务缺少 native peer 元数据时仍保留 /api/internal/media-meta 回退，避免升级后任务直接失效。",
+      "旧任务缺少 native peer 元数据时仍保留内部 media-meta 回退，避免升级后任务直接失效。",
       "HTTP 桥接仍保留一个版本作为回退；native-mtproto 稳定后再移除 Node 媒体桥接。"
     ].join("\n")
   },
