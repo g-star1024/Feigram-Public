@@ -773,6 +773,8 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 			t.Size = max64(t.Size, task.Size)
 			t.UpdatedAt = now()
 		})
+		// M3.3：file_reference 刷新预算，避免引用持续过期时无限续传。
+		fileRefRefreshes := 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -800,10 +802,15 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 				Limit:    limit,
 			})
 			if err != nil {
-				if strings.Contains(err.Error(), "FILE_REFERENCE_EXPIRED") {
+				if isFileReferenceError(err) {
+					// M3.3：刷新次数封顶，避免引用持续过期造成的无限续传。
+					fileRefRefreshes++
+					if !allowFileReferenceRefresh(fileRefRefreshes) {
+						return fmt.Errorf("file_reference 已连续刷新 %d 次仍无法取流，停止任务：%w", fileRefRefreshes-1, err)
+					}
 					refreshed, refreshErr := a.refreshNativeFileLocation(ctx, metadataAPI, task.ID)
 					if refreshErr != nil {
-						return fmt.Errorf("FILE_REFERENCE_EXPIRED: 自动刷新消息元数据失败：%w", refreshErr)
+						return fmt.Errorf("file_reference 失效：自动刷新消息元数据失败：%w", refreshErr)
 					}
 					fileID, err = strconv.ParseInt(refreshed.FileID, 10, 64)
 					if err != nil {
@@ -818,6 +825,12 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 						return fmt.Errorf("invalid refreshed native file reference: %w", err)
 					}
 					task.NativeFile = refreshed
+					// M3.3 故障注入测试点：生产恒为 nil，仅单元测试置位以覆盖「刷新后仍失败」。
+					if hook := nativeFileRefRefreshHook; hook != nil {
+						if hookErr := hook(fileRefRefreshes); hookErr != nil {
+							return hookErr
+						}
+					}
 					if refreshed.DCID > 0 && refreshed.DCID != fileDC {
 						if err := switchToMediaDC(refreshed.DCID); err != nil {
 							return classifyNativeReadError(err)
