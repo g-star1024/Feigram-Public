@@ -144,6 +144,49 @@ function deleteTask(id) {
   });
 }
 
+// --- M2.2: Go Telegram Core Auth API 客户端（/api/auth/*，M2.1 暴露） ---
+// 登录鉴权统一收敛到 Go，Node 不再创建 GramJS 登录客户端。
+
+function authStart(payload) {
+  return request("/api/auth/start", {
+    method: "POST",
+    timeoutMs: 45000,
+    body: JSON.stringify(payload || {})
+  });
+}
+
+function authSubmitCode(payload) {
+  return request("/api/auth/code", {
+    method: "POST",
+    timeoutMs: 65000,
+    body: JSON.stringify(payload || {})
+  });
+}
+
+function authSubmitPassword(payload) {
+  return request("/api/auth/password", {
+    method: "POST",
+    timeoutMs: 65000,
+    body: JSON.stringify(payload || {})
+  });
+}
+
+function authQRStart(payload) {
+  return request("/api/auth/qr/start", {
+    method: "POST",
+    timeoutMs: 45000,
+    body: JSON.stringify(payload || {})
+  });
+}
+
+function authQRStatus(payload) {
+  return request("/api/auth/qr/status", {
+    method: "POST",
+    timeoutMs: 30000,
+    body: JSON.stringify(payload || {})
+  });
+}
+
 module.exports = {
   baseUrl,
   cancelTask,
@@ -162,5 +205,10 @@ module.exports = {
   startNativeQRLogin,
   pollNativeQRLogin,
   submitNativeLoginCode,
-  submitNativeLoginPassword
+  submitNativeLoginPassword,
+  authStart,
+  authSubmitCode,
+  authSubmitPassword,
+  authQRStart,
+  authQRStatus
 };

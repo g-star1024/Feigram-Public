@@ -935,21 +935,23 @@ async function resetTelegramClient(accountId) {
 
 async function startLogin(userId, { label, phoneNumber }) {
   const { apiId, apiHash } = await telegramConfig();
-  const client = await createClient("");
-  const sent = await withTimeout(
-    client.sendCode({ apiId, apiHash }, phoneNumber),
-    20000,
-    "发送验证码超时，请检查 Telegram API 配置和网络"
-  );
-  const loginId = safeId("login");
+  const accountId = safeId("account");
+  const result = await downloaderSidecar.authStart({
+    userID: userId,
+    accountID: accountId,
+    phone: phoneNumber,
+    apiId,
+    apiHash
+  });
+  const loginId = result.loginId;
   pendingLogins.set(loginId, {
-    client,
+    loginId,
+    accountId,
     userId,
     label: label || phoneNumber,
-    phoneNumber,
-    phoneCodeHash: sent.phoneCodeHash
+    phoneNumber
   });
-  return { loginId, isCodeViaApp: sent.isCodeViaApp };
+  return { loginId, isCodeViaApp: false, passwordRequired: Boolean(result.passwordRequired) };
 }
 
 async function completeCode({ loginId, code }, io) {
@@ -973,14 +975,9 @@ async function completeCode({ loginId, code }, io) {
 async function completePassword({ loginId, password }, io) {
   const pending = pendingLogins.get(loginId);
   if (!pending) throw Object.assign(new Error("登录流程已过期，请重新开始"), { status: 400 });
-  const { apiId, apiHash } = await telegramConfig();
-  await pending.client.signInWithPassword({ apiId, apiHash }, {
-    password: async () => password,
-    onError: (error) => {
-      throw error;
-    }
-  });
-  return saveLoggedInClient(loginId, io);
+  const result = await downloaderSidecar.authSubmitPassword({ loginId, password });
+  if (result.done) return saveLoggedInClient(loginId, io);
+  throw Object.assign(new Error("密码提交后登录未完成"), { status: 400 });
 }
 
 async function saveLoggedInClient(loginId, io) {
