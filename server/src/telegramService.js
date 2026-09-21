@@ -2974,9 +2974,9 @@ async function cleanupCache() {
 
 // M2.4：GramJS → gotd session「一键迁移」（路径 A）。
 // 迁移失败统一抛出带 needsRelogin 标记的错误，由前端降级到「路径 B：重新登录」。
-// 说明：迁移成功后仍保留加密的旧 GramJS session（便于回滚），
-// 但 loadSavedClients 会跳过 authMode=native 的账号，Node 侧不会再建 GramJS 连接，
-// 因此不会与 gotd 争用同一 auth_key（避免 AUTH_KEY_DUPLICATED）。
+// 说明（M4.0）：迁移成功后 Node 会丢弃该账号的加密 GramJS session，
+// session 由 gotd 独占，账户结构只保留「已就绪」状态与展示信息。
+// 影响：回滚到 GramJS 不再可能，若 Go 侧后续失效需走「路径 B：重新登录」。
 async function migrateAccountToGo(userId, accountId) {
   const accounts = await readAccounts();
   const account = accounts.find((item) => item.id === accountId && item.userId === userId);
@@ -3006,11 +3006,15 @@ async function migrateAccountToGo(userId, accountId) {
   if (!result.ok || !result.migrated) {
     throw Object.assign(new Error(result.error || "迁移失败，请改用重新登录"), { status: 502, needsRelogin: true });
   }
+  // M4.0：丢弃 Node 侧持有的 GramJS session，账户结构不再含 session 字段。
+  const { session: droppedGramjsSession } = account;
   const migrated = {
     ...account,
     authMode: "native",
-    migratedAt: new Date().toISOString()
+    migratedAt: new Date().toISOString(),
+    session: undefined
   };
+  void droppedGramjsSession;
   await upsertAccount(migrated);
   return { migrated: true, dc: result.dc, account: stripAccountSession(migrated) };
 }
