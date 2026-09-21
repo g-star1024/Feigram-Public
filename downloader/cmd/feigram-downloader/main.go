@@ -253,6 +253,7 @@ func main() {
 	mux.HandleFunc("/api/native/accounts", app.handleNativeAccounts)
 	mux.HandleFunc("/api/native/accounts/", app.handleNativeAccount)
 	mux.HandleFunc("/api/auth/", app.handleAuth)
+	mux.HandleFunc("/api/accounts/migrate", app.handleMigrate)
 	mux.HandleFunc("/api/tasks", app.handleTasks)
 	mux.HandleFunc("/api/tasks/", app.handleTask)
 

@@ -116,6 +116,17 @@ app.post("/api/admin/native-accounts/:account/health", adminOnly, asyncRoute(asy
   res.json(await tg.nativeAccountHealth(req.user.id, req.params.account));
 }));
 
+// M2.4：GramJS → Go 一键迁移（路径 A）。
+// 失败时显式回传 needsRelogin，前端据此降级到「路径 B：重新登录」。
+// 这里自行捕获而不用 asyncRoute，是为了保留 needsRelogin 标记（统一错误中间件会丢弃它）。
+app.post("/api/admin/native-accounts/:account/migrate", adminOnly, asyncRoute(async (req, res) => {
+  try {
+    res.json(await tg.migrateAccountToGo(req.user.id, req.params.account));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message, needsRelogin: Boolean(error.needsRelogin) });
+  }
+}));
+
 app.post("/api/admin/native-accounts/:account/login/start", adminOnly, asyncRoute(async (req, res) => {
   res.json(await tg.nativeAccountLoginStart(req.user.id, req.params.account, req.body || {}));
 }));
@@ -389,6 +400,18 @@ io.on("connection", (socket) => {
       reply({ ok: true, data: await tg.completePassword(payload || {}, io) });
     } catch (error) {
       reply({ ok: false, error: error.message });
+    }
+  });
+
+  // M2.4：一键迁移到 Go（路径 A）。
+  // 失败时回传 needsRelogin，前端据此降级为「路径 B：重新登录」。
+  socket.on("account:migrate", async (payload, reply) => {
+    try {
+      const accountId = payload && payload.accountId;
+      if (!accountId) throw Object.assign(new Error("缺少 accountId"), { status: 400 });
+      reply({ ok: true, data: await tg.migrateAccountToGo(socket.user.id, accountId) });
+    } catch (error) {
+      reply({ ok: false, error: error.message, needsRelogin: Boolean(error.needsRelogin) });
     }
   });
 });

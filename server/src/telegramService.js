@@ -819,6 +819,9 @@ async function loadSavedClients(io) {
   realtimeIo = io || realtimeIo;
   const accounts = await readAccounts();
   for (const account of accounts) {
+    // M2.2/M2.4：已迁移到 Go 的账号由 gotd 独占 session，Node 不得再建 GramJS 连接。
+    // 否则同一 auth_key 被双端同时握手，Telegram 会返回 AUTH_KEY_DUPLICATED。
+    if (account.authMode === "native") continue;
     try {
       await getClient(account.userId, account.id);
     } catch (error) {
@@ -844,16 +847,27 @@ function registerUpdates(io, accountId, client) {
 async function listAccounts(userId) {
   const accounts = await readAccounts();
   const owned = accounts.filter((account) => account.userId === userId);
-  await Promise.all(owned.map((account) => syncGoNativeAccount(account).catch(() => null)));
-  return owned.map(({ session, ...safe }) => ({
-    ...safe,
-    connected: clients.has(safe.id)
-  }));
+  const synced = await Promise.all(owned.map((account) => syncGoNativeAccount(account).catch(() => null)));
+  // M2.4：向前端暴露迁移状态，供账号卡片判断是否展示「迁移到 Go」按钮。
+  return owned.map(({ session, ...safe }, index) => {
+    const go = (synced[index] && (synced[index].account || synced[index])) || null;
+    const authMode = safe.authMode || (session ? "gramjs" : "unknown");
+    return {
+      ...safe,
+      authMode,
+      needsMigration: authMode !== "native",
+      goReady: Boolean(go && go.ready),
+      goStatus: (go && go.status) || "",
+      connected: clients.has(safe.id) || Boolean(go && go.ready)
+    };
+  });
 }
 
 async function syncGoNativeAccount(account) {
   if (!account?.userId || !account?.id) return null;
   const { apiId, apiHash } = await telegramConfig();
+  // M2.4：已迁移到 Go 的账号不能被降级为 needs-relogin，
+  // 否则每次刷新账号列表都会把健康的 Go session 打回「需重新登录」。
   return downloaderSidecar.upsertNativeAccount({
     userId: account.userId,
     accountId: account.id,
@@ -861,7 +875,7 @@ async function syncGoNativeAccount(account) {
     displayName: account.label || account.username || account.phone || account.id,
     apiId,
     apiHash,
-    status: "needs-relogin"
+    status: account.authMode === "native" ? "" : "needs-relogin"
   });
 }
 
@@ -893,6 +907,11 @@ async function getClientUnlocked(userId, accountId) {
   }
   const account = (await readAccounts()).find((item) => item.id === accountId && item.userId === userId);
   if (!account) throw Object.assign(new Error("账号不存在"), { status: 404 });
+  // M2.4：已迁移账号的 auth_key 归 Go 独占，禁止再以 GramJS 复用，
+  // 否则双端同时握手会触发 AUTH_KEY_DUPLICATED。相关聊天/媒体能力将在 M4.2 由 Go 提供。
+  if (account.authMode === "native") {
+    throw Object.assign(new Error("该账号已迁移到 Go 原生 MTProto，GramJS 连接已停用"), { status: 409 });
+  }
   let client;
   try {
     client = await createClient(await decryptText(account.session));
@@ -954,52 +973,47 @@ async function startLogin(userId, { label, phoneNumber }) {
   return { loginId, isCodeViaApp: false, passwordRequired: Boolean(result.passwordRequired) };
 }
 
+// M2.2：验证码提交改由 Go Telegram Core 处理（/api/auth/code）。
+// 注意：pendingLogins 中已不再保存 GramJS client，这里不能再引用 pending.client。
 async function completeCode({ loginId, code }, io) {
   const pending = pendingLogins.get(loginId);
   if (!pending) throw Object.assign(new Error("登录流程已过期，请重新发送验证码"), { status: 400 });
-  try {
-    await pending.client.invoke(new Api.auth.SignIn({
-      phoneNumber: pending.phoneNumber,
-      phoneCodeHash: pending.phoneCodeHash,
-      phoneCode: code
-    }));
-  } catch (error) {
-    if (error.message && error.message.includes("SESSION_PASSWORD_NEEDED")) {
-      return { passwordRequired: true };
-    }
-    throw error;
-  }
-  return saveLoggedInClient(loginId, io);
+  const result = await downloaderSidecar.authSubmitCode({ loginId, code });
+  if (result.passwordRequired) return { passwordRequired: true };
+  if (!result.done) throw Object.assign(new Error("验证码提交后登录未完成，请重试"), { status: 400 });
+  return saveLoggedInClient(loginId, io, result.account);
 }
 
+// M2.2：两步验证密码提交同样经 Go（/api/auth/password）。
 async function completePassword({ loginId, password }, io) {
   const pending = pendingLogins.get(loginId);
   if (!pending) throw Object.assign(new Error("登录流程已过期，请重新开始"), { status: 400 });
   const result = await downloaderSidecar.authSubmitPassword({ loginId, password });
-  if (result.done) return saveLoggedInClient(loginId, io);
+  if (result.done) return saveLoggedInClient(loginId, io, result.account);
   throw Object.assign(new Error("密码提交后登录未完成"), { status: 400 });
 }
 
-async function saveLoggedInClient(loginId, io) {
+// M2.2/M4.0：登录成功后 Node 只保存账号展示信息与「已就绪」状态，
+// 不再保存或持有 GramJS session —— session 由 Go 侧 gotd 独占，
+// 以避免双端同时握有同一 auth_key 触发 AUTH_KEY_DUPLICATED。
+async function saveLoggedInClient(loginId, io, goAccount) {
   const pending = pendingLogins.get(loginId);
-  const me = await pending.client.getMe();
-  const id = safeId("account");
+  if (!pending) throw Object.assign(new Error("登录流程已过期，请重新开始"), { status: 400 });
   const account = {
-    id,
+    id: pending.accountId,
     userId: pending.userId,
     label: pending.label,
-    phoneNumber: pending.phoneNumber,
-    displayName: [me.firstName, me.lastName].filter(Boolean).join(" ") || me.username || pending.label,
-    username: me.username || "",
-    rawUserId: toText(me.id),
-    session: await encryptText(pending.client.session.save()),
+    phoneNumber: pending.phoneNumber || (goAccount && goAccount.phone) || "",
+    displayName: (goAccount && goAccount.displayName) || pending.label,
+    username: "",
+    rawUserId: "",
+    authMode: "native",
+    migratedAt: new Date().toISOString(),
     createdAt: new Date().toISOString()
   };
   await upsertAccount(account);
-  clients.set(id, pending.client);
-  registerUpdates(io, id, pending.client);
   pendingLogins.delete(loginId);
-  return { account: { ...account, session: undefined, connected: true } };
+  return { account: { ...account, connected: Boolean(goAccount && goAccount.ready) } };
 }
 
 async function logout(userId, accountId) {
@@ -2957,6 +2971,54 @@ async function cleanupCache() {
   }
 }
 
+// M2.4：GramJS → gotd session「一键迁移」（路径 A）。
+// 迁移失败统一抛出带 needsRelogin 标记的错误，由前端降级到「路径 B：重新登录」。
+// 说明：迁移成功后仍保留加密的旧 GramJS session（便于回滚），
+// 但 loadSavedClients 会跳过 authMode=native 的账号，Node 侧不会再建 GramJS 连接，
+// 因此不会与 gotd 争用同一 auth_key（避免 AUTH_KEY_DUPLICATED）。
+async function migrateAccountToGo(userId, accountId) {
+  const accounts = await readAccounts();
+  const account = accounts.find((item) => item.id === accountId && item.userId === userId);
+  if (!account) throw Object.assign(new Error("账号不存在"), { status: 404 });
+  if (account.authMode === "native") {
+    return { migrated: true, alreadyMigrated: true, account: stripAccountSession(account) };
+  }
+  if (!account.session) {
+    throw Object.assign(new Error("该账号没有可迁移的 GramJS session，请直接重新登录"), { status: 400, needsRelogin: true });
+  }
+  const { apiId, apiHash } = await telegramConfig();
+  const gramjsSession = await decryptText(account.session);
+  if (!gramjsSession) {
+    throw Object.assign(new Error("GramJS session 解密结果为空，请直接重新登录"), { status: 400, needsRelogin: true });
+  }
+  // 先停后启：迁移前断开该账号的 GramJS 连接，避免同一 auth_key 被双端同时持有。
+  await resetTelegramClient(accountId);
+  const result = await downloaderSidecar.migrateAccount({
+    userID: userId,
+    accountID: accountId,
+    gramjsSession,
+    phone: account.phoneNumber || "",
+    label: account.displayName || account.label || "",
+    apiId,
+    apiHash
+  });
+  if (!result.ok || !result.migrated) {
+    throw Object.assign(new Error(result.error || "迁移失败，请改用重新登录"), { status: 502, needsRelogin: true });
+  }
+  const migrated = {
+    ...account,
+    authMode: "native",
+    migratedAt: new Date().toISOString()
+  };
+  await upsertAccount(migrated);
+  return { migrated: true, dc: result.dc, account: stripAccountSession(migrated) };
+}
+
+function stripAccountSession(account) {
+  const { session, ...safe } = account;
+  return safe;
+}
+
 module.exports = {
   clickMessageButton,
   completeCode,
@@ -2991,6 +3053,7 @@ module.exports = {
   startDownloadTask: startGoDownloadTask,
   streamVideoMedia,
   listAccounts,
+  migrateAccountToGo,
   listChats,
   listFolders,
   listMessages,

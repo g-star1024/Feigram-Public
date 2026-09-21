@@ -187,6 +187,26 @@ function authQRStatus(payload) {
   });
 }
 
+// --- M2.4: GramJS → gotd session 一键迁移（路径 A） ---
+// 迁移失败（含 Go 侧健康检查不通过）不抛异常，而是返回结构化结果，
+// 由调用方降级到「路径 B：重新登录」，保证前端总能拿到可展示的错误。
+async function migrateAccount(payload) {
+  try {
+    const data = await request("/api/accounts/migrate", {
+      method: "POST",
+      timeoutMs: 65000,
+      body: JSON.stringify(payload || {})
+    });
+    return { ok: true, ...data };
+  } catch (error) {
+    return {
+      ok: false,
+      migrated: false,
+      error: error.name === "AbortError" ? "迁移超时，请改用重新登录" : (error.message || "迁移失败")
+    };
+  }
+}
+
 module.exports = {
   baseUrl,
   cancelTask,
@@ -210,5 +230,6 @@ module.exports = {
   authSubmitCode,
   authSubmitPassword,
   authQRStart,
-  authQRStatus
+  authQRStatus,
+  migrateAccount
 };

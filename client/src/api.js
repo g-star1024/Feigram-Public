@@ -18,7 +18,14 @@ export async function api(path, options = {}) {
   const contentType = response.headers.get("content-type") || "";
   const payload = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
-    throw new Error(payload?.error || payload || "请求失败");
+    const error = new Error(payload?.error || payload || "请求失败");
+    // M2.4：保留服务端下发的降级标记（如 needsRelogin），
+    // 否则前端无法判断迁移失败后应自动切换到「重新登录」。
+    if (payload && typeof payload === "object") {
+      error.status = response.status;
+      error.needsRelogin = Boolean(payload.needsRelogin);
+    }
+    throw error;
   }
   return payload;
 }

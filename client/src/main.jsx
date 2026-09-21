@@ -648,6 +648,27 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
     }
   }
 
+  // M2.4：路径 A —— 一键把 GramJS session 迁移到 Go 原生 MTProto。
+  // 迁移失败（含 Go 侧健康检查未通过）自动降级「路径 B」，走 reloginNativeAccount 重新登录。
+  async function migrateAccountToGo(account) {
+    setError("");
+    try {
+      await api(`/api/admin/native-accounts/${account.id}/migrate`, { method: "POST", body: JSON.stringify({}) });
+      setNativeAccounts(await api("/api/admin/native-accounts").catch(() => nativeAccounts));
+      setDownloaderState(await api("/api/admin/downloader").catch(() => downloaderState));
+      await onAccountsChanged?.();
+    } catch (err) {
+      setError(`迁移失败：${err.message}`);
+      if (err.needsRelogin) {
+        await reloginNativeAccount({
+          accountId: account.id,
+          phone: account.phoneNumber,
+          displayName: account.displayName || account.label
+        });
+      }
+    }
+  }
+
   async function startNativeQrLogin(item) {
     setError("");
     try {
@@ -817,6 +838,8 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
                 {canAdmin && <button className="icon-button" type="button" onClick={() => startNativeQrLogin(native || { accountId: account.id, displayName: account.displayName || account.label, phone: account.phoneNumber })}>扫码登录 Go</button>}
                 {canAdmin && <button className="icon-button" type="button" onClick={() => native ? checkNativeAccount(account.id) : refreshNativeAccounts()}>健康检查</button>}
                 {canAdmin && <button className="icon-button" type="button" onClick={() => reloginNativeAccount(native || { accountId: account.id, phone: account.phoneNumber, displayName: account.displayName || account.label })}>验证码兜底</button>}
+                {canAdmin && account.needsMigration && <button className="icon-button primary-button" type="button" onClick={() => migrateAccountToGo(account)}>迁移到 Go</button>}
+                {canAdmin && account.authMode === "native" && <span className="native-status ready">已迁移 Go</span>}
                 <button className="icon-button danger-button" onClick={() => onAccountLogout(account.id)}><LogOut size={16} />退出</button>
               </div>;
             })}
