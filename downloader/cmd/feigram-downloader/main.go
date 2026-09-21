@@ -223,7 +223,8 @@ func main() {
 			Mode:         "conservative",
 			PartSize:     defaultPartSize,
 			Backend:      "go-sidecar",
-			Transport:    "http-bridge",
+			// M3.1：默认走 Go 原生 MTProto；http-bridge 仅作为显式降级开关保留。
+			Transport:    "native-mtproto",
 			UpdatedAt:    now(),
 		},
 		tasks:    map[string]*Task{},
@@ -1675,10 +1676,13 @@ func applyConfigPatch(current Config, patch map[string]any) Config {
 
 func normalizeTransport(value string) string {
 	switch strings.TrimSpace(strings.ToLower(value)) {
+	// M3.1：http-bridge 仅作为显式降级开关保留；其余取值（含空值）一律走 Go 原生 MTProto。
+	case "http-bridge", "node-bridge", "bridge":
+		return "http-bridge"
 	case "native-mtproto", "go-mtproto", "gotd", "tdl":
 		return "native-mtproto"
 	default:
-		return "http-bridge"
+		return "native-mtproto"
 	}
 }
 

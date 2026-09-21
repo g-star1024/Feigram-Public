@@ -2637,7 +2637,8 @@ async function ensureGoDownloadTask(userId, accountId, peerId, messageId, option
   const id = goDownloaderTaskId(userId, accountId, peerId, messageId);
   const source = options.source || "manual";
   const downloaderState = await downloaderSidecar.state().catch(() => null);
-  const configuredTransport = downloaderState?.config?.transport || "http-bridge";
+  // M3.1：默认与 Go 一致走 native-mtproto（http-bridge 仅作显式降级）。
+  const configuredTransport = downloaderState?.config?.transport || "native-mtproto";
   const readyAccountKeys = Array.isArray(downloaderState?.nativeMTProto?.readyAccountKeys)
     ? downloaderState.nativeMTProto.readyAccountKeys
     : [];
@@ -2722,7 +2723,7 @@ async function goSilentCacheState(userId) {
     configuredConcurrency: Math.max(1, Number(config.concurrency || 1)),
     effectiveConcurrency: Number(state?.running || 0),
     mode: config.mode || "conservative",
-    transport: config.transport || state?.transport || "http-bridge",
+    transport: config.transport || state?.transport || "native-mtproto",
     running: tasks.filter((task) => task.status === "running").length,
     tasks,
     engine: "go-sidecar"
@@ -2853,7 +2854,7 @@ async function goSilentCacheSpeedDiagnostics(userId) {
     configuredConcurrency: Number(state?.config?.concurrency || 1),
     effectiveConcurrency: Number(state?.running || 0),
     cacheMode: state?.config?.mode || "conservative",
-    transport: state?.config?.transport || state?.transport || "http-bridge",
+    transport: state?.config?.transport || state?.transport || "native-mtproto",
     mode: "go-sidecar",
     running: running.length,
     queued: tasks.filter((task) => task.status === "queued").length,
