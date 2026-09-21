@@ -117,8 +117,9 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 	if len(segments) > 1 {
 		action = segments[1]
 	}
+	// M4.1：blob 走二进制直出（支持 Range），不进入 JSON 分支。
 	switch action {
-	case "dialogs", "folders", "messages", "media", "avatar", "peer":
+	case "dialogs", "folders", "messages", "media", "avatar", "peer", "blob":
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown account action: " + action})
 		return
@@ -229,6 +230,10 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "private, max-age=86400")
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		_, _ = w.Write(data)
+	case "blob":
+		// 媒体字节流耗时远长于一次聊天查询，换成独立超时后再交给专用处理器。
+		cancel()
+		a.serveNativeMediaBlob(w, r, client, account, query)
 	}
 }
 
