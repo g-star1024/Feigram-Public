@@ -252,6 +252,7 @@ func main() {
 	mux.HandleFunc("/api/config", app.handleConfig)
 	mux.HandleFunc("/api/native/accounts", app.handleNativeAccounts)
 	mux.HandleFunc("/api/native/accounts/", app.handleNativeAccount)
+	mux.HandleFunc("/api/auth/", app.handleAuth)
 	mux.HandleFunc("/api/tasks", app.handleTasks)
 	mux.HandleFunc("/api/tasks/", app.handleTask)
 
