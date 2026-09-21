@@ -207,6 +207,62 @@ async function migrateAccount(payload) {
   }
 }
 
+// --- M4.2: Go Telegram Core 聊天 API（/api/accounts/{accountID}/*） ---
+// 已迁移到 Go 的账号（authMode=native）不再有 GramJS 客户端，
+// 会话/文件夹/消息/头像/peer 解析统一由 Go 原生 MTProto 提供。
+
+function accountChatPath(accountId, action, params = {}) {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") return;
+    search.set(key, String(value));
+  });
+  const query = search.toString();
+  return `/api/accounts/${encodeURIComponent(accountId)}/${action}${query ? `?${query}` : ""}`;
+}
+
+function accountDialogs({ userId, accountId, limit = 0, query = "" }) {
+  return request(accountChatPath(accountId, "dialogs", { userId, limit, query }), { timeoutMs: 45000 });
+}
+
+function accountFolders({ userId, accountId }) {
+  return request(accountChatPath(accountId, "folders", { userId }), { timeoutMs: 45000 });
+}
+
+function accountMessages({ userId, accountId, peer, limit = 0, before = 0, around = 0 }) {
+  return request(accountChatPath(accountId, "messages", { userId, peer, limit, before, around }), { timeoutMs: 45000 });
+}
+
+function accountMedia({ userId, accountId, peer, limit = 0, before = 0 }) {
+  return request(accountChatPath(accountId, "media", { userId, peer, limit, before }), { timeoutMs: 45000 });
+}
+
+function accountPeer({ userId, accountId, peer }) {
+  return request(accountChatPath(accountId, "peer", { userId, peer }), { timeoutMs: 30000 });
+}
+
+// 头像是二进制，不能用 JSON request()，单独走 arrayBuffer。
+async function accountAvatar({ userId, accountId, peer }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 45000);
+  try {
+    const response = await fetch(`${baseUrl()}${accountChatPath(accountId, "avatar", { userId, peer })}`, {
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      throw new Error(`Go downloader ${response.status}`);
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!buffer.length) throw new Error("暂无头像");
+    return {
+      buffer,
+      contentType: response.headers.get("content-type") || "image/jpeg"
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 module.exports = {
   baseUrl,
   cancelTask,
@@ -231,5 +287,11 @@ module.exports = {
   authSubmitPassword,
   authQRStart,
   authQRStatus,
-  migrateAccount
+  migrateAccount,
+  accountDialogs,
+  accountFolders,
+  accountMessages,
+  accountMedia,
+  accountPeer,
+  accountAvatar
 };

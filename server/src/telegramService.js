@@ -1031,7 +1031,92 @@ async function logout(userId, accountId) {
   await removeAccount(accountId);
 }
 
+// --- M4.2：已迁移到 Go 的账号（authMode=native）没有 GramJS 客户端，
+// 聊天/文件夹/消息/媒体/头像/peer 解析统一经 Go Telegram Core（downloaderSidecar）---
+
+async function nativeAccountRecord(userId, accountId) {
+  const accounts = await readAccounts();
+  const account = accounts.find((item) => item.id === accountId && item.userId === userId);
+  if (!account) return null;
+  // 兼容旧记录：有 GramJS session 且未标记 native 的账号继续走 GramJS。
+  return account.authMode === "native" ? account : null;
+}
+
+function syntheticNativeEntity(chat) {
+  const [type, id] = String(chat?.id || chat?.peerId || "").split(":");
+  if (!type || !id) return null;
+  const className = type === "Channel" ? "Channel" : type === "Chat" ? "Chat" : "User";
+  return {
+    className,
+    id,
+    rawId: id,
+    accessHash: chat.accessHash ? String(chat.accessHash) : "",
+    title: chat.title || "",
+    username: chat.username || "",
+    broadcast: chat.type === "channel" || className === "Channel"
+  };
+}
+
+function rememberNativePeers(accountId, chats) {
+  if (!Array.isArray(chats) || !chats.length) return;
+  if (!peerCache.has(accountId)) peerCache.set(accountId, new Map());
+  const cache = peerCache.get(accountId);
+  chats.forEach((chat) => {
+    const entity = syntheticNativeEntity(chat);
+    if (entity) cache.set(chat.id, entity);
+  });
+}
+
+async function listNativeChats(userId, accountId, query = "") {
+  const items = await downloaderSidecar.accountDialogs({
+    userId,
+    accountId,
+    limit: DIALOG_FETCH_LIMIT,
+    query
+  });
+  const chats = Array.isArray(items) ? items : [];
+  rememberNativePeers(accountId, chats);
+  return chats;
+}
+
+async function listNativeFolders(userId, accountId) {
+  const items = await downloaderSidecar.accountFolders({ userId, accountId });
+  return Array.isArray(items) ? items : [];
+}
+
+async function listNativeMessages(userId, accountId, peerId, limit = 50, before = 0, around = 0) {
+  const items = await downloaderSidecar.accountMessages({
+    userId,
+    accountId,
+    peer: peerId,
+    limit,
+    before,
+    around
+  });
+  const messages = Array.isArray(items) ? items : [];
+  messages.forEach((message) => {
+    const sender = message.sender || {};
+    if (sender.id) rememberNativePeers(accountId, [{ id: sender.id, title: sender.title, username: sender.username }]);
+  });
+  return messages;
+}
+
+async function resolveNativePeerEntity(userId, accountId, peerId) {
+  const cached = peerCache.get(accountId)?.get(peerId);
+  if (cached) return cached;
+  const info = await downloaderSidecar.accountPeer({ userId, accountId, peer: peerId });
+  const entity = syntheticNativeEntity({ ...info, peerId });
+  if (!entity) throw Object.assign(new Error("找不到会话，可能已退出该群组、会话已被删除，或 Telegram 暂时无法解析该会话"), { status: 404 });
+  if (!peerCache.has(accountId)) peerCache.set(accountId, new Map());
+  peerCache.get(accountId).set(peerId, entity);
+  return entity;
+}
+
 async function listChats(userId, accountId, query = "") {
+  // M4.2：native 账号经 Go 原生 MTProto 读取会话列表，返回结构与 GramJS 路径一致。
+  if (await nativeAccountRecord(userId, accountId)) {
+    return listNativeChats(userId, accountId, query);
+  }
   return foregroundTelegramOperation(accountId, async () => {
   const client = await getClient(userId, accountId);
   const dialogs = await withTimeout(
@@ -1064,6 +1149,10 @@ async function listChats(userId, accountId, query = "") {
 }
 
 async function listFolders(userId, accountId) {
+  // M4.2：native 账号经 Go 读取 Telegram 文件夹（dialog filters）。
+  if (await nativeAccountRecord(userId, accountId)) {
+    return listNativeFolders(userId, accountId);
+  }
   return foregroundTelegramOperation(accountId, async () => {
   const client = await getClient(userId, accountId);
   const [filterResult, dialogs] = await Promise.all([
@@ -1117,6 +1206,10 @@ async function listFolders(userId, accountId) {
 }
 
 async function resolvePeer(userId, accountId, peerId) {
+  // M4.2：native 账号没有 GramJS 实体，改由 Go 提供 peer 元数据（含 accessHash）。
+  if (await nativeAccountRecord(userId, accountId)) {
+    return resolveNativePeerEntity(userId, accountId, peerId);
+  }
   const cached = peerCache.get(accountId)?.get(peerId);
   if (cached) return cached;
 
@@ -1137,6 +1230,10 @@ async function resolvePeer(userId, accountId, peerId) {
 }
 
 async function listMessages(userId, accountId, peerId, limit = 50, before = 0, around = 0) {
+  // M4.2：native 账号经 Go 读取消息历史，返回结构与 GramJS 序列化一致。
+  if (await nativeAccountRecord(userId, accountId)) {
+    return listNativeMessages(userId, accountId, peerId, limit, before, around);
+  }
   return foregroundTelegramOperation(accountId, async () => {
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
@@ -1198,6 +1295,17 @@ async function chatDetails(userId, accountId, peerId) {
 }
 
 async function chatMedia(userId, accountId, peerId, { before = 0, limit = 30 } = {}) {
+  // M4.2：native 账号的媒体列表改由 Go 提供（含下载所需的 nativeFile 元数据）。
+  if (await nativeAccountRecord(userId, accountId)) {
+    const pageSize = Math.max(1, Math.min(60, Number(limit) || 30));
+    const files = await downloaderSidecar.accountMedia({ userId, accountId, peer: peerId, limit: pageSize, before });
+    const list = Array.isArray(files) ? files : [];
+    return {
+      files: list,
+      nextBefore: list.length ? Math.min(...list.map((item) => Number(item.id))) : 0,
+      hasMore: list.length >= pageSize
+    };
+  }
   return foregroundTelegramOperation(accountId, async () => {
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
@@ -2507,6 +2615,15 @@ function streamLocalFile(filePath, fileName, contentType, size, rangeHeader, res
 }
 
 async function profilePhoto(userId, accountId, peerId = "__self") {
+  // M4.2：native 账号的头像由 Go 原生 MTProto 下载，直接返回内存缓冲。
+  if (await nativeAccountRecord(userId, accountId)) {
+    const avatar = await downloaderSidecar.accountAvatar({ userId, accountId, peer: peerId });
+    return {
+      buffer: avatar.buffer,
+      contentType: avatar.contentType || "image/jpeg",
+      fileName: `${safeId("avatar")}.jpg`
+    };
+  }
   const client = await getClient(userId, accountId);
   const entity = peerId === "__self" ? await client.getMe() : await resolvePeer(userId, accountId, peerId);
   const directories = await cacheSettings();

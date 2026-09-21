@@ -260,6 +260,11 @@ app.get("/api/avatar/:account/:peer?", asyncRoute(async (req, res) => {
   const avatar = await tg.profilePhoto(req.user.id, req.params.account, req.params.peer || "__self");
   res.setHeader("Content-Type", avatar.contentType);
   res.setHeader("Cache-Control", "private, max-age=86400");
+  // M4.2：Go 原生头像直接是内存缓冲，不经磁盘缓存。
+  if (avatar.buffer) {
+    res.send(avatar.buffer);
+    return;
+  }
   res.sendFile(avatar.filePath);
 }));
 

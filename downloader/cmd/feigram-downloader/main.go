@@ -254,6 +254,9 @@ func main() {
 	mux.HandleFunc("/api/native/accounts", app.handleNativeAccounts)
 	mux.HandleFunc("/api/native/accounts/", app.handleNativeAccount)
 	mux.HandleFunc("/api/auth/", app.handleAuth)
+	// M4.2：Go Telegram Core 直接提供聊天/文件夹/消息/头像/peer 解析能力。
+	// 精确路径 /api/accounts/migrate 由 mux 优先匹配，不会落入本子树。
+	mux.HandleFunc("/api/accounts/", app.handleAccountAPI)
 	mux.HandleFunc("/api/accounts/migrate", app.handleMigrate)
 	mux.HandleFunc("/api/tasks", app.handleTasks)
 	mux.HandleFunc("/api/tasks/", app.handleTask)
