@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.3.0"
-export APP_CHANGELOG="健康检查自动化、媒体源自动升级、E2E 入库、发版工具化。"
+export APP_VERSION="2.3.1"
+export APP_CHANGELOG="会话列表超时链路加固。"
 export NODE_ENV="production"
 
 is_running() {
