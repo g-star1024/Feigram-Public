@@ -101,11 +101,9 @@ func loadNativePeerIndex(userID, accountID string) map[string]nativePeerInfo {
 
 // handleAccountAPI 是 /api/accounts/ 子树的统一入口。
 // 精确路径 /api/accounts/migrate 由 mux 优先匹配，不会进入这里。
+// M4.3：写路径（send/button）接受 POST，详情（details）沿用 GET，其余只读动作保持 GET。
+// 这样 Node 网关无需为写操作单独开一套端口或鉴权。
 func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET required"})
-		return
-	}
 	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/accounts/"), "/")
 	segments := strings.Split(rest, "/")
 	accountID, err := url.PathUnescape(segments[0])
@@ -119,7 +117,16 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	// M4.1：blob 走二进制直出（支持 Range），不进入 JSON 分支。
 	switch action {
-	case "dialogs", "folders", "messages", "media", "avatar", "peer", "blob":
+	case "dialogs", "folders", "messages", "media", "avatar", "peer", "blob", "details":
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET required"})
+			return
+		}
+	case "send", "button":
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+			return
+		}
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown account action: " + action})
 		return
@@ -139,6 +146,13 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 	client, err := a.newTelegramClient(account, apiHash)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// M4.3：写路径（send/button）与会话详情（details）转交 chatwrite.go，
+	// 它自带超时控制与 JSON body 解析，避免在此处重复分支。
+	if action == "send" || action == "button" || action == "details" {
+		a.handleAccountWrite(w, r, action, account, client, r.URL.Query())
 		return
 	}
 
