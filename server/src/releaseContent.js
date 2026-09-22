@@ -14,6 +14,16 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.4.1",
+    title: "Feigram 2.4.1 更新",
+    version: "2.4.1",
+    level: "success",
+    createdAt: "2026-09-22T15:38:03.000Z",
+    body: [
+"诊断日志分级着色/级别与关键词过滤/清空按钮 + 管理后台服务端/隐私设置 tab 视觉对齐诊断页 + 双端窄屏布局核查"
+    ].join("\n")
+  },
+  {
     id: "release-2.4.0",
     title: "Feigram 2.4.0 更新",
     version: "2.4.0",
