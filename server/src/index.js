@@ -24,6 +24,7 @@ const { checkForUpdates, diagnostics } = require("./diagnostics");
 const downloaderSidecar = require("./downloaderSidecar");
 const { migrateStore, schemaVersion } = require("./migrations");
 const { rateLimit } = require("./rateLimit");
+const { pickAccountsSummary, sidecarTaskCount } = require("./healthSummary");
 const tg = require("./telegramService");
 
 const port = Number(process.env.APP_PORT || 3088);
@@ -48,27 +49,8 @@ function asyncRoute(handler) {
   };
 }
 
-// M5.2 修复：/api/health 曾调用未定义的 summarizeNativeAccounts，导致该接口恒定 500。
-// Go 侧 /api/state 已直接给出账户健康分布，优先采用；不可达时按 /api/native/accounts 本地统计。
-function summarizeNativeAccounts(sidecarAccounts) {
-  const list = Array.isArray(sidecarAccounts)
-    ? sidecarAccounts
-    : Array.isArray(sidecarAccounts && sidecarAccounts.accounts) ? sidecarAccounts.accounts : [];
-  const byStatus = {};
-  let healthy = 0;
-  for (const account of list) {
-    const status = String((account && account.status) || ((account && account.ready) ? "healthy" : "needs-login"));
-    byStatus[status] = (byStatus[status] || 0) + 1;
-    if (status === "healthy") healthy += 1;
-  }
-  const summary = { total: list.length, healthy, byStatus };
-  if (sidecarAccounts && sidecarAccounts.ok === false) {
-    summary.error = sidecarAccounts.error || "Go 下载服务不可达";
-  }
-  return summary;
-}
-
 // M5.2：健康接口扩充 schemaVersion / transport / sidecar 状态 / 账户健康分布。
+// M5.3：汇总逻辑已抽到 healthSummary.js（纯函数，可单测），此处只做装配。
 app.get("/api/health", asyncRoute(async (_req, res) => {
   const [sidecarState, sidecarAccounts] = await Promise.all([
     downloaderSidecar.state(),
@@ -76,7 +58,7 @@ app.get("/api/health", asyncRoute(async (_req, res) => {
   ]);
   const reachable = Boolean(sidecarState.ok);
   const transport = sidecarState.ok ? sidecarState.transport : undefined;
-  const accounts = (sidecarState.ok && sidecarState.accounts) || summarizeNativeAccounts(sidecarAccounts);
+  const accounts = pickAccountsSummary(sidecarState, sidecarAccounts);
   res.json({
     ok: true,
     version: serverVersion,
@@ -86,11 +68,7 @@ app.get("/api/health", asyncRoute(async (_req, res) => {
       reachable,
       url: sidecarState.url || downloaderSidecar.baseUrl(),
       version: sidecarState.ok ? sidecarState.version : undefined,
-      taskCount: sidecarState.ok
-        ? (sidecarState.taskCount !== undefined
-          ? sidecarState.taskCount
-          : (Array.isArray(sidecarState.tasks) ? sidecarState.tasks.length : undefined))
-        : undefined,
+      taskCount: sidecarTaskCount(sidecarState),
       running: sidecarState.ok ? sidecarState.running : undefined
     },
     accounts
