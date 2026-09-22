@@ -480,7 +480,7 @@ function proxySourceLabel(source) {
   return "未启用（直连）";
 }
 
-function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountLogout, onAccountsChanged, onSettingsChanged, open, onClose, initialTab = "accounts", socket, silentCacheState, silentCaches = [], onRefreshSilentCaches, onSilentCacheControl, onCancelSilentCache }) {
+function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountLogout, onAccountsChanged, onSettingsChanged, open, onClose, initialTab = "accounts", socket, silentCacheState, silentCaches = [], onRefreshSilentCaches, onSilentCacheControl, onCancelSilentCache, notificationPermission, onRequestNotificationPermission }) {
   const [tab, setTab] = useState(initialTab);
   const [users, setUsers] = useState([]);
   const [settings, setSettings] = useState({
@@ -1027,7 +1027,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
             {/* 浏览器通知权限申请入口：只在「未询问」时展示按钮；被拒绝时给出去浏览器设置的指引。 */}
             {notificationPermission === "default" && (
               <div className="notification-permission-row">
-                <button type="button" className="secondary" onClick={requestNotificationPermission}>申请桌面通知权限</button>
+                <button type="button" className="secondary" onClick={onRequestNotificationPermission}>申请桌面通知权限</button>
                 <small>开启后，收到新消息时会弹系统通知。</small>
               </div>
             )}
@@ -1438,7 +1438,7 @@ function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, aut
 }
 
 /* fnOS 风首页 Dashboard（04 §6.2）：统计卡 + 快捷操作 + 近期活动 */
-function Dashboard({ accounts, downloads, silentCaches, silentCacheState, me, activeDownloads, onOpenView, onAddAccount, onOpenAnnouncements }) {
+function Dashboard({ accounts, downloads, silentCaches, silentCacheState, me, activeDownloads, onOpenView, onAddAccount, latestAnnouncement }) {
   const completed = downloads.filter((item) => item.status === "completed").length;
   const stats = [
     { icon: <Users size={20} />, tone: "blue", value: accounts.length, label: `Telegram 账号${accounts.length ? ` · ${accounts.filter((item) => item.authMode === "native").length} 个原生` : ""}` },
@@ -1487,9 +1487,22 @@ function Dashboard({ accounts, downloads, silentCaches, silentCacheState, me, ac
               <button className="fn-quick-action" onClick={() => onOpenView("chats")}><MessageSquare size={18} />打开会话</button>
               <button className="fn-quick-action" onClick={onAddAccount}><Plus size={18} />添加账号</button>
               <button className="fn-quick-action" onClick={() => onOpenView("library")}><Library size={18} />资源库</button>
-              <button className="fn-quick-action" onClick={onOpenAnnouncements}><Bell size={18} />公告与通知</button>
             </div>
             {me?.username && <p style={{ color: "var(--fn-text-3)", fontSize: 13, margin: "16px 0 0" }}>当前登录：{me.username}{me.role === "admin" ? "（管理员）" : ""}</p>}
+          </div>
+        </section>
+        {/* 最新版本亮点（纯展示）：完整公告历史与未读提醒统一走顶栏铃铛，此处不再放重复入口。 */}
+        <section className="fn-card">
+          <div className="fn-card-header"><h3>最新版本</h3></div>
+          <div className="fn-card-body">
+            {latestAnnouncement ? (
+              <div className="fn-release-note">
+                <strong>{latestAnnouncement.title}</strong>
+                {latestAnnouncement.body
+                  ? latestAnnouncement.body.split("\n").slice(0, 2).map((line, index) => <small key={index}>{line}</small>)
+                  : <small>{String(latestAnnouncement.createdAt || "").slice(0, 10)}</small>}
+              </div>
+            ) : <div className="fn-empty"><Bell size={28} /><h3>暂无版本公告</h3><span>发布新版本后会在这里展示更新亮点</span></div>}
           </div>
         </section>
       </div>
@@ -2290,7 +2303,7 @@ function App() {
             activeDownloads={activeDownloads}
             onOpenView={setView}
             onAddAccount={() => { setAdminInitialTab("accounts"); setAnnouncementOpen(false); setAdminOpen(true); }}
-            onOpenAnnouncements={openAnnouncements}
+            latestAnnouncement={announcements[0] || null}
           />}
           {view === "library" && <LibraryPage accountId={accountId} silentCaches={silentCaches} onPlay={openLibraryItem} />}
           {view === "downloads" && <DownloadCenter
@@ -2449,6 +2462,8 @@ function App() {
         open={adminOpen}
         initialTab={adminInitialTab}
         onClose={() => setAdminOpen(false)}
+        notificationPermission={notificationPermission}
+        onRequestNotificationPermission={requestNotificationPermission}
         socket={socket}
         silentCacheState={silentCacheState}
         silentCaches={silentCaches}

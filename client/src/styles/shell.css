@@ -658,3 +658,21 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* Dashboard「最新版本」信息卡：纯展示版本亮点，无独立入口（完整公告走顶栏铃铛）。 */
+.fn-release-note {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fn-release-note strong {
+  color: var(--fn-text-1);
+  font-size: 15px;
+}
+
+.fn-release-note small {
+  color: var(--fn-text-3);
+  font-size: 13px;
+  line-height: 1.6;
+}
