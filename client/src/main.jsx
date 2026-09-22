@@ -31,6 +31,7 @@ import { api, appLogin, getToken, setToken as saveToken } from "./api";
 import "./styles/tokens.css";
 import "./styles/app.css";
 import "./styles/shell.css";
+import "./styles/screens.css";
 
 function cx(...items) {
   return items.filter(Boolean).join(" ");
@@ -1347,12 +1348,23 @@ function Dashboard({ accounts, downloads, silentCaches, silentCacheState, me, ac
   );
 }
 
-/* 资源库（04 §6.6）：已缓存媒体卡片网格 */
+/* 资源库（04 §6.6）：已缓存媒体卡片网格 + 筛选 Tabs */
 function LibraryPage({ accountId, silentCaches, onPlay }) {
+  const [filter, setFilter] = useState("all");
   const cached = silentCaches.filter((task) => task.status === "completed" || task.fileName);
+  const visible = filter === "all" ? cached : cached.filter((task) => (task.kind || "video") === filter);
+  const tabs = [
+    { key: "all", label: `全部 ${cached.length}` },
+    { key: "video", label: `视频 ${cached.filter((task) => (task.kind || "video") === "video").length}` },
+    { key: "image", label: `图片 ${cached.filter((task) => (task.kind || "video") === "image").length}` },
+    { key: "file", label: `文件 ${cached.filter((task) => (task.kind || "video") === "file").length}` }
+  ];
   return <div className="fn-dash">
+    <div className="fn-tabs">
+      {tabs.map((tab) => <button key={tab.key} className={cx("fn-tab", filter === tab.key && "active")} onClick={() => setFilter(tab.key)}>{tab.label}</button>)}
+    </div>
     <div className="fn-lib-grid">
-      {cached.map((task) => <button className="fn-card fn-lib-card" key={task.id} onClick={() => onPlay(task)}>
+      {visible.map((task) => <button className="fn-card fn-lib-card" key={task.id} onClick={() => onPlay(task)}>
         <span className="fn-lib-icon">{task.kind === "image" ? <Library size={18} /> : task.kind === "file" ? <Folder size={18} /> : <Play size={18} />}</span>
         <span className="fn-lib-copy">
           <strong>{task.fileName || `消息 ${task.messageId}`}</strong>
@@ -1360,9 +1372,9 @@ function LibraryPage({ accountId, silentCaches, onPlay }) {
         </span>
         {task.status && <span className={cx("fn-badge fn-badge--soft", task.status !== "completed" && `fn-badge--${task.status === "error" ? "danger" : "warning"}`)}>{task.status === "completed" ? "已缓存" : task.status === "error" ? "失败" : "缓存中"}</span>}
       </button>)}
-      {!cached.length && <div className="fn-card fn-empty" style={{ gridColumn: "1 / -1" }}>
+      {!visible.length && <div className="fn-card fn-empty" style={{ gridColumn: "1 / -1" }}>
         <Library size={28} />
-        <h3>资源库为空</h3>
+        <h3>{filter === "all" ? "资源库为空" : "该分类下暂无资源"}</h3>
         <span>开启后台缓存的会话会自动把大视频收录到这里</span>
       </div>}
     </div>

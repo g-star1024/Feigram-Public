@@ -1,0 +1,401 @@
+/*
+ * Feigram fnOS 核心四屏重设计（U3）
+ * 依据：outputs/04-feigram-ui-upgrade.md §6.3–6.6
+ * 会话列表 / 聊天气泡 / 下载中心 / 资源库 —— 全部引用 --fn-* token。
+ */
+
+/* ============ 1. 会话列表（sidebar） ============ */
+
+.fn-chats .sidebar {
+  background: var(--fn-surface);
+}
+
+.fn-chats .folder-tabs {
+  background: var(--fn-surface-2);
+  border-right: 1px solid var(--fn-border);
+}
+
+.fn-chats .folder-tabs button {
+  border-radius: var(--fn-radius-sm);
+  color: var(--fn-text-2);
+  transition: background var(--fn-dur) var(--fn-ease), color var(--fn-dur) var(--fn-ease);
+}
+
+.fn-chats .folder-tabs button:hover {
+  background: var(--fn-surface-3);
+  color: var(--fn-text);
+}
+
+.fn-chats .folder-tabs button.active {
+  background: var(--fn-primary-a);
+  color: var(--fn-primary);
+}
+
+.fn-chats .folder-tabs b {
+  background: var(--fn-primary);
+  font-size: 0.7rem;
+  min-width: 20px;
+  padding: 2px 5px;
+}
+
+.fn-chats .search input {
+  background: var(--fn-surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--fn-radius-pill);
+  transition: border-color var(--fn-dur) var(--fn-ease), background var(--fn-dur) var(--fn-ease), box-shadow var(--fn-dur) var(--fn-ease);
+}
+
+.fn-chats .search input:focus {
+  background: var(--fn-surface);
+  border-color: var(--fn-primary);
+  box-shadow: 0 0 0 2px var(--fn-primary-a);
+  outline: none;
+}
+
+.fn-chats .chat-item {
+  border-radius: var(--fn-radius);
+  transition: background var(--fn-dur) var(--fn-ease);
+}
+
+.fn-chats .chat-item:hover {
+  background: var(--fn-surface-2);
+}
+
+.fn-chats .chat-item.active {
+  background: var(--fn-primary-a);
+}
+
+.fn-chats .chat-item.active .chat-copy strong {
+  color: var(--fn-primary);
+}
+
+.fn-chats .badge {
+  background: var(--fn-primary);
+  border-radius: var(--fn-radius-pill);
+  font-size: 0.72rem;
+  font-weight: 600;
+  min-width: 20px;
+  padding: 3px 6px;
+}
+
+.fn-chats .avatar {
+  box-shadow: 0 0 0 1px var(--fn-border);
+}
+
+.fn-chats .sidebar-error {
+  background: var(--fn-danger-a);
+  border: 1px solid var(--fn-danger);
+  border-radius: var(--fn-radius);
+  color: var(--fn-danger);
+  margin: 8px;
+  padding: 12px;
+}
+
+/* 文件夹：横向胶囊行（替代旧 82px 竖轨，避免文字竖排挤压） */
+.fn-chats .sidebar-main {
+  display: flex;
+  flex-direction: column;
+}
+
+.fn-chats .folder-tabs {
+  background: var(--fn-surface);
+  border-bottom: 1px solid var(--fn-border);
+  border-right: 0;
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 10px 12px;
+  scrollbar-width: none;
+}
+
+.fn-chats .folder-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.fn-chats .folder-tabs button {
+  align-items: center;
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius-pill);
+  display: inline-flex;
+  flex: none;
+  flex-direction: row;
+  gap: 6px;
+  min-height: 36px;
+  padding: 5px 14px;
+  position: relative;
+}
+
+.fn-chats .folder-tabs button span {
+  font-size: 0.85rem;
+  max-width: none;
+}
+
+.fn-chats .folder-tabs button.active {
+  border-color: var(--fn-primary);
+}
+
+.fn-chats .folder-tabs b {
+  background: var(--fn-primary);
+  font-size: 0.68rem;
+  min-width: 18px;
+  padding: 2px 5px;
+  position: static;
+}
+
+.fn-chats .chat-pane {
+  flex: 1;
+  min-height: 0;
+}
+
+/* ============ 2. 聊天（conversation + bubbles） ============ */
+
+.fn-chats .conversation {
+  background: var(--fn-bg);
+}
+
+.fn-chats .conversation-head {
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  background: var(--fn-glass);
+  border-bottom: 1px solid var(--fn-glass-brd);
+}
+
+.fn-chats .conversation-title-button h2 {
+  font-size: 1rem;
+}
+
+.fn-chats .conversation-title-button p {
+  color: var(--fn-text-3);
+  font-size: 0.82rem;
+}
+
+.fn-chats .messages {
+  padding: 20px 24px;
+}
+
+.fn-chats .bubble {
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius);
+  border-bottom-left-radius: 4px;
+  box-shadow: var(--fn-shadow-sm);
+}
+
+.fn-chats .bubble.mine {
+  background: var(--fn-primary-a);
+  border-color: transparent;
+  border-bottom-right-radius: 4px;
+}
+
+.fn-chats .bubble.mine .message-text {
+  color: var(--fn-text);
+}
+
+.fn-chats .sender-line {
+  color: var(--fn-primary);
+}
+
+.fn-chats .message-text a {
+  color: var(--fn-primary);
+}
+
+.fn-chats .bubble time {
+  color: var(--fn-text-3);
+}
+
+.fn-chats .history-button {
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius-pill);
+  box-shadow: var(--fn-shadow-sm);
+  color: var(--fn-text-2);
+}
+
+.fn-chats .history-button:hover:not(:disabled) {
+  border-color: var(--fn-primary);
+  color: var(--fn-primary);
+}
+
+.fn-chats .image-preview,
+.fn-chats .video-preview video,
+.fn-chats .video-stage,
+.fn-chats .video-load-button,
+.fn-chats .video-fallback {
+  border-radius: var(--fn-radius);
+}
+
+.fn-chats .media-grid.multi .video-stage,
+.fn-chats .media-grid.multi .video-load-button,
+.fn-chips {
+  border-radius: var(--fn-radius);
+}
+
+.fn-chats .video-cache-button {
+  backdrop-filter: blur(10px);
+  background: var(--fn-glass);
+  border: 1px solid var(--fn-glass-brd);
+  color: var(--fn-text);
+}
+
+.fn-chats .video-cache-button.done {
+  background: var(--fn-success);
+  border-color: transparent;
+  color: #fff;
+}
+
+.fn-chats .video-mode-pill {
+  background: var(--fn-glass);
+  border: 1px solid var(--fn-glass-brd);
+  color: var(--fn-text);
+}
+
+.fn-chats .inline-button-row button {
+  background: var(--fn-primary-a);
+  border: 1px solid transparent;
+  border-radius: var(--fn-radius-sm);
+  color: var(--fn-primary);
+}
+
+.fn-chats .inline-button-row button:hover:not(:disabled) {
+  background: var(--fn-primary);
+  color: #fff;
+}
+
+.fn-chats .composer {
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  background: var(--fn-glass);
+  border-top: 1px solid var(--fn-glass-brd);
+  padding: 14px 18px;
+}
+
+.fn-chats .composer textarea {
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius-pill);
+  padding: 9px 16px;
+  transition: border-color var(--fn-dur) var(--fn-ease), box-shadow var(--fn-dur) var(--fn-ease);
+}
+
+.fn-chats .composer textarea:focus {
+  border-color: var(--fn-primary);
+  box-shadow: 0 0 0 2px var(--fn-primary-a);
+  outline: none;
+}
+
+.fn-chats .composer button.primary {
+  background: var(--fn-primary);
+  border: 0;
+  border-radius: 50%;
+  height: 42px;
+  width: 42px;
+}
+
+.fn-chats .composer button.primary:hover {
+  background: var(--fn-primary-h);
+}
+
+.fn-chats .blank-state,
+.fn-chats .empty {
+  color: var(--fn-text-3);
+}
+
+.fn-chats .blank-state svg {
+  color: var(--fn-primary);
+  opacity: 0.6;
+}
+
+/* ============ 3. 下载中心 ============ */
+
+.fn-content .download-panel {
+  background: transparent;
+  border-left: 0;
+  box-shadow: none;
+}
+
+.fn-content .download-panel header {
+  background: transparent;
+  border-bottom: 0;
+  padding: 4px 4px 12px;
+}
+
+.fn-content .download-list {
+  gap: 12px;
+  overflow: visible;
+  padding: 0;
+}
+
+.fn-content .download-item {
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius);
+  box-shadow: var(--fn-shadow-sm);
+  padding: 14px 16px;
+  transition: border-color var(--fn-dur) var(--fn-ease), box-shadow var(--fn-dur) var(--fn-ease);
+}
+
+.fn-content .download-item.completed {
+  background: var(--fn-surface);
+  border-color: var(--fn-primary);
+}
+
+.fn-content .download-item.completed[role="button"]:hover {
+  box-shadow: var(--fn-shadow-md);
+}
+
+.fn-content .download-item-head strong {
+  font-size: 14px;
+}
+
+.fn-content .download-item-head span,
+.fn-content .download-meta {
+  color: var(--fn-text-3);
+}
+
+.fn-content .download-progress {
+  background: var(--fn-surface-3);
+  height: 6px;
+}
+
+.fn-content .download-progress i {
+  background: var(--fn-primary);
+  border-radius: var(--fn-radius-pill);
+}
+
+.fn-content .download-error {
+  color: var(--fn-danger);
+}
+
+.fn-content .download-actions button {
+  border-radius: var(--fn-radius-sm);
+  min-height: 30px;
+}
+
+/* ============ 4. 资源库筛选 Tabs ============ */
+
+.fn-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.fn-tab {
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius-pill);
+  color: var(--fn-text-2);
+  cursor: pointer;
+  min-height: 34px;
+  padding: 5px 16px;
+  transition: background var(--fn-dur) var(--fn-ease), color var(--fn-dur) var(--fn-ease), border-color var(--fn-dur) var(--fn-ease);
+}
+
+.fn-tab:hover {
+  color: var(--fn-text);
+}
+
+.fn-tab.active {
+  background: var(--fn-primary);
+  border-color: var(--fn-primary);
+  color: #fff;
+}
