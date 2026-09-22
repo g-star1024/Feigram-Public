@@ -21,7 +21,7 @@ const { publicSettings, readSettings, writeSettings } = require("./settings");
 const { maskProxyUrl } = require("./proxyConfig");
 const { readPolicies } = require("./policies");
 const { readAbout, readAnnouncements } = require("./releaseContent");
-const { checkForUpdates, diagnostics } = require("./diagnostics");
+const { checkForUpdates, diagnostics, clearLog } = require("./diagnostics");
 const downloaderSidecar = require("./downloaderSidecar");
 const { migrateStore, schemaVersion } = require("./migrations");
 const { rateLimit } = require("./rateLimit");
@@ -134,6 +134,19 @@ app.get("/api/admin/users", adminOnly, asyncRoute(async (_req, res) => {
 
 app.get("/api/admin/diagnostics", adminOnly, asyncRoute(async (_req, res) => {
   res.json(await diagnostics());
+}));
+
+// R4.5 · 清空日志文件（二次确认在前端完成）。仅允许 node / downloader 两个已知目标，路径由 diagnostics.clearLog 校验。
+app.post("/api/admin/diagnostics/logs/clear", adminOnly, asyncRoute(async (req, res) => {
+  const target = req.body && req.body.target;
+  if (target !== "node" && target !== "downloader") {
+    return res.status(400).json({ error: "无效的日志目标" });
+  }
+  try {
+    res.json(await clearLog(target));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 }));
 
 app.get("/api/admin/downloader", adminOnly, asyncRoute(async (_req, res) => {

@@ -520,6 +520,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
   const [selectedSilentIds, setSelectedSilentIds] = useState([]);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState("");
+  const [clearingLog, setClearingLog] = useState(null);
   const selectedSilentSet = useMemo(() => new Set(selectedSilentIds), [selectedSilentIds]);
 
   useEffect(() => {
@@ -624,6 +625,21 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
     }));
     setDownloaderState(await api("/api/admin/downloader").catch(() => null));
     setNativeAccounts(await api("/api/admin/native-accounts").catch(() => []));
+  }
+
+  // R4.5 · 清空日志：截断指定目标的日志文件，二次确认在前端完成，截断后刷新诊断。
+  async function clearLogs(target) {
+    const label = target === "downloader" ? "Go 下载服务日志" : "Node 服务日志";
+    if (!window.confirm(`确定清空${label}？该操作不可撤销，仅截断日志文件，不影响运行中的进程。`)) return;
+    setClearingLog(target);
+    try {
+      await api("/api/admin/diagnostics/logs/clear", { method: "POST", body: JSON.stringify({ target }) });
+      await loadDiagnostics();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setClearingLog(null);
+    }
   }
 
   async function refreshNativeAccounts() {
@@ -1140,15 +1156,71 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
             {updateInfo.error && <small>{updateInfo.error}</small>}
             <a href={updateInfo.url} target="_blank" rel="noreferrer">打开发布页</a>
           </div>}
-          {diagnostics?.logTail && <details className="log-details">
-            <summary>Node 服务日志（最近 200 行，含历史运行记录）</summary>
-            <pre className="log-tail system-log-tail">{diagnostics.logTail}</pre>
-          </details>}
-          {diagnostics?.downloaderLogTail && <details className="log-details">
-            <summary>Go 下载服务日志（最近 200 行，含历史运行记录）</summary>
-            <pre className="log-tail system-log-tail">{diagnostics.downloaderLogTail}</pre>
-          </details>}
+          {diagnostics?.logTail && <LogViewer
+            title="Node 服务日志（最近 200 行，含历史运行记录）"
+            entries={diagnostics?.nodeLogEntries}
+            rawTail={diagnostics?.logTail}
+            onClear={() => clearLogs("node")}
+            clearBusy={clearingLog === "node"}
+          />}
+          {diagnostics?.downloaderLogTail && <LogViewer
+            title="Go 下载服务日志（最近 200 行，含历史运行记录）"
+            entries={diagnostics?.downloaderLogEntries}
+            rawTail={diagnostics?.downloaderLogTail}
+            onClear={() => clearLogs("downloader")}
+            clearBusy={clearingLog === "downloader"}
+          />}
         </div>}
+      </div>
+    </div>
+  );
+}
+
+// R4.5 · 日志查看器：按级别（错误/警告/信息）着色 + 级别筛选 + 关键词搜索 + 清空按钮。
+// 优先使用服务端结构化 entries（diagnostics.nodeLogEntries / downloaderLogEntries），
+// 旧服务端无 entries 时回退到原始文本并做客户端分级，保证向后兼容。
+function clientClassifyLogLevel(text) {
+  if (/\b(ERROR|FATAL|ERR|PANIC|CRITICAL|FAIL|失败|错误|异常|timeout|timed out|ECONNREFUSED|ECONNRESET|SIGPIPE|panic|rejected)\b/i.test(text)) return "error";
+  if (/\b(WARN|WARNING|警告|DEPRECATED|FLOOD_WAIT|rate.?limit)\b/i.test(text)) return "warn";
+  return "info";
+}
+
+function LogViewer({ title, entries, rawTail, onClear, clearBusy }) {
+  const [levelFilter, setLevelFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const source = entries && entries.length
+    ? entries
+    : (rawTail ? rawTail.split("\n").map((t) => t.replace(/\s+$/, "")).filter(Boolean).map((text) => ({ level: clientClassifyLogLevel(text), text })) : []);
+  const filtered = source.filter((e) =>
+    (levelFilter === "all" || e.level === levelFilter) &&
+    (!search || e.text.toLowerCase().includes(search.toLowerCase()))
+  );
+  const counts = source.reduce((acc, e) => { acc[e.level] = (acc[e.level] || 0) + 1; return acc; }, {});
+  return (
+    <div className="log-viewer">
+      <div className="log-viewer-head">
+        <strong>{title}</strong>
+        <span className="log-counts">
+          <span className="lc-error">{counts.error || 0} 错误</span>
+          <span className="lc-warn">{counts.warn || 0} 警告</span>
+          <span className="lc-info">{counts.info || 0} 信息</span>
+        </span>
+        {onClear && <button className="icon-button danger-button" type="button" disabled={clearBusy} onClick={onClear}>清空日志</button>}
+      </div>
+      <div className="log-toolbar">
+        <div className="log-level-filter">
+          {["all", "error", "warn", "info"].map((lv) => (
+            <button key={lv} className={cx("log-level-btn", levelFilter === lv && "active")} type="button" onClick={() => setLevelFilter(lv)}>
+              {lv === "all" ? "全部" : lv === "error" ? "错误" : lv === "warn" ? "警告" : "信息"}
+            </button>
+          ))}
+        </div>
+        <input className="log-search" placeholder="搜索日志内容…" value={search} onChange={(e) => setSearch(e.target.value)} />
+      </div>
+      <div className="log-lines">
+        {filtered.length ? filtered.map((e, i) => (
+          <div className={`log-line ${e.level}`} key={i}>{e.text}</div>
+        )) : <div className="empty">没有匹配的日志</div>}
       </div>
     </div>
   );

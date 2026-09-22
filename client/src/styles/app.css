@@ -1554,8 +1554,7 @@ textarea {
 .diagnostics-grid span,
 .update-card,
 .cache-speed-card,
-.diagnostics-paths,
-.log-tail {
+.diagnostics-paths {
   background: var(--fn-surface-2);
   border: 1px solid var(--fn-border);
   border-radius: var(--fn-radius);
@@ -1651,22 +1650,8 @@ textarea {
   text-decoration: none;
 }
 
-.log-tail {
-  color: var(--fn-text-2);
-  font-size: 0.78rem;
-  max-height: 220px;
-  overflow: auto;
-  padding: 12px;
-  white-space: pre-wrap;
-}
-
 .cache-speed-json {
   max-height: 150px;
-}
-
-.system-log-tail {
-  min-height: 180px;
-  max-height: 380px;
 }
 
 .message-row.jump-highlight .bubble {
@@ -1726,32 +1711,106 @@ textarea {
   color: var(--fn-text);
 }
 
-/* 诊断页日志折叠：默认收起，避免历史日志刷屏淹没结构化信息。 */
-.log-details {
+/* R4.5 · 诊断页日志查看器：分级着色 + 级别筛选 + 搜索 + 清空 */
+.log-viewer {
+  background: var(--fn-surface-2);
   border: 1px solid var(--fn-border);
   border-radius: var(--fn-radius);
-  background: var(--fn-surface-2);
+  display: grid;
+  gap: 10px;
+  padding: 12px;
 }
 
-.log-details summary {
+.log-viewer-head {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.log-viewer-head strong {
+  color: var(--fn-text);
+  font-size: 0.88rem;
+}
+
+.log-counts {
+  display: flex;
+  gap: 8px;
+  font-size: 0.74rem;
+}
+
+.log-counts .lc-error { color: var(--fn-danger); }
+.log-counts .lc-warn { color: var(--fn-warning); }
+.log-counts .lc-info { color: var(--fn-text-3); }
+
+.log-toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.log-level-filter {
+  display: flex;
+  gap: 4px;
+}
+
+.log-level-btn {
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius-pill);
   color: var(--fn-text-2);
   cursor: pointer;
-  font-size: 0.82rem;
-  padding: 10px 12px;
-  user-select: none;
+  font-size: 0.76rem;
+  padding: 4px 12px;
 }
 
-.log-details summary:hover {
+.log-level-btn.active {
+  background: var(--fn-primary);
+  border-color: var(--fn-primary);
+  color: #fff;
+}
+
+.log-search {
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius-pill);
   color: var(--fn-text);
+  flex: 1;
+  min-width: 160px;
+  padding: 6px 12px;
 }
 
-.log-details[open] summary {
-  border-bottom: 1px solid var(--fn-border);
+.log-lines {
+  background: var(--fn-bg);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius-sm);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  max-height: 340px;
+  overflow: auto;
+  padding: 8px 10px;
 }
 
-.log-details .log-tail {
-  border: none;
-  border-radius: 0 0 var(--fn-radius) var(--fn-radius);
+.log-line {
+  color: var(--fn-text-2);
+  padding: 1px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-line.error {
+  color: var(--fn-danger);
+}
+
+.log-line.warn {
+  color: var(--fn-warning);
+}
+
+.log-line.info {
+  color: var(--fn-text-2);
 }
 
 /* 账号健康状态徽标 */

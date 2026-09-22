@@ -34,6 +34,25 @@ async function tail(filePath, maxBytes = 16000) {
   }
 }
 
+// R4.5 · 日志分级：把原始日志行按内容归类为 error / warn / info，供前端着色与过滤。
+// Node 侧日志为 console 文本、Go 侧为 slog JSON，二者格式不一，故用内容关键字分类而非解析结构，
+// 保证不依赖具体日志格式也能稳定着色（纯函数，可单测）。
+function classifyLogLevel(text) {
+  if (/\b(ERROR|FATAL|ERR|PANIC|CRITICAL|FAIL|失败|错误|异常|timeout|timed out|ECONNREFUSED|ECONNRESET|SIGPIPE|panic|rejected)\b/i.test(text)) return "error";
+  if (/\b(WARN|WARNING|警告|DEPRECATED|FLOOD_WAIT|rate.?limit)\b/i.test(text)) return "warn";
+  return "info";
+}
+
+// parseLogEntries 把多行日志文本切成结构化条目；空文本返回空数组。
+function parseLogEntries(text) {
+  if (!text) return [];
+  return text
+    .split("\n")
+    .map((line) => line.replace(/\s+$/, ""))
+    .filter((line) => line.length > 0)
+    .map((text) => ({ level: classifyLogLevel(text), text }));
+}
+
 async function diagnostics() {
   const settings = await readSettings();
   const [downloadData, silentData, meta, downloader] = await Promise.all([
@@ -43,6 +62,10 @@ async function diagnostics() {
     downloaderSidecar.health()
   ]);
   const cacheBase = settings.cacheBaseDir || process.env.DOWNLOAD_DIR || path.join(dataDir, "downloads");
+  const logFile = process.env.LOG_FILE || "";
+  const downloaderLogFile = process.env.FEIGRAM_DOWNLOADER_LOG || "";
+  const logTail = await tail(logFile);
+  const downloaderLogTail = await tail(downloaderLogFile, 8000);
   return {
     app: {
       name: "Feigram",
@@ -57,8 +80,8 @@ async function diagnostics() {
     paths: {
       dataDir,
       cacheBase,
-      logFile: process.env.LOG_FILE || "",
-      downloaderLogFile: process.env.FEIGRAM_DOWNLOADER_LOG || ""
+      logFile,
+      downloaderLogFile
     },
     downloader,
     cache: {
@@ -66,9 +89,23 @@ async function diagnostics() {
       downloadTasks: (downloadData.tasks || []).length,
       silentCacheTasks: (silentData.tasks || []).length
     },
-    logTail: await tail(process.env.LOG_FILE),
-    downloaderLogTail: await tail(process.env.FEIGRAM_DOWNLOADER_LOG, 8000)
+    logTail,
+    downloaderLogTail,
+    nodeLogEntries: parseLogEntries(logTail),
+    downloaderLogEntries: parseLogEntries(downloaderLogTail)
   };
+}
+
+// R4.5 · 清空日志文件：仅允许 node / downloader 两个已知目标，路径必须来自环境变量且为绝对路径，
+// 杜绝任意路径截断。截断前确保文件存在（运行中进程可能尚未写出该文件）。
+async function clearLog(target) {
+  if (target !== "node" && target !== "downloader") throw new Error("无效的日志目标");
+  const file = target === "downloader" ? process.env.FEIGRAM_DOWNLOADER_LOG : process.env.LOG_FILE;
+  if (!file) throw new Error("未配置日志文件路径，无法清空");
+  if (!path.isAbsolute(file)) throw new Error("日志路径非法，已拒绝清空");
+  await fs.ensureFile(file);
+  await fsp.truncate(file, 0);
+  return { ok: true, target, file };
 }
 
 async function checkForUpdates() {
@@ -98,5 +135,8 @@ async function checkForUpdates() {
 
 module.exports = {
   checkForUpdates,
-  diagnostics
+  diagnostics,
+  clearLog,
+  parseLogEntries,
+  classifyLogLevel
 };
