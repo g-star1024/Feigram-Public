@@ -172,7 +172,7 @@ textarea {
   position: relative;
 }
 .icon-button.has-notice::after {
-  background: #ff6b6b;
+  background: var(--fn-danger);
   border: 2px solid var(--fn-surface);
   border-radius: 50%;
   content: "";
@@ -184,19 +184,19 @@ textarea {
 }
 
 .error {
-  background: rgba(226, 75, 75, 0.14);
-  border: 1px solid rgba(226, 75, 75, 0.3);
+  background: var(--fn-danger-a);
+  border: 1px solid var(--fn-danger);
   border-radius: 8px;
-  color: #ff8c8c;
+  color: var(--fn-danger);
   margin: 12px 0;
   padding: 10px 12px;
 }
 
 .success {
-  background: rgba(36, 120, 108, 0.14);
-  border: 1px solid rgba(36, 120, 108, 0.3);
+  background: var(--fn-success-a);
+  border: 1px solid var(--fn-success);
   border-radius: 8px;
-  color: #73d5c6;
+  color: var(--fn-success);
   margin: 12px 0;
   padding: 10px 12px;
 }
@@ -206,10 +206,10 @@ textarea {
 }
 
 .sidebar-error {
-  background: rgba(226, 75, 75, 0.12);
-  border: 1px solid rgba(226, 75, 75, 0.28);
+  background: var(--fn-danger-a);
+  border: 1px solid var(--fn-danger);
   border-radius: 8px;
-  color: #ff8c8c;
+  color: var(--fn-danger);
   display: grid;
   gap: 8px;
   margin: 4px 6px 12px;
@@ -224,19 +224,19 @@ textarea {
 }
 
 .sidebar-error button {
-  background: rgba(226, 75, 75, 0.16);
-  border: 1px solid rgba(226, 75, 75, 0.28);
+  background: var(--fn-danger);
+  border: 1px solid transparent;
   border-radius: 8px;
-  color: inherit;
+  color: #fff;
   min-height: 34px;
 }
 
 .toast-banner {
-  background: rgba(226, 75, 75, 0.94);
-  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
   border-radius: 8px;
-  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.3);
-  color: white;
+  box-shadow: var(--fn-shadow-md);
+  color: var(--fn-text);
   left: 50%;
   max-width: min(720px, calc(100vw - 32px));
   padding: 10px 14px;
@@ -753,8 +753,8 @@ textarea {
 .video-cache-button {
   align-items: center;
   backdrop-filter: blur(10px);
-  background: rgba(16, 24, 22, 0.74);
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: var(--fn-glass);
+  border: 1px solid var(--fn-glass-brd);
   border-radius: 999px;
   color: #fff;
   display: inline-flex;
@@ -773,7 +773,7 @@ textarea {
 }
 
 .video-cache-button.done {
-  background: rgba(29, 128, 112, 0.88);
+  background: var(--fn-success);
 }
 .local-player-link {
   align-items: center;
@@ -840,7 +840,7 @@ textarea {
 }
 
 .inline-button-row button:hover {
-  background: rgba(95, 183, 255, 0.12);
+  background: var(--fn-primary-a);
 }
 
 .inline-button-row button:disabled {
@@ -880,7 +880,7 @@ textarea {
 
 .download-layer {
   align-items: stretch;
-  background: rgba(8, 14, 12, 0.28);
+  background: rgba(15, 18, 23, 0.32);
   display: flex;
   inset: 0;
   justify-content: flex-end;
@@ -988,9 +988,9 @@ textarea {
 }
 
 .download-progress {
-  background: rgba(127, 143, 137, 0.22);
+  background: var(--fn-surface-3);
   border-radius: 999px;
-  height: 7px;
+  height: 6px;
   overflow: hidden;
 }
 
@@ -1002,7 +1002,7 @@ textarea {
 }
 
 .download-error {
-  color: #ff7b7b;
+  color: var(--fn-danger);
   font-size: 0.82rem;
   margin: 0;
   overflow-wrap: anywhere;
@@ -1507,7 +1507,7 @@ textarea {
 }
 
 .danger-button {
-  color: #ff8c8c;
+  color: var(--fn-danger);
 }
 
 .user-row {
@@ -1670,7 +1670,7 @@ textarea {
 }
 
 .message-row.jump-highlight .bubble {
-  box-shadow: 0 0 0 2px #5fb7ff, 0 0 0 8px rgba(95, 183, 255, 0.18);
+  box-shadow: 0 0 0 2px var(--fn-primary), 0 0 0 8px var(--fn-primary-a);
   transition: box-shadow 160ms ease;
 }
 
@@ -1805,7 +1805,7 @@ textarea {
 }
 
 .mini-progress {
-  background: rgba(97, 112, 107, 0.18);
+  background: var(--fn-surface-3);
   border-radius: 999px;
   height: 5px;
   overflow: hidden;
@@ -1883,13 +1883,7 @@ textarea {
   border-radius: 10px;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--text-muted, #6b7280);
-  background: var(--surface-2, #f1f5f9);
-  border: 1px solid var(--border, #e5e7eb);
-}
-
-:root.dark .legal-notice {
-  color: #9aa4b2;
-  background: #1c2530;
-  border-color: #2a3645;
+  color: var(--fn-text-2);
+  background: var(--fn-warning-a);
+  border: 1px solid var(--fn-warning);
 }
