@@ -241,6 +241,30 @@ function accountPeer({ userId, accountId, peer }) {
   return request(accountChatPath(accountId, "peer", { userId, peer }), { timeoutMs: 30000 });
 }
 
+// --- M4.3: Go Telegram Core 写路径与会话详情 ---
+// sendText / clickMessageButton / chatDetails 三个函数在 native 账号下没有 GramJS 客户端可用，
+// 统一改由 Go 原生 MTProto 提供（对应 downloader/cmd/feigram-downloader/chatwrite.go）。
+
+function accountSend({ userId, accountId, peer, text }) {
+  return request(accountChatPath(accountId, "send", { userId, peer }), {
+    method: "POST",
+    body: JSON.stringify({ text: String(text || "") }),
+    timeoutMs: 45000
+  });
+}
+
+function accountButton({ userId, accountId, peer, message, data }) {
+  return request(accountChatPath(accountId, "button", { userId, peer, message }), {
+    method: "POST",
+    body: JSON.stringify({ data: String(data || "") }),
+    timeoutMs: 45000
+  });
+}
+
+function accountDetails({ userId, accountId, peer, limit = 0, before = 0 }) {
+  return request(accountChatPath(accountId, "details", { userId, peer, limit, before }), { timeoutMs: 45000 });
+}
+
 // 头像是二进制，不能用 JSON request()，单独走 arrayBuffer。
 async function accountAvatar({ userId, accountId, peer }) {
   const controller = new AbortController();
@@ -293,5 +317,8 @@ module.exports = {
   accountMessages,
   accountMedia,
   accountPeer,
-  accountAvatar
+  accountAvatar,
+  accountSend,
+  accountButton,
+  accountDetails
 };

@@ -1263,6 +1263,12 @@ async function listMessages(userId, accountId, peerId, limit = 50, before = 0, a
 
 async function chatDetails(userId, accountId, peerId) {
   return foregroundTelegramOperation(accountId, async () => {
+  // M4.3：native 账号没有 GramJS 客户端（getClient 抛 409），会话详情改由 Go 原生 MTProto 提供，
+  // 返回字段与 GramJS 分支完全一致（id/rawId/title/username/type/about/participantsCount/
+  // mediaSummary/files/nextMediaBefore/hasMoreMedia），保证 UI 行为不变（铁律 3）。
+  if (await nativeAccountRecord(userId, accountId)) {
+    return downloaderSidecar.accountDetails({ userId, accountId, peer: peerId, limit: 30 });
+  }
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
   const chat = serializeEntity(entity);
@@ -1327,6 +1333,10 @@ async function chatMedia(userId, accountId, peerId, { before = 0, limit = 30 } =
 
 async function sendText(userId, accountId, peerId, text) {
   return foregroundTelegramOperation(accountId, async () => {
+  // M4.3：native 账号走 Go 原生 MTProto 写路径；GramJS 分支保持原样（铁律 3：不改行为）。
+  if (await nativeAccountRecord(userId, accountId)) {
+    return downloaderSidecar.accountSend({ userId, accountId, peer: peerId, text });
+  }
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
   const message = await withTimeout(client.sendMessage(entity, { message: text }), 15000, "发送消息超时，请稍后再试");
@@ -1338,6 +1348,10 @@ async function sendText(userId, accountId, peerId, text) {
 async function clickMessageButton(userId, accountId, peerId, messageId, data) {
   return foregroundTelegramOperation(accountId, async () => {
   if (!data) throw Object.assign(new Error("这个按钮暂不支持点击"), { status: 400 });
+  // M4.3：native 账号的按钮回调由 Go 的 messages.getBotCallbackAnswer 提供。
+  if (await nativeAccountRecord(userId, accountId)) {
+    return downloaderSidecar.accountButton({ userId, accountId, peer: peerId, message: messageId, data });
+  }
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
   let answer;
