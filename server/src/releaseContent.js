@@ -14,6 +14,18 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.1.1",
+    title: "Feigram 2.1.1 更新",
+    version: "2.1.1",
+    level: "success",
+    createdAt: "2026-09-22T07:30:00.000Z",
+    body: [
+      "修复公告弹窗交互问题：此前点击顶栏铃铛可能毫无反应（浏览器通知权限申请在部分环境下长时间不返回，阻塞了弹窗打开）。",
+      "公告弹窗新增背板点击关闭；关闭按钮改为醒目的圆形按钮；Esc 键关闭保持可用。",
+      "修复弹窗与管理后台叠加时可能互相遮挡、无法关闭的问题：现在弹窗之间互斥打开。"
+    ].join("\n")
+  },
+  {
     id: "release-2.1.0",
     title: "Feigram 2.1.0 更新",
     version: "2.1.0",

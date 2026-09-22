@@ -27,7 +27,7 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.1.0"
+export APP_VERSION="2.1.1"
 export APP_CHANGELOG="修复二维码轮询重叠导致 rpcDoRequest engine was closed、native 未就绪任务每秒失败循环；任务会自动 HTTP 回退，二维码改为居中大弹窗并串行轮询。"
 export NODE_ENV="production"
 

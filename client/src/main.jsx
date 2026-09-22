@@ -1106,7 +1106,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
 function InfoModal({ announcements, about, open, onClose }) {
   if (!open) return null;
   return (
-    <div className="modal-backdrop">
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <div className="modal announcement-modal" role="dialog" aria-modal="true" aria-label="公告与关于">
         <button className="close" onClick={onClose} title="关闭"><X size={18} /></button>
         <h2>公告</h2>
@@ -1923,12 +1923,28 @@ function App() {
     }
   }
 
-  async function enableNotifications() {
-    if ("Notification" in window && Notification.permission !== "granted") {
-      setNotifications(await Notification.requestPermission() === "granted");
-    }
+  function openAnnouncements() {
     if (newestAnnouncementId) localStorage.setItem("feigrame.lastAnnouncement", newestAnnouncementId);
+    /* 模态互斥：防止公告弹窗与管理后台叠加（叠加时 backdrop 会吞掉下层弹窗的点击，
+       且 Esc 关闭顺序与视觉层级相反——2026-09-22「公告关不掉」缺陷的叠加态来源）。 */
+    setAdminOpen(false);
     setAnnouncementOpen(true);
+  }
+
+  /* 通知权限申请绝不能阻塞公告弹窗：requestPermission 在部分环境（WebView/iframe/页面未聚焦）
+     可能长期不 resolve（2026-09-22 真实浏览器实测挂起 >1.5s 且永不返回），此前先 await 它再开弹窗，
+     导致点击铃铛毫无反应。现在改为不等待：申请异步进行，8 秒超时兜底，失败/超时一律按未授权处理。 */
+  async function requestNotificationPermission() {
+    if (!("Notification" in window) || Notification.permission !== "default") return;
+    try {
+      const result = await Promise.race([
+        Notification.requestPermission(),
+        new Promise((resolve) => setTimeout(() => resolve("timeout"), 8000))
+      ]);
+      setNotifications(result === "granted");
+    } catch {
+      setNotifications(false);
+    }
   }
 
   async function loadAnnouncements() {
@@ -2066,8 +2082,8 @@ function App() {
             {activeDownloads > 0 && <b className="fn-dock-count">{activeDownloads}</b>}
           </button>
           <button className={cx("fn-dock-item", view === "library" && "active")} onClick={() => setView("library")} title="资源库" aria-label="资源库"><Library size={20} /><span>资源库</span></button>
-          <button className="fn-dock-item" onClick={() => { setAdminInitialTab("accounts"); setAdminOpen(true); }} title={me?.role === "admin" ? "管理员后台" : "账号后台"} aria-label="管理"><Users size={20} /><span>管理</span></button>
-          {me?.role === "admin" && <button className="fn-dock-item" onClick={() => { setAdminInitialTab("server"); setAdminOpen(true); }} title="设置" aria-label="设置"><Settings size={20} /><span>设置</span></button>}
+          <button className="fn-dock-item" onClick={() => { setAdminInitialTab("accounts"); setAnnouncementOpen(false); setAdminOpen(true); }} title={me?.role === "admin" ? "管理员后台" : "账号后台"} aria-label="管理"><Users size={20} /><span>管理</span></button>
+          {me?.role === "admin" && <button className="fn-dock-item" onClick={() => { setAdminInitialTab("server"); setAnnouncementOpen(false); setAdminOpen(true); }} title="设置" aria-label="设置"><Settings size={20} /><span>设置</span></button>}
         </div>
         <div className="fn-dock-foot">
           <button className="fn-dock-item" onClick={toggleTheme} title="切换主题" aria-label="切换主题">{theme === "dark" ? <Sun size={20} /> : <Moon size={20} />}<span>主题</span></button>
@@ -2080,7 +2096,7 @@ function App() {
             {view === "chats" && activeChat && <small>/ {activeChat.title}</small>}
           </div>
           <div className="fn-topbar-actions">
-            <button className={cx("icon-button", unreadAnnouncement && "has-notice")} onClick={enableNotifications} title="通知与公告" aria-label="通知与公告"><Bell size={18} /></button>
+            <button className={cx("icon-button", unreadAnnouncement && "has-notice")} onClick={() => { openAnnouncements(); requestNotificationPermission(); }} title="通知与公告" aria-label="通知与公告"><Bell size={18} /></button>
           </div>
         </header>
         <div className={cx("fn-content", view === "chats" && "fn-content--flush")}>
@@ -2092,8 +2108,8 @@ function App() {
             me={me}
             activeDownloads={activeDownloads}
             onOpenView={setView}
-            onAddAccount={() => { setAdminInitialTab("accounts"); setAdminOpen(true); }}
-            onOpenAnnouncements={enableNotifications}
+            onAddAccount={() => { setAdminInitialTab("accounts"); setAnnouncementOpen(false); setAdminOpen(true); }}
+            onOpenAnnouncements={openAnnouncements}
           />}
           {view === "library" && <LibraryPage accountId={accountId} silentCaches={silentCaches} onPlay={openLibraryItem} />}
           {view === "downloads" && <DownloadCenter
@@ -2123,7 +2139,7 @@ function App() {
             }} title="切换 Telegram 账号">
               {accounts.map((account) => <option key={account.id} value={account.id}>{account.displayName || account.label}</option>)}
             </select>}
-          </> : <button className="secondary action-button" onClick={() => { setAdminInitialTab("accounts"); setAdminOpen(true); }}><Plus size={18} />添加 Telegram 账号</button>}
+          </> : <button className="secondary action-button" onClick={() => { setAdminInitialTab("accounts"); setAnnouncementOpen(false); setAdminOpen(true); }}><Plus size={18} />添加 Telegram 账号</button>}
         </div>
         <div className="sidebar-main">
           {appSettings.foldersEnabled && <nav className="folder-tabs">
@@ -2134,7 +2150,7 @@ function App() {
               <Folder size={24} /><span>{folder.emoticon ? `${folder.emoticon} ` : ""}{folder.title}</span>
               {!!folder.chatIds?.length && <b>{folder.chatIds.length}</b>}
             </button>)}
-            <button onClick={() => { setAdminInitialTab("folders"); setAdminOpen(true); }}>
+            <button onClick={() => { setAdminInitialTab("folders"); setAnnouncementOpen(false); setAdminOpen(true); }}>
               <SlidersHorizontal size={24} /><span>编辑</span>
             </button>
           </nav>}

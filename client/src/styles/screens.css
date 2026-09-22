@@ -407,10 +407,22 @@
 }
 
 .modal .close {
+  align-items: center;
+  background: var(--fn-surface-2);
+  border: 1px solid var(--fn-border);
+  border-radius: 999px;
   color: var(--fn-text-2);
+  cursor: pointer;
+  display: flex;
+  height: 32px;
+  justify-content: center;
+  padding: 0;
+  width: 32px;
 }
 
 .modal .close:hover {
+  background: var(--fn-danger-a);
+  border-color: var(--fn-danger);
   color: var(--fn-danger);
 }
 
