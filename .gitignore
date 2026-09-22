@@ -11,3 +11,4 @@ fnos-native-package/app/bin/node
 fnos-native-package/app/bin/feigram-downloader
 fnos-native-package/app/bin/ffmpeg
 fnos-native-package/app/bin/ffprobe
+*.tmp

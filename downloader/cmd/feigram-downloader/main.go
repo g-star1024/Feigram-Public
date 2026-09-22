@@ -435,6 +435,27 @@ func (a *App) pump() {
 	}
 }
 
+// taskCanStartLocked 判定任务此刻是否具备启动条件（调用方须持 a.mu）。
+// 语义比 download() 的运行时处理**更严格一层**（提前止损，而非起了再失败）：
+//   - http-bridge：必须有可拉取的 SourceURL；
+//   - native-mtproto：账号 eligible；或账号不健康但带 SourceURL（运行时会自动回退 HTTP）。
+//
+// 注意：download() 在「账号不可用 + 无 SourceURL」时仍会尝试 native（保留原行为），
+// 而调度层在此直接跳过不启动——坏账号任务不占并发坑，等账号恢复后自然可再跑。
+func (a *App) taskCanStartLocked(task *Task, transport string) bool {
+	switch transport {
+	case "http-bridge":
+		return task.SourceURL != ""
+	case "native-mtproto":
+		if account, ok := a.native[nativeAccountKey(task.UserID, task.AccountID)]; ok && nativeAccountEligible(*account) {
+			return true
+		}
+		return task.SourceURL != ""
+	default:
+		return false
+	}
+}
+
 func (a *App) pumpOnce() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -461,7 +482,10 @@ func (a *App) pumpOnce() bool {
 			continue
 		}
 		transport := a.taskTransport(task)
-		if transport == "http-bridge" && task.SourceURL == "" {
+		// R4.7：跨账号高速（fast）批量缓存时，绑定到坏账号的任务若照常起 goroutine，
+		// 会占满并发坑、空跑到失败，把整批任务拖死。调度前统一校验，不具备可启动条件
+		// （HTTP 无源 / native 账号不健康）的任务先不调度，账号恢复后自然可再跑。
+		if !a.taskCanStartLocked(&task, transport) {
 			continue
 		}
 		if task.RetryAfter > nowUnix {
@@ -1731,6 +1755,14 @@ func (a *App) nativeReadyLocked() bool {
 }
 
 func nativeAccountEligible(account NativeAccount) bool {
+	// R4.7：此前只看 Ready/HealthPasses/Session/API，不看 Status 字符串。
+	// 而 normalizeNativeStatus 在 Ready=true 时会无条件判 healthy，一旦坏账号残留
+	// Ready=true（登出/失败后未清），就会被当就绪、进入"可用账号集合"，拖垮批量任务。
+	// 这里显式排除 needs-relogin / failed。
+	switch strings.TrimSpace(account.Status) {
+	case "needs-relogin", "failed":
+		return false
+	}
 	return account.Ready && account.HealthPasses >= 2 && account.Session != "" && account.APIID > 0 && account.APIHash != ""
 }
 
