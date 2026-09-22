@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# FPK 包内容级核证：不能只看「构建脚本 exit 0 / 文件名」，
+# 必须解包核对版本号是否贯穿到包内各处（2.0.45 事故：包名新、包内旧）。
+#
+# 核对：
+#   - manifest version 与目标版本一致；
+#   - cmd/main APP_VERSION 与目标版本一致；
+#   - app.tgz 内 releaseContent.js 置顶公告为目标版本；
+#   - gzip 完整性；
+#   - Go 二进制/前端 bundle 存在。
+#
+# 用法：bash scripts/verify-fpk.sh <version> [fpk_path]
+#   fpk_path 缺省取 release/feigrampub-<version>.fpk
+set -euo pipefail
+
+VERSION="${1:-}"
+if [ -z "$VERSION" ]; then
+  echo "用法：bash scripts/verify-fpk.sh <version> [fpk_path]" >&2
+  exit 1
+fi
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+FPK="${2:-${ROOT}/release/feigrampub-${VERSION}.fpk}"
+
+if [ ! -f "$FPK" ]; then
+  echo "找不到 FPK：$FPK" >&2
+  exit 1
+fi
+
+PY="${PYTHON:-$(command -v python3 || echo /Users/huluobo/.workbuddy/binaries/python/versions/3.13.12/bin/python3)}"
+ok=1
+say() { if [ "$1" = "0" ]; then echo "  PASS  $2"; else echo "  FAIL  $2"; ok=0; fi; }
+
+echo "核证 $(basename "$FPK")"
+
+# 完整性
+gzip -t "$FPK" && say 0 "gzip 完整性" || say 1 "gzip 完整性"
+
+# manifest version
+MAN_VERSION="$(tar -xzOf "$FPK" manifest | grep -E '^version=' | head -1 | cut -d= -f2)"
+[ "$MAN_VERSION" = "$VERSION" ] && say 0 "manifest version=${VERSION}" || say 1 "manifest version（实际 ${MAN_VERSION}）"
+
+# cmd/main APP_VERSION
+APPVER="$(tar -xzOf "$FPK" cmd/main | grep -E '^export APP_VERSION=' | head -1 | sed -E 's/.*="([^"]*)".*/\1/')"
+[ "$APPVER" = "$VERSION" ] && say 0 "cmd/main APP_VERSION=${VERSION}" || say 1 "cmd/main APP_VERSION（实际 ${APPVER}）"
+
+# app.tgz 内置顶公告版本
+TOP_ID="$(tar -xzOf "$FPK" app.tgz | tar -xzO ./server/src/releaseContent.js 2>/dev/null \
+  | grep -E 'id: "release-' | head -1 | sed -E 's/.*release-([^"]*)".*/\1/')"
+[ "$TOP_ID" = "$VERSION" ] && say 0 "应用内置顶公告 release-${VERSION}" || say 1 "置顶公告（实际 ${TOP_ID}）"
+
+# 包内 Go 二进制与前端 bundle 存在（均在 app.tgz 内，归档路径无 app/ 前缀）
+APP_LISTING="$(tar -xzOf "$FPK" app.tgz | tar -tz 2>/dev/null)"
+echo "$APP_LISTING" | grep -Eq 'bin/feigram-downloader$' \
+  && say 0 "包含 Go 下载器二进制" || say 1 "缺少 Go 下载器二进制"
+echo "$APP_LISTING" | grep -Eq 'server/public/assets/index-.*\.(js|css)$' \
+  && say 0 "包含前端 bundle" || say 1 "缺少前端 bundle"
+
+echo
+if [ "$ok" = "1" ]; then
+  echo "FPK 核证通过：${VERSION}"
+else
+  echo "FPK 核证失败：${VERSION}"
+  exit 1
+fi

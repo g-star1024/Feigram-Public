@@ -14,6 +14,19 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.3.0",
+    title: "Feigram 2.3.0 更新",
+    version: "2.3.0",
+    level: "success",
+    createdAt: "2026-09-22T13:37:51.000Z",
+    body: [
+      "健康检查自动化：登录成功后自动执行健康检查；无缓存文件时自动抽样低体积媒体验证文件池；每 30 分钟定时巡检，账号状态变化实时推送到界面，无需手动刷新。",
+      "媒体源自动升级：有账号通过健康检查后，自动把媒体源从 HTTP 桥接切换到 Go 原生 MTProto，兑现原生下载速度；每进程只自动升级一次，仍保留手动回退。",
+      "E2E 回归入库：端到端脚本整理到 scripts/e2e（含零预置数据的首次登录路径），支持 npm run e2e 一键全量回归，便于后续持续核证。",
+      "发版工具化：新增 scripts/bump-version.sh 一键同步版本五处真源、scripts/verify-fpk.sh 解包核证，避免版本号漏改。"
+    ].join("\n")
+  },
+  {
     id: "release-2.2.0",
     title: "Feigram 2.2.0 更新",
     version: "2.2.0",

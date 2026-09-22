@@ -101,7 +101,7 @@ c = replace_once(c, r'^export APP_CHANGELOG="[^"]*"', f'export APP_CHANGELOG="{s
 write(p, c)
 
 # ④ releaseContent.js —— 在 announcements 数组开头插入新公告
-body_lines = ",\n".join(json.dumps(b, ensure_ascii=False) for b in bullets)
+body_lines = ",\n      ".join(json.dumps(b, ensure_ascii=False) for b in bullets)
 entry = (
     '  {\n'
     f'    id: "release-{version}",\n'
