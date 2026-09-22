@@ -7,7 +7,8 @@
     "dev": "concurrently \"npm --prefix server run dev\" \"npm --prefix client run dev\"",
     "install:all": "npm --prefix server install && npm --prefix client install",
     "build": "npm --prefix client run build && rm -rf server/public && cp -R client/dist server/public",
-    "start": "npm --prefix server start"
+    "start": "npm --prefix server start",
+    "e2e": "bash scripts/e2e/run.sh"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
