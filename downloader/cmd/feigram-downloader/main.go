@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -38,6 +39,31 @@ const (
 )
 
 var migrateRe = regexp.MustCompile(`(?:FILE|PHONE|NETWORK|USER)?_?MIGRATE_([0-9]+)`)
+
+// M5.2：结构化日志（级别/账号/任务维度）。
+// 默认 JSON 输出到 stdout，级别由 LOG_LEVEL 环境变量控制（debug/info/warn/error，默认 info）。
+var appLog = newAppLogger()
+
+func newAppLogger() *slog.Logger {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+}
+
+// taskLog 返回携带 task/account 维度的结构化日志器，便于按任务与账号检索。
+func taskLog(taskID, account string) *slog.Logger {
+	return appLog.With(slog.String("task", taskID), slog.String("account", account))
+}
+
+// storeSchemaVersion 是 Go 下载服务自有数据 schema 的当前版本，用于健康/状态接口暴露。
+const storeSchemaVersion = 1
 
 type Config struct {
 	Enabled      bool   `json:"enabled"`
@@ -1132,13 +1158,15 @@ func (a *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":        true,
-		"version":   version,
-		"pid":       os.Getpid(),
-		"uptime":    int(time.Since(a.startedAt).Seconds()),
-		"taskCount": len(a.tasks),
-		"running":   len(a.running),
-		"config":    a.config,
+		"ok":            true,
+		"version":       version,
+		"schemaVersion": storeSchemaVersion,
+		"pid":           os.Getpid(),
+		"uptime":        int(time.Since(a.startedAt).Seconds()),
+		"taskCount":     len(a.tasks),
+		"running":       len(a.running),
+		"accounts":      a.accountsSummaryLocked(),
+		"config":        a.config,
 	})
 }
 
@@ -1453,6 +1481,7 @@ func (a *App) stateLocked() map[string]any {
 	return map[string]any{
 		"ok":            true,
 		"version":       version,
+		"schemaVersion": storeSchemaVersion,
 		"pid":           os.Getpid(),
 		"uptime":        int(time.Since(a.startedAt).Seconds()),
 		"dataDir":       a.dataDir,
@@ -1463,7 +1492,28 @@ func (a *App) stateLocked() map[string]any {
 		"tasks":         tasks,
 		"transport":     transport,
 		"nativeMTProto": native,
+		"accounts":      a.accountsSummaryLocked(),
 		"strategy":      strategy,
+	}
+}
+
+// accountsSummaryLocked 在调用方已持 a.mu 锁的前提下，统计原生账号健康分布。
+func (a *App) accountsSummaryLocked() map[string]any {
+	byStatus := map[string]int{}
+	total := 0
+	healthy := 0
+	for _, account := range a.native {
+		total++
+		status := normalizeNativeStatus(account.Status, account.Ready)
+		byStatus[status]++
+		if status == "healthy" {
+			healthy++
+		}
+	}
+	return map[string]any{
+		"total":    total,
+		"healthy":  healthy,
+		"byStatus": byStatus,
 	}
 }
 
@@ -2520,7 +2570,7 @@ func (a *App) exportNativeQRToken(account NativeAccount, apiHash string) (*tg.Au
 			token = value
 			return nil
 		case *tg.AuthLoginTokenMigrateTo:
-			log.Printf("native qr export requires DC migration to %d for %s/%s", value.DCID, account.UserID, account.AccountID)
+			appLog.Info("native QR export requires DC migration", slog.Int("dc", value.DCID), slog.String("user", account.UserID), slog.String("account", account.AccountID))
 			if err := client.MigrateTo(ctx, value.DCID); err != nil {
 				return fmt.Errorf("QR token 迁移到 Telegram DC %d 失败：%w", value.DCID, err)
 			}

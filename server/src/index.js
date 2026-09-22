@@ -46,7 +46,29 @@ function asyncRoute(handler) {
   };
 }
 
-app.get("/api/health", (_req, res) => res.json({ ok: true }));
+// M5.2：健康接口扩充 schemaVersion / transport / sidecar 状态 / 账户健康分布。
+app.get("/api/health", asyncRoute(async (_req, res) => {
+  const [sidecarState, sidecarAccounts] = await Promise.all([
+    downloaderSidecar.state(),
+    downloaderSidecar.nativeAccounts()
+  ]);
+  const transport = sidecarState.ok ? sidecarState.transport : undefined;
+  const accounts = summarizeNativeAccounts(sidecarAccounts);
+  res.json({
+    ok: true,
+    version: serverVersion,
+    schemaVersion: schemaVersion(),
+    transport,
+    sidecar: {
+      reachable: Boolean(sidecarState.ok),
+      url: sidecarState.url || downloaderSidecar.baseUrl(),
+      version: sidecarState.ok ? sidecarState.version : undefined,
+      taskCount: sidecarState.ok ? sidecarState.taskCount : undefined,
+      running: sidecarState.ok ? sidecarState.running : undefined
+    },
+    accounts
+  });
+}));
 app.get("/api/bootstrap/status", asyncRoute(bootstrapStatus));
 app.post("/api/bootstrap", rateLimit({ windowMs: 60000, max: 5 }), asyncRoute(bootstrap));
 app.post("/api/login", rateLimit({ windowMs: 60000, max: 12 }), asyncRoute(login));
