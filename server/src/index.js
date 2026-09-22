@@ -95,7 +95,6 @@ app.get("/api/settings", asyncRoute(async (_req, res) => {
 
 app.put("/api/settings", adminOnly, asyncRoute(async (req, res) => {
   const next = await writeSettings(req.body || {});
-  await tg.reconnectAll(io);
   res.json({ settings: publicSettings(next) });
 }));
 
@@ -456,9 +455,8 @@ ensureStore()
     }, 30 * 1000).unref?.();
     server.listen(port, "0.0.0.0", () => {
       console.log(`Feigram Public is listening on http://0.0.0.0:${port}`);
-      tg.loadSavedClients(io)
-        .catch((error) => console.warn("Telegram account restore failed:", error.message))
-        .then(() => tg.restoreBackgroundTasks(io).catch((error) => console.warn("Download task restore failed:", error.message)))
+      tg.restoreBackgroundTasks(io)
+        .catch((error) => console.warn("Download task restore failed:", error.message))
         .then(() => tg.cleanupCache().catch((error) => console.warn("Cache cleanup failed:", error.message)));
     });
   })

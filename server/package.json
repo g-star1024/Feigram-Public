@@ -9,12 +9,12 @@
     "test": "node --test __tests__/*.test.js"
   },
   "dependencies": {
+    "big-integer": "^1.6.52",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "fs-extra": "^11.2.0",
     "mime-types": "^2.1.35",
-    "socket.io": "^4.8.1",
-    "telegram": "^2.26.22"
+    "socket.io": "^4.8.1"
   }
 }

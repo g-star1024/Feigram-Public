@@ -3,9 +3,6 @@ const crypto = require("crypto");
 const fs = require("fs-extra");
 const mime = require("mime-types");
 const bigInt = require("big-integer");
-const { Api, TelegramClient } = require("telegram");
-const { StringSession } = require("telegram/sessions");
-const { NewMessage } = require("telegram/events");
 const { dataDir, downloadTasksPath, readAccounts, removeAccount, safeId, silentCachePath, upsertAccount } = require("./store");
 const { readSettings } = require("./settings");
 const { decryptText, encryptText } = require("./cryptoBox");
@@ -529,16 +526,6 @@ function peerIdFromPeer(peer) {
   return "";
 }
 
-function peerFromId(peerId) {
-  const [type, rawId] = String(peerId || "").split(":");
-  if (!type || !rawId || !/^-?\d+$/.test(rawId)) return null;
-  const id = bigInt(rawId);
-  if (type === "User") return new Api.PeerUser({ userId: id });
-  if (type === "Chat") return new Api.PeerChat({ chatId: id });
-  if (type === "Channel") return new Api.PeerChannel({ channelId: id });
-  return null;
-}
-
 function serializeEntity(entity) {
   const title = entity.title || [entity.firstName, entity.lastName].filter(Boolean).join(" ") || entity.username || "Unknown";
   return {
@@ -671,21 +658,6 @@ function mediaKind(message, mimeType = "") {
   return "file";
 }
 
-function inputDocumentFileLocation(doc) {
-  if (!doc) return null;
-  return new Api.InputDocumentFileLocation({
-    id: doc.id,
-    accessHash: doc.accessHash,
-    fileReference: doc.fileReference,
-    thumbSize: ""
-  });
-}
-
-function inputFileLocation(message) {
-  if (message.document) return inputDocumentFileLocation(message.document);
-  return message.photo || message.media;
-}
-
 function serializeMessageEntities(message) {
   const text = messageText(message);
   return (message.entities || []).map((entity) => {
@@ -805,44 +777,6 @@ function rememberMessageSenders(accountId, messages) {
   messages.forEach((message) => {
     if (message.sender) cache.set(peerKey(message.sender), message.sender);
   });
-}
-
-async function createClient(sessionString = "") {
-  const { apiId, apiHash } = await telegramConfig();
-  const client = new TelegramClient(new StringSession(sessionString), apiId, apiHash, {
-    connectionRetries: 3
-  });
-  await withTimeout(client.connect(), 20000, "连接 Telegram 超时，请检查网络");
-  return client;
-}
-
-async function loadSavedClients(io) {
-  realtimeIo = io || realtimeIo;
-  const accounts = await readAccounts();
-  for (const account of accounts) {
-    // M2.2/M2.4：已迁移到 Go 的账号由 gotd 独占 session，Node 不得再建 GramJS 连接。
-    // 否则同一 auth_key 被双端同时握手，Telegram 会返回 AUTH_KEY_DUPLICATED。
-    if (account.authMode === "native") continue;
-    try {
-      await getClient(account.userId, account.id);
-    } catch (error) {
-      console.warn(`Failed to connect account ${account.label}:`, error.message);
-    }
-  }
-}
-
-function registerUpdates(io, accountId, client) {
-  if (client.__feigrameUpdatesRegistered) return;
-  client.__feigrameUpdatesRegistered = true;
-  client.addEventHandler((event) => {
-    const message = event.message;
-    if (!message) return;
-    io.to(`account:${accountId}`).emit("message:new", {
-      accountId,
-      message: serializeMessage(message),
-      peerId: message.chatId ? toText(message.chatId) : ""
-    });
-  }, new NewMessage({}));
 }
 
 async function listAccounts(userId) {
@@ -3337,7 +3271,6 @@ module.exports = {
   listChats,
   listFolders,
   listMessages,
-  loadSavedClients,
   logout,
   cleanupCache,
   profilePhoto,
@@ -3345,16 +3278,5 @@ module.exports = {
   restoreBackgroundTasks: restoreGoBackgroundTasks,
   search,
   sendText,
-  startLogin,
-  async reconnectAll(io) {
-    for (const client of clients.values()) {
-      try {
-        await client.disconnect();
-      } catch {}
-    }
-    clients.clear();
-    peerCache.clear();
-    pendingLogins.clear();
-    await loadSavedClients(io);
-  }
+  startLogin
 };
