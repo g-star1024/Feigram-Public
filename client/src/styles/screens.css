@@ -399,3 +399,299 @@
   border-color: var(--fn-primary);
   color: #fff;
 }
+
+/* ============ 6. 管理后台 / 设置 / 诊断 / QR / 播放器（U4，04 §6.7–6.10） ============ */
+
+.modal.admin-modal {
+  max-height: 88vh;
+  overflow: auto;
+  width: min(860px, 94vw);
+}
+
+.modal h2 {
+  font-size: 1.15rem;
+}
+
+.modal .close {
+  color: var(--fn-text-2);
+}
+
+.modal .close:hover {
+  color: var(--fn-danger);
+}
+
+/* Tab 行 → 胶囊分段 */
+.modal .tabs {
+  border-bottom: 1px solid var(--fn-border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-bottom: 12px;
+}
+
+.modal .tabs button {
+  background: var(--fn-surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--fn-radius-pill);
+  color: var(--fn-text-2);
+  min-height: 34px;
+  padding: 5px 16px;
+  transition: background var(--fn-dur) var(--fn-ease), color var(--fn-dur) var(--fn-ease);
+}
+
+.modal .tabs button:hover {
+  color: var(--fn-text);
+}
+
+.modal .tabs button.active {
+  background: var(--fn-primary-a);
+  color: var(--fn-primary);
+  font-weight: 600;
+}
+
+/* 表单控件统一 fnOS 化 */
+.modal input,
+.modal select,
+.modal textarea,
+.stack input,
+.stack select {
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius-sm);
+  color: var(--fn-text);
+  min-height: 38px;
+  padding: 6px 12px;
+  transition: border-color var(--fn-dur) var(--fn-ease), box-shadow var(--fn-dur) var(--fn-ease);
+  width: 100%;
+}
+
+.modal input:focus,
+.modal select:focus,
+.modal textarea:focus,
+.stack input:focus,
+.stack select:focus {
+  border-color: var(--fn-primary);
+  box-shadow: 0 0 0 2px var(--fn-primary-a);
+  outline: none;
+}
+
+.modal label > span,
+.stack label > span {
+  color: var(--fn-text-2);
+  font-size: 13px;
+}
+
+.modal .stack button.primary,
+.modal button.primary-button,
+.modal .stack .primary {
+  background: var(--fn-primary);
+  border: 1px solid transparent;
+  border-radius: var(--fn-radius-sm);
+  color: #fff;
+}
+
+.modal .stack button.primary:hover,
+.modal button.primary-button:hover,
+.modal .stack .primary:hover {
+  background: var(--fn-primary-h);
+}
+
+.modal .icon-button {
+  background: var(--fn-surface-2);
+  border: 1px solid transparent;
+  border-radius: var(--fn-radius-sm);
+  color: var(--fn-text-2);
+}
+
+.modal .icon-button:hover {
+  background: var(--fn-surface-3);
+  color: var(--fn-text);
+}
+
+.modal .danger-button {
+  background: var(--fn-danger-a);
+  color: var(--fn-danger);
+}
+
+.modal .danger-button:hover {
+  background: var(--fn-danger);
+  color: #fff;
+}
+
+.modal .hint {
+  color: var(--fn-text-3);
+  font-size: 12.5px;
+}
+
+.modal .success {
+  color: var(--fn-success);
+}
+
+.modal p.error {
+  background: var(--fn-danger-a);
+  border: 1px solid var(--fn-danger);
+  border-radius: var(--fn-radius-sm);
+  color: var(--fn-danger);
+  padding: 8px 12px;
+}
+
+.modal .legal-notice {
+  background: var(--fn-warning-a);
+  border: 1px solid var(--fn-warning);
+  border-radius: var(--fn-radius-sm);
+  color: var(--fn-text-2);
+}
+
+/* 账号管理行 → 卡片行 */
+.modal .account-admin-row,
+.modal .user-row {
+  align-items: center;
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius);
+  box-shadow: var(--fn-shadow-sm);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 14px;
+  transition: border-color var(--fn-dur) var(--fn-ease);
+}
+
+.modal .account-admin-row:hover,
+.modal .user-row:hover {
+  border-color: var(--fn-border-2);
+}
+
+.modal .user-list {
+  display: grid;
+  gap: 8px;
+}
+
+.modal .account-admin-list {
+  display: grid;
+  gap: 8px;
+}
+
+.modal .native-status {
+  color: var(--fn-warning);
+}
+
+.modal .native-status.ready {
+  color: var(--fn-success);
+}
+
+/* 缓存信息 / 诊断 */
+.modal .silent-cache-panel,
+.modal .diagnostics-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.modal .silent-cache-head {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.modal .silent-cache-controls,
+.modal .silent-cache-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.modal .cache-runtime-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.modal .cache-runtime-summary span {
+  background: var(--fn-surface-2);
+  border-radius: var(--fn-radius-pill);
+  color: var(--fn-text-2);
+  font-size: 12.5px;
+  padding: 5px 12px;
+}
+
+.modal .cache-runtime-summary b {
+  color: var(--fn-text);
+  margin-right: 6px;
+}
+
+.modal .silent-cache-list {
+  display: grid;
+  gap: 8px;
+}
+
+.modal .silent-cache-list > * {
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius);
+  box-shadow: var(--fn-shadow-sm);
+  padding: 10px 12px;
+}
+
+.modal .check-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.modal .check-row input {
+  width: auto;
+}
+
+/* 二维码登录卡 */
+.qr-modal-backdrop {
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  background: rgba(15, 18, 23, 0.32);
+  inset: 0;
+  position: fixed;
+  z-index: 90;
+}
+
+.qr-login-panel {
+  animation: fn-modal-in 220ms var(--fn-ease);
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius-lg);
+  box-shadow: var(--fn-shadow-lg);
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+  left: 50%;
+  padding: 28px;
+  position: absolute;
+  text-align: center;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(380px, 92vw);
+}
+
+.qr-login-panel img {
+  background: #fff;
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius);
+  padding: 12px;
+  width: min(240px, 70vw);
+}
+
+/* 播放器 / 公告模态 */
+.modal.playback-modal {
+  width: min(880px, 94vw);
+}
+
+.modal.playback-modal .playback-stage video,
+.modal.playback-modal .video-stage,
+.modal.playback-modal .video-fallback {
+  border-radius: var(--fn-radius);
+}
+
+.modal.announcement-modal {
+  width: min(560px, 94vw);
+}
+
+/* 无障碍： Escape 关闭的视觉反馈不适用，焦点环已由 tokens.css :focus-visible 提供 */
+

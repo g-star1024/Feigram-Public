@@ -789,7 +789,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
 
   return (
     <div className="modal-backdrop">
-      <div className="modal admin-modal">
+      <div className="modal admin-modal" role="dialog" aria-modal="true" aria-label={canAdmin ? "管理员后台" : "账号后台"}>
         <button className="close" onClick={onClose} title="关闭"><X size={18} /></button>
         <h2>{canAdmin ? "管理员后台" : "账号后台"}</h2>
         <div className="tabs">
@@ -1107,7 +1107,7 @@ function InfoModal({ announcements, about, open, onClose }) {
   if (!open) return null;
   return (
     <div className="modal-backdrop">
-      <div className="modal announcement-modal">
+      <div className="modal announcement-modal" role="dialog" aria-modal="true" aria-label="公告与关于">
         <button className="close" onClick={onClose} title="关闭"><X size={18} /></button>
         <h2>公告</h2>
         <div className="announcement-list">
@@ -1207,7 +1207,7 @@ function PlaybackModal({ item, playerMode, onClose }) {
   const download = mediaUrl(item.accountId, item.peerId, item.messageId);
   return (
     <div className="modal-backdrop playback-backdrop">
-      <div className="modal playback-modal">
+      <div className="modal playback-modal" role="dialog" aria-modal="true" aria-label="视频播放">
         <button className="close" onClick={onClose} title="关闭"><X size={18} /></button>
         <h2>{item.fileName || "视频播放"}</h2>
         <div className="playback-stage">
@@ -1464,6 +1464,20 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  /* 无障碍（04 §11）：Esc 自顶向下关闭模态/抽屉 */
+  useEffect(() => {
+    if (!adminOpen && !announcementOpen && !playback && !chatInfoOpen) return;
+    const handler = (event) => {
+      if (event.key !== "Escape") return;
+      if (playback) setPlayback(null);
+      else if (announcementOpen) setAnnouncementOpen(false);
+      else if (chatInfoOpen) setChatInfoOpen(false);
+      else if (adminOpen) setAdminOpen(false);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [adminOpen, announcementOpen, playback, chatInfoOpen]);
 
   function toggleTheme() {
     const next = theme === "dark" ? "light" : "dark";
