@@ -110,3 +110,71 @@ func TestTaskCanStartLockedFiltersByAccountHealth(t *testing.T) {
 		t.Fatal("http-bridge 有源应可启动")
 	}
 }
+
+// R4.8：/health 的账号汇总要给出 ready/failed，且 ready 必须与调度口径（eligible）一致。
+// 反例：坏账号残留 Ready=true 时，normalizeNativeStatus 仍判 healthy，但 ready 必须为 0。
+func TestAccountsSummaryCountsReadyAndFailed(t *testing.T) {
+	good := healthyAccount()
+	good.AccountID = "good"
+
+	failed := healthyAccount()
+	failed.AccountID = "failed"
+	failed.Status = "failed" // Ready 仍为 true，模拟失败后残留
+
+	needsRelogin := healthyAccount()
+	needsRelogin.AccountID = "relogin"
+	needsRelogin.Status = "needs-relogin"
+
+	app := &App{
+		native: map[string]*NativeAccount{
+			nativeAccountKey("u", "good"):    &good,
+			nativeAccountKey("u", "failed"):  &failed,
+			nativeAccountKey("u", "relogin"): &needsRelogin,
+		},
+	}
+
+	summary := app.accountsSummaryLocked()
+	if got := summary["total"]; got != 3 {
+		t.Fatalf("total 应为 3，实际 %v", got)
+	}
+	if got := summary["ready"]; got != 1 {
+		t.Fatalf("ready 应为 1（只有 healthy 账号 eligible），实际 %v", got)
+	}
+	if got := summary["failed"]; got != 1 {
+		t.Fatalf("failed 应为 1，实际 %v", got)
+	}
+	// healthy 保持原口径（normalizeNativeStatus，不看 Status 字符串），供既有前端兼容：
+	// failed/needs-relogin 两个坏账号因残留 Ready=true 仍会被算作 healthy，这正是 ready 要纠正的偏差。
+	if got := summary["healthy"]; got != 3 {
+		t.Fatalf("healthy 保持原口径应为 3，实际 %v", got)
+	}
+	if summary["ready"].(int) > summary["healthy"].(int) {
+		t.Fatal("ready 不应大于 healthy")
+	}
+}
+
+// R4.8：/health 顶层要带传输层当前值，供外部监控直读。
+func TestStateLockedExposesTransportAndAccounts(t *testing.T) {
+	good := healthyAccount()
+	// proxy 是指针类型，stateLocked 末尾会读 a.proxy.status()，零值 App 会 nil panic。
+	app := &App{
+		native: map[string]*NativeAccount{
+			nativeAccountKey("u", "a"): &good,
+		},
+		config: Config{Transport: "native-mtproto"},
+		proxy:  &proxyRuntime{},
+	}
+	state := app.stateLocked()
+	if got := state["transport"]; got != "native-mtproto" {
+		t.Fatalf("transport 应为 native-mtproto，实际 %v", got)
+	}
+	accounts, ok := state["accounts"].(map[string]any)
+	if !ok {
+		t.Fatal("state.accounts 缺失或类型不符")
+	}
+	for _, key := range []string{"total", "ready", "failed", "healthy", "byStatus"} {
+		if _, ok := accounts[key]; !ok {
+			t.Fatalf("accounts 缺字段 %s", key)
+		}
+	}
+}

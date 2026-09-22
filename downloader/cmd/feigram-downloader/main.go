@@ -238,7 +238,7 @@ type App struct {
 	running    map[string]chan struct{}
 	// healthRunning 记录当前有自动健康检查在跑的账号（R4.1 去重）。
 	healthRunning map[string]bool
-	client     *http.Client
+	client        *http.Client
 	// proxy 是当前生效的网络代理（MTProto dialer + 媒体 transport 共用），
 	// 用独立锁保护，避免与 App.mu 相互等待。详见 proxy.go。
 	proxy *proxyRuntime
@@ -1575,6 +1575,8 @@ func (a *App) accountsSummaryLocked() map[string]any {
 	byStatus := map[string]int{}
 	total := 0
 	healthy := 0
+	ready := 0
+	failed := 0
 	for _, account := range a.native {
 		total++
 		status := normalizeNativeStatus(account.Status, account.Ready)
@@ -1582,10 +1584,22 @@ func (a *App) accountsSummaryLocked() map[string]any {
 		if status == "healthy" {
 			healthy++
 		}
+		// R4.8：就绪口径必须与调度/轮转（taskCanStartLocked）一致，统一走 nativeAccountEligible。
+		// normalizeNativeStatus 在 Ready=true 时会无条件判 healthy，坏账号登出/失败后残留
+		// Ready=true 会让 healthy 虚高——故另给 ready/failed 两组计数供外部监控直读。
+		// 保留 healthy/byStatus 原口径以兼容既有前端消费，不在此处改变其语义。
+		if nativeAccountEligible(*account) {
+			ready++
+		}
+		if strings.TrimSpace(account.Status) == "failed" {
+			failed++
+		}
 	}
 	return map[string]any{
 		"total":    total,
 		"healthy":  healthy,
+		"ready":    ready,
+		"failed":   failed,
 		"byStatus": byStatus,
 	}
 }
