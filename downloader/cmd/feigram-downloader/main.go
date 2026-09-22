@@ -1323,6 +1323,21 @@ func (a *App) handleNativeAccount(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && action == "":
 		defer a.mu.Unlock()
 		writeJSON(w, http.StatusOK, publicNativeAccount(*account))
+	case r.Method == http.MethodDelete && action == "":
+		// 清理账号记录（登出/残留记录清理用）：先取消在途登录，再摘除并落盘。
+		if superseded := a.cancelLoginsLocked(userID, accountID); superseded > 0 {
+			log.Printf("清理账号 %s/%s 前取消了 %d 个在途登录", userID, accountID, superseded)
+		}
+		removed := *account
+		delete(a.native, nativeAccountKey(userID, accountID))
+		if err := a.saveNativeLocked(); err != nil {
+			a.mu.Unlock()
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		a.mu.Unlock()
+		log.Printf("已删除 Go 原生账号记录 %s/%s", userID, accountID)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": publicNativeAccount(removed)})
 	case r.Method == http.MethodPost && action == "health":
 		snapshot := *account
 		a.mu.Unlock()
@@ -2007,6 +2022,7 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
+	liteCheck := false
 	err = client.Run(ctx, func(ctx context.Context) error {
 		status, err := client.Auth().Status(ctx)
 		if err != nil {
@@ -2026,7 +2042,12 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 			account.LastHealthDurationMS = duration.Milliseconds()
 			account.Error = fmt.Sprintf("健康检查已从 Telegram DC %d 读取 %d 字节，耗时 %d ms", dc, bytesRead, duration.Milliseconds())
 		} else {
-			return errors.New("没有可用于原生健康检查的 Telegram 文件任务，请先缓存一个视频")
+			// Auth().Status 已经完成了一次真实的授权 RPC（能走到这里说明 session 有效、DC 可达）。
+			// 此前无缓存文件时直接报错并把账号打成 failed，过于严厉——用户刚登录成功就会被
+			// 「请先缓存一个视频」顶回来。改为基础检查通过：不推进 healthPasses（文件池尚未验证），
+			// 也不标记失败，只说明缺什么。
+			liteCheck = true
+			account.Error = "session 已授权（基础检查通过）；暂无缓存文件任务，文件池抽样将在缓存视频后自动补做"
 		}
 		return nil
 	})
@@ -2044,6 +2065,11 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 			// 连不上 DC 时把「是不是没代理」讲清楚，避免用户只看超时无从下手。
 			account.Error = account.Error + " —— " + hint
 		}
+		return a.saveNativeAccount(account)
+	}
+	if liteCheck {
+		// 基础检查通过：保持 Ready / HealthPasses / Status 原样，只落检查时间与说明，
+		// 等有缓存文件任务时再做真正的文件池抽样。
 		return a.saveNativeAccount(account)
 	}
 	if account.Ready && account.HealthPasses == 0 {

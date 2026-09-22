@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.1.3"
-export APP_CHANGELOG="修复首次登录报 native account is not prepared：全新账号登录自动建档（手机号 + API 凭据随请求带入），扫码登录入口同步修复，凭据缺失时明确提示。"
+export APP_VERSION="2.2.0"
+export APP_CHANGELOG="重构运行诊断与缓存信息页（对齐设计规范、日志折叠、去冗余）；诊断页可清理残留账号记录；默认选择已就绪账号；健康检查无缓存视频时不再误报失败；补齐登录前 Telegram 服务条款合规提示。"
 export NODE_ENV="production"
 
 is_running() {

@@ -350,6 +350,9 @@ async function logout(userId, accountId) {
   const account = (await readAccounts()).find((item) => item.id === accountId);
   if (!account || account.userId !== userId) throw Object.assign(new Error("账号不存在"), { status: 404 });
   await removeAccount(accountId);
+  // 登出即清理 Go 侧记录：否则 native-sessions 里留下孤儿记录，
+  // 诊断页会一直显示一条「failed」的同号账号（2026-09-22 用户截图实证）。
+  await downloaderSidecar.deleteNativeAccount(userId, accountId).catch(() => null);
 }
 
 // --- M4.2：已迁移到 Go 的账号（authMode=native）没有 GramJS 客户端，
@@ -1066,8 +1069,21 @@ async function goSilentCacheSpeedDiagnostics(userId) {
 }
 
 async function goNativeAccounts() {
-  const accounts = await downloaderSidecar.nativeAccounts();
-  return Array.isArray(accounts) ? accounts : [];
+  const records = await downloaderSidecar.nativeAccounts();
+  const list = Array.isArray(records) ? records : [];
+  // 标注每条 Go 记录是否有对应的 Node 账号：没有的即「残留记录」
+  // （多半来自失败/中途放弃的登录流程），诊断页据此分组并允许清理。
+  const accounts = await readAccounts();
+  const linkedIds = new Set(accounts.map((item) => item.id));
+  return list.map((record) => ({ ...record, linked: linkedIds.has(record.accountId) }));
+}
+
+async function deleteOrphanNativeAccount(userId, accountId) {
+  const accounts = await readAccounts();
+  if (accounts.some((item) => item.id === accountId && item.userId === userId)) {
+    throw Object.assign(new Error("该记录仍关联着应用内账号，请用「退出登录」清理"), { status: 409 });
+  }
+  return downloaderSidecar.deleteNativeAccount(userId, accountId);
 }
 
 async function goNativeAccountHealth(userId, accountId) {
@@ -1222,6 +1238,7 @@ module.exports = {
   reorderSilentCacheTasks: reorderGoSilentCacheTasks,
   monitorSilentCacheTasks: () => {},
   nativeAccounts: goNativeAccounts,
+  deleteOrphanNativeAccount,
   nativeAccountHealth: goNativeAccountHealth,
   nativeAccountLoginStart: goNativeAccountLoginStart,
   nativeAccountQRLoginStart: goNativeAccountQRLoginStart,

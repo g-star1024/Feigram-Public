@@ -71,6 +71,12 @@ function checkNativeAccount(userId, accountId) {
   }));
 }
 
+function deleteNativeAccount(userId, accountId) {
+  return safe(async () => request(`/api/native/accounts/${encodeURIComponent(userId)}/${encodeURIComponent(accountId)}`, {
+    method: "DELETE"
+  }));
+}
+
 function startNativeLogin(userId, accountId, payload) {
   return request(`/api/native/accounts/${encodeURIComponent(userId)}/${encodeURIComponent(accountId)}/login/start`, {
     method: "POST",
@@ -311,6 +317,7 @@ module.exports = {
   updateConfig,
   upsertNativeAccount,
   checkNativeAccount,
+  deleteNativeAccount,
   startNativeLogin,
   startNativeQRLogin,
   pollNativeQRLogin,

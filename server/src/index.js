@@ -146,6 +146,11 @@ app.get("/api/admin/native-accounts", adminOnly, asyncRoute(async (_req, res) =>
   res.json(await tg.nativeAccounts());
 }));
 
+// 清理诊断页的残留 Go 记录（无对应应用内账号的孤儿记录）。
+app.delete("/api/admin/native-accounts/:account", adminOnly, asyncRoute(async (req, res) => {
+  res.json(await tg.deleteOrphanNativeAccount(req.user.id, req.params.account));
+}));
+
 app.post("/api/admin/native-accounts/:account/health", adminOnly, asyncRoute(async (req, res) => {
   res.json(await tg.nativeAccountHealth(req.user.id, req.params.account));
 }));

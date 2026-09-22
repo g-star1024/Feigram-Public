@@ -93,6 +93,9 @@ function publicSettings(settings) {
   return {
     appPasswordSet: Boolean(settings.appPassword),
     publicBaseUrl: settings.publicBaseUrl,
+    // M1.3 合规要求：登录弹窗必须展示 Telegram 服务条款与账号观察提示。
+    // 此前字段从未输出，前端 legalNotice 恒为空——合规提示静默失效（2026-09-22 复盘发现）。
+    telegramLegalNotice: TELEGRAM_LEGAL_NOTICE,
     telegramApiId: "",
     telegramApiIdSet: Boolean(settings.telegramApiId),
     telegramApiHashSet: Boolean(settings.telegramApiHash && !settings.telegramApiHash.includes("put-your")),

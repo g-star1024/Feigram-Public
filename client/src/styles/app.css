@@ -1558,7 +1558,7 @@ textarea {
 .log-tail {
   background: var(--fn-surface-2);
   border: 1px solid var(--fn-border);
-  border-radius: 8px;
+  border-radius: var(--fn-radius);
 }
 
 .diagnostics-grid span {
@@ -1622,7 +1622,7 @@ textarea {
   align-items: center;
   background: var(--fn-surface);
   border: 1px solid var(--fn-border);
-  border-radius: 8px;
+  border-radius: var(--fn-radius-sm);
   display: grid;
   gap: 10px;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -1709,13 +1709,13 @@ textarea {
 .cache-runtime-summary {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .cache-runtime-summary span {
   background: var(--fn-surface-2);
   border: 1px solid var(--fn-border);
-  border-radius: 8px;
+  border-radius: var(--fn-radius-sm);
   color: var(--fn-text-2);
   display: grid;
   gap: 3px;
@@ -1724,6 +1724,53 @@ textarea {
 
 .cache-runtime-summary b {
   color: var(--fn-text);
+}
+
+/* 诊断页日志折叠：默认收起，避免历史日志刷屏淹没结构化信息。 */
+.log-details {
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius);
+  background: var(--fn-surface-2);
+}
+
+.log-details summary {
+  color: var(--fn-text-2);
+  cursor: pointer;
+  font-size: 0.82rem;
+  padding: 10px 12px;
+  user-select: none;
+}
+
+.log-details summary:hover {
+  color: var(--fn-text);
+}
+
+.log-details[open] summary {
+  border-bottom: 1px solid var(--fn-border);
+}
+
+.log-details .log-tail {
+  border: none;
+  border-radius: 0 0 var(--fn-radius) var(--fn-radius);
+}
+
+/* 账号健康状态徽标 */
+.status-ok,
+.status-bad {
+  border-radius: var(--fn-radius-pill);
+  font-size: 0.78rem;
+  padding: 2px 10px;
+  white-space: nowrap;
+}
+
+.status-ok {
+  background: var(--fn-success-a);
+  color: var(--fn-success);
+}
+
+.status-bad {
+  background: var(--fn-danger-a);
+  color: var(--fn-danger);
 }
 
 .silent-cache-list {

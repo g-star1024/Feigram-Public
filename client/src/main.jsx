@@ -684,8 +684,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
 
   // M2.4：路径 A —— 一键把 GramJS session 迁移到 Go 原生 MTProto。
   // 迁移失败（含 Go 侧健康检查未通过）自动降级「路径 B」，走 reloginNativeAccount 重新登录。
-  async function migrateAccountToGo(account) {
-    setError("");
+  async function migrateAccountToGo(account) {    setError("");
     try {
       await api(`/api/admin/native-accounts/${account.id}/migrate`, { method: "POST", body: JSON.stringify({}) });
       setNativeAccounts(await api("/api/admin/native-accounts").catch(() => nativeAccounts));
@@ -700,6 +699,18 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
           displayName: account.displayName || account.label
         });
       }
+    }
+  }
+
+  // 清理诊断页的残留 Go 记录（无对应应用内账号的孤儿记录）。
+  async function deleteOrphanNative(item) {
+    setError("");
+    try {
+      await api(`/api/admin/native-accounts/${item.accountId}`, { method: "DELETE" });
+      setNativeAccounts((items) => items.filter((entry) => entry.accountId !== item.accountId));
+      setDownloaderState(await api("/api/admin/downloader").catch(() => downloaderState));
+    } catch (err) {
+      setError(`清理失败：${err.message}`);
     }
   }
 
@@ -936,16 +947,15 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
             </select></label>
           </div>
           <div className="cache-runtime-summary">
-            <span><b>运行</b>{silentCacheState.running || 0} / {silentCacheState.effectiveConcurrency || silentCacheState.concurrency || 1}</span>
-            <span><b>并发设置</b>{silentCacheState.configuredConcurrency || silentCacheState.concurrency || 1}</span>
+            <span><b>运行中</b>{silentCacheState.running || 0} / {silentCacheState.effectiveConcurrency || silentCacheState.concurrency || 1}</span>
             <span><b>传输层</b>{silentCacheState.transport === "native-mtproto" ? "Go 原生 MTProto" : "HTTP 回退"}</span>
             <span><b>任务数</b>{silentCaches.length}</span>
           </div>
-          <div className="silent-cache-bulk">
+          {silentCaches.length > 0 && <div className="silent-cache-bulk">
             <button type="button" className="icon-button" onClick={() => setSelectedSilentIds(silentCaches.filter((task) => task.status !== "completed").map((task) => task.id))}>全选当前</button>
             <button type="button" className="icon-button" onClick={() => setSelectedSilentIds([])} disabled={!selectedSilentIds.length}>清空选择</button>
             <button type="button" className="icon-button danger-button" onClick={cancelSelectedSilentCaches} disabled={!selectedSilentIds.length}>取消选中{selectedSilentIds.length ? ` (${selectedSilentIds.length})` : ""}</button>
-          </div>
+          </div>}
           <div className="silent-cache-list">
             {silentCaches.map((task) => {
               const progress = task.size ? Math.min(100, Math.round((Number(task.downloaded || 0) / Number(task.size)) * 100)) : 0;
@@ -1007,7 +1017,6 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
           </div>
           {diagnostics ? <div className="diagnostics-grid">
             <span><b>版本</b>{diagnostics.app?.version}</span>
-            <span><b>版本线</b>{diagnostics.app?.edition}</span>
             <span><b>运行时间</b>{Math.floor((diagnostics.app?.uptime || 0) / 60)} 分钟</span>
             <span><b>缓存大小</b>{formatBytes(diagnostics.cache?.bytes)}</span>
             <span><b>下载任务</b>{diagnostics.cache?.downloadTasks || 0}</span>
@@ -1034,7 +1043,6 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
               <span><b>限速</b>{downloaderState.config?.rateLimitBps ? `${formatBytes(downloaderState.config.rateLimitBps)}/s` : "不限速"}</span>
               <span><b>模式</b>{downloaderState.config?.mode === "fast" ? "高速" : "保守"}</span>
               <span><b>媒体源</b>{(downloaderState.config?.transport || downloaderState.transport) === "native-mtproto" ? "Go 原生 MTProto" : "HTTP 桥接"}</span>
-              <span><b>数据目录</b>{downloaderState.dataDir || "-"}</span>
             </div>
             <div className="silent-cache-controls downloader-config-controls">
               <label className="check-row"><input type="checkbox" checked={downloaderState.config?.enabled !== false} onChange={(e) => saveDownloaderConfig({ enabled: e.target.checked })} /><span>{downloaderState.config?.enabled !== false ? "Go 队列已启用" : "Go 队列已暂停"}</span></label>
@@ -1060,25 +1068,49 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
             <p className="hint">{downloaderState.strategy || "Go sidecar 已就绪，等待 Telegram 下载桥接。"}</p>
             {downloaderState.error && <p className="error">{downloaderState.error}</p>}
           </div>}
-          {nativeAccounts.length > 0 && <div className="cache-speed-card">
-            <div className="cache-speed-head">
-              <strong>Go 原生账号</strong>
-              <span>{nativeAccounts.filter((item) => item.ready).length} / {nativeAccounts.length} 可用</span>
-            </div>
-            <div className="native-account-list">
-              {nativeAccounts.map((item) => (
-                <div className="native-account-row" key={`${item.userId}:${item.accountId}`}>
-                  <div>
-                    <strong>{item.displayName || item.phone || item.accountId}</strong>
-                    <p>{item.ready ? "Go MTProto session 健康" : item.error || "等待 Go 重新登录生成原生 session"}</p>
-                    <small>连续检查 {item.healthPasses || 0}/2{item.lastHealthBytes ? ` · ${formatBytes(item.lastHealthBytes)} · DC ${item.lastHealthDc || "-"} · ${item.lastHealthDurationMs || 0} ms` : ""}</small>
-                  </div>
-                  <span>{item.sessionSet ? item.status : "未迁移"}</span>
-                  <button className="icon-button" type="button" onClick={() => checkNativeAccount(item.accountId)}>健康检查</button>
+          {(nativeAccounts.length > 0) && (() => {
+            const linked = nativeAccounts.filter((item) => item.linked !== false);
+            const orphans = nativeAccounts.filter((item) => item.linked === false);
+            const renderRow = (item, orphan = false) => (
+              <div className="native-account-row" key={`${item.userId}:${item.accountId}`}>
+                <div>
+                  <strong>{item.displayName || item.phone || item.accountId}</strong>
+                  <p>{item.ready ? "Go MTProto session 健康" : item.error || "等待 Go 重新登录生成原生 session"}</p>
+                  <small>
+                    连续检查 {item.healthPasses || 0}/2
+                    {item.lastHealthBytes ? ` · ${formatBytes(item.lastHealthBytes)} · DC ${item.lastHealthDc || "-"} · ${item.lastHealthDurationMs || 0} ms` : ""}
+                    {orphan ? " · 残留记录（无对应应用内账号）" : ""}
+                  </small>
                 </div>
-              ))}
-            </div>
-          </div>}
+                <span className={item.ready ? "status-ok" : "status-bad"}>{item.sessionSet ? item.status : "未迁移"}</span>
+                {orphan
+                  ? <button className="icon-button danger-button" type="button" onClick={() => deleteOrphanNative(item)}>清理</button>
+                  : <button className="icon-button" type="button" onClick={() => checkNativeAccount(item.accountId)}>健康检查</button>}
+              </div>
+            );
+            return <>
+              {linked.length > 0 && <div className="cache-speed-card">
+                <div className="cache-speed-head">
+                  <strong>Go 原生账号</strong>
+                  <span>{linked.filter((item) => item.ready).length} / {linked.length} 可用</span>
+                </div>
+                <div className="native-account-list">
+                  {linked.map((item) => renderRow(item))}
+                </div>
+                {linked.length > 1 && <p className="hint">列表中同手机号出现多条记录时，可对不需要的账号点「退出登录」清理（登出会同时删除其 Go 会话记录）。</p>}
+              </div>}
+              {orphans.length > 0 && <div className="cache-speed-card">
+                <div className="cache-speed-head">
+                  <strong>残留记录</strong>
+                  <span>{orphans.length} 条可清理</span>
+                </div>
+                <div className="native-account-list">
+                  {orphans.map((item) => renderRow(item, true))}
+                </div>
+                <p className="hint">这些记录没有对应的应用内账号，多半来自中途放弃的登录流程，不影响使用；点「清理」可从 Go 会话库中删除。</p>
+              </div>}
+            </>;
+          })()}
           {cacheSpeedTest && <div className="cache-speed-card">
             <div className="cache-speed-head">
               <strong>缓存速度诊断</strong>
@@ -1089,16 +1121,8 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
               <span><b>诊断方式</b>{cacheSpeedTest.mode === "aggregate" ? "运行聚合" : "抽样读取"}</span>
               <span><b>读取样本</b>{formatBytes(cacheSpeedTest.result?.bytesRead || 0)}</span>
               <span><b>耗时</b>{cacheSpeedTest.result?.durationMs ? `${cacheSpeedTest.result.durationMs} ms` : "-"}</span>
-              <span><b>读取分片</b>{cacheSpeedTest.result?.chunks || 0}</span>
-              <span><b>限速</b>{cacheSpeedTest.rateLimitBps ? `${formatBytes(cacheSpeedTest.rateLimitBps)}/s` : "不限速"}</span>
-              <span><b>缓存模式</b>{cacheSpeedTest.cacheMode === "fast" ? "高速" : "保守"}</span>
-              <span><b>运行/有效上限</b>{cacheSpeedTest.running} / {cacheSpeedTest.effectiveConcurrency || cacheSpeedTest.concurrency}</span>
-              <span><b>并发设置</b>{cacheSpeedTest.configuredConcurrency || cacheSpeedTest.concurrency}</span>
-              <span><b>队列</b>{cacheSpeedTest.queued}</span>
-              <span><b>请求分片</b>{formatBytes(cacheSpeedTest.result?.requestedChunkSize || cacheSpeedTest.directChunkSize || 0)}</span>
-              <span><b>实际分片</b>{formatBytes(cacheSpeedTest.result?.effectiveChunkSize || cacheSpeedTest.directChunkSize || 0)}</span>
               <span><b>降级次数</b>{cacheSpeedTest.result?.fallbackCount || 0}</span>
-              <span><b>LIMIT_INVALID</b>{cacheSpeedTest.result?.limitInvalidCount || 0}</span>
+              <span><b>缓存模式</b>{cacheSpeedTest.cacheMode === "fast" ? "高速" : "保守"}</span>
             </div>
             {cacheSpeedTest.task && <div className="diagnostics-paths">
               <p><strong>测试文件</strong>{cacheSpeedTest.task.fileName || "Telegram 视频"}</p>
@@ -1109,7 +1133,6 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
             {cacheSpeedTest.error && <p className="error">{cacheSpeedTest.error}</p>}
             {cacheSpeedTest.note && <p className="hint">{cacheSpeedTest.note}</p>}
             <p className="hint">诊断速度来自 Go 队列的真实运行任务；如果运行数为 0，速度也会归零，避免排队任务残留速度造成误判。</p>
-            <pre className="log-tail cache-speed-json">{JSON.stringify(cacheSpeedTest, null, 2)}</pre>
           </div>}
           {updateInfo && <div className="update-card">
             <strong>{updateInfo.updateAvailable ? "发现新版本" : "当前版本已是最新或暂未发现发布版"}</strong>
@@ -1117,8 +1140,14 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
             {updateInfo.error && <small>{updateInfo.error}</small>}
             <a href={updateInfo.url} target="_blank" rel="noreferrer">打开发布页</a>
           </div>}
-          {diagnostics?.logTail && <pre className="log-tail system-log-tail">{diagnostics.logTail}</pre>}
-          {diagnostics?.downloaderLogTail && <pre className="log-tail system-log-tail">{diagnostics.downloaderLogTail}</pre>}
+          {diagnostics?.logTail && <details className="log-details">
+            <summary>Node 服务日志（最近 200 行，含历史运行记录）</summary>
+            <pre className="log-tail system-log-tail">{diagnostics.logTail}</pre>
+          </details>}
+          {diagnostics?.downloaderLogTail && <details className="log-details">
+            <summary>Go 下载服务日志（最近 200 行，含历史运行记录）</summary>
+            <pre className="log-tail system-log-tail">{diagnostics.downloaderLogTail}</pre>
+          </details>}
         </div>}
       </div>
     </div>
@@ -1637,7 +1666,12 @@ function App() {
     setError("");
     const list = await api("/api/accounts").catch((err) => { setError(err.message); return []; });
     setAccounts(list);
-    if ((preferFirst || !accountId) && list[0]) setAccountId(list[0].id);
+    if ((preferFirst || !accountId) && list.length) {
+      // 默认选「已就绪」的账号而不是列表第一条：列表里可能残留
+      // 登录失败/已过期的旧账号，选到它会让整个聊天页报「尚未就绪」。
+      const ready = list.find((account) => account.connected || account.goReady);
+      setAccountId((ready || list[0]).id);
+    }
     if (!list.length) setAccountId("");
   }
 
