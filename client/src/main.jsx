@@ -1627,6 +1627,15 @@ function App() {
   }, [socket]);
 
   useEffect(() => {
+    if (!socket) return;
+    // R4.2：媒体源被自动升级到 Go 原生 MTProto 后，刷新下载器状态，
+    // 设置页的「媒体源」与「传输层」下拉无需手动刷新即显示新值。
+    const onTransport = () => loadDiagnostics();
+    socket.on("native:transport-changed", onTransport);
+    return () => socket.off("native:transport-changed", onTransport);
+  }, [socket]);
+
+  useEffect(() => {
     if (!token) return;
     const timer = window.setInterval(() => {
       loadDownloads();

@@ -27,6 +27,7 @@ const { migrateStore, schemaVersion } = require("./migrations");
 const { rateLimit } = require("./rateLimit");
 const { pickAccountsSummary, sidecarTaskCount } = require("./healthSummary");
 const { startDefaultMonitor } = require("./nativeHealthMonitor");
+const { startDefaultAutoUpgrade } = require("./transportAutoUpgrade");
 const tg = require("./telegramService");
 
 const port = Number(process.env.APP_PORT || 3088);
@@ -490,7 +491,20 @@ ensureStore()
     server.listen(port, "0.0.0.0", () => {
       console.log(`Feigram Public is listening on http://0.0.0.0:${port}`);
       // R4.1：启动账号状态巡检，状态变化经 socket 推给对应用户。
-      startDefaultMonitor(io).start();
+      const healthMonitor = startDefaultMonitor(io);
+      healthMonitor.start();
+      // R4.2：有账号 healthy 后自动把媒体源从 HTTP 桥接升级到 Go 原生 MTProto。
+      const transportUpgrade = startDefaultAutoUpgrade({
+        io,
+        state: downloaderSidecar.state,
+        nativeAccounts: downloaderSidecar.nativeAccounts,
+        updateConfig: downloaderSidecar.updateConfig
+      });
+      const upgradeTimer = setInterval(() => {
+        transportUpgrade.check().catch((error) =>
+          console.warn("Transport auto-upgrade failed:", error.message));
+      }, 30 * 1000);
+      upgradeTimer.unref?.();
       // 把应用内代理下发给 Go（sidecar 通常还在启动中，故带重试）。
       readSettings()
         .then((settings) => pushProxyToSidecar(settings, { attempts: 8, delayMs: 2500 }))
