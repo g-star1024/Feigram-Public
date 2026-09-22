@@ -69,6 +69,26 @@ func (a *App) runAutoHealthCheck(userID, accountID, reason string) {
 	}
 }
 
+// markNativeAccountResult 记录账号一次真实可用性结果（下载任务成败共用口径）。
+// 只做观测记录：成功清零连续失败并刷新最近成功时间；失败累加计数。
+// 不改 Status/Ready——那是健康检查的职责，这里只供 /health 退化预警与账号卡展示。
+func (a *App) markNativeAccountResult(userID, accountID string, ok bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	account, exists := a.native[nativeAccountKey(userID, accountID)]
+	if !exists || account == nil {
+		return
+	}
+	if ok {
+		account.LastSuccessAt = now()
+		account.ConsecutiveFailures = 0
+	} else {
+		account.ConsecutiveFailures++
+	}
+	account.UpdatedAt = now()
+	_ = a.saveNativeLocked()
+}
+
 // healthLoop 每 healthPatrolInterval 对所有已授权账号巡检一次。
 func (a *App) healthLoop() {
 	ticker := time.NewTicker(healthPatrolInterval)

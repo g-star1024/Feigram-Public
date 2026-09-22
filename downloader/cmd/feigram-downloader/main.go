@@ -147,6 +147,8 @@ type NativeAccount struct {
 	LastHealthBytes      int    `json:"lastHealthBytes"`
 	LastHealthDC         int    `json:"lastHealthDc"`
 	LastHealthDurationMS int64  `json:"lastHealthDurationMs"`
+	LastSuccessAt        string `json:"lastSuccessAt"`
+	ConsecutiveFailures  int    `json:"consecutiveFailures"`
 	CreatedAt            string `json:"createdAt"`
 	UpdatedAt            string `json:"updatedAt"`
 	CheckedAt            string `json:"checkedAt"`
@@ -456,6 +458,26 @@ func (a *App) taskCanStartLocked(task *Task, transport string) bool {
 	}
 }
 
+// taskWaitReasonLocked 返回任务当前无法启动的、面向用户的等待原因（调用方持 a.mu）。
+// 返回空串表示原因未知（不覆盖已有错误信息）。
+func (a *App) taskWaitReasonLocked(task *Task, transport string) string {
+	switch transport {
+	case "http-bridge":
+		if task.SourceURL == "" {
+			return "媒体源缺失，等待重新拉取下载地址"
+		}
+	case "native-mtproto":
+		account, ok := a.native[nativeAccountKey(task.UserID, task.AccountID)]
+		if !ok || account == nil {
+			return "Telegram 账号记录不存在，请在账号管理中重新登录"
+		}
+		if !nativeAccountEligible(*account) && task.SourceURL == "" {
+			return "Telegram 账号尚未就绪（需重新登录或通过健康检查），下载将在账号恢复后自动继续"
+		}
+	}
+	return ""
+}
+
 func (a *App) pumpOnce() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -470,6 +492,7 @@ func (a *App) pumpOnce() bool {
 		limit = 1
 	}
 	started := false
+	saveNeeded := false
 	nowUnix := time.Now().Unix()
 	for _, task := range a.listTasksLocked() {
 		if len(a.running) >= limit {
@@ -486,6 +509,16 @@ func (a *App) pumpOnce() bool {
 		// 会占满并发坑、空跑到失败，把整批任务拖死。调度前统一校验，不具备可启动条件
 		// （HTTP 无源 / native 账号不健康）的任务先不调度，账号恢复后自然可再跑。
 		if !a.taskCanStartLocked(&task, transport) {
+			// R4.11：等待原因可见化——任务留在队列但把原因写到 Error 字段，
+			// 用户在下载中心能看见「为什么一直没动」，而不是静默卡住。
+			// 仅在原因变化时写库，避免调度循环每 800ms 刷一次盘。
+			if reason := a.taskWaitReasonLocked(&task, transport); reason != "" && task.Error != reason {
+				if stored := a.tasks[task.ID]; stored != nil {
+					stored.Error = reason
+					stored.UpdatedAt = now()
+					saveNeeded = true
+				}
+			}
 			continue
 		}
 		if task.RetryAfter > nowUnix {
@@ -502,7 +535,7 @@ func (a *App) pumpOnce() bool {
 		started = true
 		go a.runTask(task.ID, cancel)
 	}
-	if started {
+	if started || saveNeeded {
 		_ = a.saveLocked()
 	}
 	return started
@@ -545,31 +578,39 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 				log.Printf("task %s transient failure, retry in %s: %v", id, delay, err)
 				return
 			}
-			a.updateTask(id, func(t *Task) {
-				t.Status = "error"
-				t.SpeedBps = 0
-				t.Error = err.Error()
-				t.RetryAfter = 0
-				t.UpdatedAt = now()
-			})
-			log.Printf("task %s failed: %v", id, err)
-			return
-		}
 		a.updateTask(id, func(t *Task) {
-			t.Status = "completed"
-			if stat, err := os.Stat(t.FilePath); err == nil {
-				t.Downloaded = stat.Size()
-				if t.Size <= 0 || stat.Size() > t.Size {
-					t.Size = stat.Size()
-				}
-			}
+			t.Status = "error"
 			t.SpeedBps = 0
-			t.Error = ""
-			t.RetryCount = 0
+			t.Error = err.Error()
 			t.RetryAfter = 0
 			t.UpdatedAt = now()
 		})
+		// R4.11：仅 native 传输的真实失败计入账号连续失败；HTTP 回退的失败是媒体源问题，
+		// 不该给账号健康度记黑账。
+		if task.Transport == "native-mtproto" {
+			a.markNativeAccountResult(task.UserID, task.AccountID, false)
+		}
+		log.Printf("task %s failed: %v", id, err)
 		return
+	}
+	a.updateTask(id, func(t *Task) {
+		t.Status = "completed"
+		if stat, err := os.Stat(t.FilePath); err == nil {
+			t.Downloaded = stat.Size()
+			if t.Size <= 0 || stat.Size() > t.Size {
+				t.Size = stat.Size()
+			}
+		}
+		t.SpeedBps = 0
+		t.Error = ""
+		t.RetryCount = 0
+		t.RetryAfter = 0
+		t.UpdatedAt = now()
+	})
+	if task.Transport == "native-mtproto" {
+		a.markNativeAccountResult(task.UserID, task.AccountID, true)
+	}
+	return
 	}
 }
 
@@ -1577,6 +1618,7 @@ func (a *App) accountsSummaryLocked() map[string]any {
 	healthy := 0
 	ready := 0
 	failed := 0
+	degraded := 0
 	for _, account := range a.native {
 		total++
 		status := normalizeNativeStatus(account.Status, account.Ready)
@@ -1594,12 +1636,18 @@ func (a *App) accountsSummaryLocked() map[string]any {
 		if strings.TrimSpace(account.Status) == "failed" {
 			failed++
 		}
+		// R4.11：Ready 但最近连续下载/健康检查失败的账号属「隐性退化」——
+		// 还能通过就绪口径，但实际已在失败，监控侧应能直接看到。
+		if nativeAccountEligible(*account) && account.ConsecutiveFailures > 0 {
+			degraded++
+		}
 	}
 	return map[string]any{
 		"total":    total,
 		"healthy":  healthy,
 		"ready":    ready,
 		"failed":   failed,
+		"degraded": degraded,
 		"byStatus": byStatus,
 	}
 }
@@ -2052,6 +2100,7 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 		account.Ready = false
 		account.Status = "needs-relogin"
 		account.Error = "Go 原生 MTProto session 尚未创建，请先执行 Go 重新登录"
+		account.ConsecutiveFailures++
 		return a.saveNativeAccount(account)
 	}
 	apiHash, err := a.nativeAPIHash(account)
@@ -2059,6 +2108,7 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 		account.Ready = false
 		account.Status = "failed"
 		account.Error = err.Error()
+		account.ConsecutiveFailures++
 		_, _ = a.saveNativeAccount(account)
 		return account, err
 	}
@@ -2067,6 +2117,7 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 		account.Ready = false
 		account.Status = "failed"
 		account.Error = a.withNetworkHint(err)
+		account.ConsecutiveFailures++
 		return a.saveNativeAccount(account)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -2123,8 +2174,13 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 			// 连不上 DC 时把「是不是没代理」讲清楚，避免用户只看超时无从下手。
 			account.Error = account.Error + " —— " + hint
 		}
+		// R4.11：健康检查失败计入连续失败（观测口径，供 /health 退化预警与账号卡展示）。
+		account.ConsecutiveFailures++
 		return a.saveNativeAccount(account)
 	}
+	// R4.11：健康检查通过（含 lite）即视为账号真实可用，清零连续失败并记录最近成功时间。
+	account.LastSuccessAt = now()
+	account.ConsecutiveFailures = 0
 	if liteCheck {
 		// 基础检查通过：保持 Ready / HealthPasses / Status 原样，只落检查时间与说明，
 		// 等有缓存文件任务时再做真正的文件池抽样。
@@ -2255,9 +2311,27 @@ func (a *App) finalizeNativeAuthorization(userID, accountID string) (NativeAccou
 			account.Error = "Go 原生账号已授权，请连续完成 2 次真实文件健康检查"
 			account.CheckedAt = ""
 			account.UpdatedAt = now()
+			// R4.11：同手机号去重——登录入口（/api/auth/start、QR start）每次都由 Node
+			// 生成全新 accountId，用户对同一号码重复「添加账号」就会积累多条记录；
+			// 旧 session 在 Telegram 侧已被本次登录顶掉失效，旧记录只会在账号列表里
+			// 以 failed/needs-relogin 的样子误导用户（真实环境实证：同号 healthy/failed
+			// 双记录）。授权成功时把同号旧记录一并清理。
+			pruned := 0
+			if account.Phone != "" {
+				for key, other := range a.native {
+					if key != nativeAccountKey(userID, accountID) && other != nil &&
+						other.UserID == userID && other.Phone == account.Phone {
+						delete(a.native, key)
+						pruned++
+					}
+				}
+			}
 			result := *account
 			err := a.saveNativeLocked()
 			a.mu.Unlock()
+			if pruned > 0 {
+				log.Printf("同手机号去重：清理 %d 条旧账号记录（%s/%s）", pruned, userID, accountID)
+			}
 			// R4.1：所有授权成功路径（手机登录/二维码）都收口于此，
 			// 统一调度一次自动健康检查；去重在 schedule 内兜底。
 			go a.scheduleAutoHealthCheck(userID, accountID, "登录成功")

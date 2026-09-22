@@ -2054,3 +2054,23 @@ textarea {
   .muted {
     color: var(--fn-text-muted, #6b7280);
   }
+
+/* R4.12 日志增强：跟随最新开关。 */
+.log-follow-toggle {
+  align-items: center;
+  color: var(--fn-text-2);
+  cursor: pointer;
+  display: flex;
+  font-size: 0.78rem;
+  gap: 5px;
+  margin-left: auto;
+}
+
+.log-follow-toggle input {
+  accent-color: var(--fn-primary);
+}
+
+/* R4.11 账号健康度：Ready 但连续失败（隐性退化）警示。 */
+.native-status--warn {
+  color: var(--fn-warning);
+}

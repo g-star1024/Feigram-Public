@@ -894,6 +894,11 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
                     连续检查 {native.healthPasses || 0}/2
                     {native.lastHealthBytes ? ` · ${formatBytes(native.lastHealthBytes)} · DC ${native.lastHealthDc || "-"} · ${native.lastHealthDurationMs || 0} ms` : ""}
                   </small>}
+                  {canAdmin && native?.sessionSet && <small className={cx("native-status", native.consecutiveFailures > 0 && "native-status--warn")}>
+                    {native.consecutiveFailures > 0
+                      ? `连续失败 ${native.consecutiveFailures} 次${native.lastSuccessAt ? ` · 最近成功 ${formatTime(native.lastSuccessAt)}` : " · 尚无成功记录"}`
+                      : native.lastSuccessAt ? `最近成功 ${formatTime(native.lastSuccessAt)}` : ""}
+                  </small>}
                 </div>
                 <button className="icon-button" onClick={() => onAccountChange(account.id)}>{account.id === accountId ? "当前" : "切换"}</button>
                 {canAdmin && <button className="icon-button" type="button" onClick={() => startNativeQrLogin(native || { accountId: account.id, displayName: account.displayName || account.label, phone: account.phoneNumber })}>扫码登录 Go</button>}
@@ -935,6 +940,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
             <h3>网络代理</h3>
             <label><span>代理地址</span><input value={settings.proxyUrl} onChange={(e) => setSettings({ ...settings, proxyUrl: e.target.value })} placeholder="socks5://127.0.0.1:7890（留空则直连）" /></label>
             <p className="hint">Telegram 登录、会话与媒体下载都由 Go 侧出网，这里配置的代理会同时作用于 MTProto 连接与文件下载。支持 socks5 / socks5h / http / https，可带账号密码。留空时回落到环境变量（FEIGRAM_PROXY_URL、ALL_PROXY、HTTPS_PROXY 等），仍然留空则直连。</p>
+            <p className="hint">如果这台设备已经通过路由器/系统代理全局科学上网，可直接填本机代理端口（如 socks5://127.0.0.1:7890），Go 会经由它连接 Telegram；若填了代理但下载仍显示「HTTP 回退」，通常是该代理端口不通或未放行 UDP 出口，可用「运行诊断」页的代理状态核对。</p>
             {downloaderState?.proxy ? <p className={cx("proxy-status", downloaderState.proxy.source === "invalid" && "is-error")}>
               <span>当前生效：<b>{proxySourceLabel(downloaderState.proxy.source)}</b></span>
               {downloaderState.proxy.address ? <span className="proxy-address">{downloaderState.proxy.address}</span> : null}
@@ -1121,6 +1127,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
                   <small>
                     连续检查 {item.healthPasses || 0}/2
                     {item.lastHealthBytes ? ` · ${formatBytes(item.lastHealthBytes)} · DC ${item.lastHealthDc || "-"} · ${item.lastHealthDurationMs || 0} ms` : ""}
+                    {item.consecutiveFailures > 0 ? ` · 连续失败 ${item.consecutiveFailures} 次${item.lastSuccessAt ? `（最近成功 ${formatTime(item.lastSuccessAt)}）` : ""}` : item.lastSuccessAt ? ` · 最近成功 ${formatTime(item.lastSuccessAt)}` : ""}
                     {orphan ? " · 残留记录（无对应应用内账号）" : ""}
                   </small>
                 </div>
@@ -1203,6 +1210,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
 }
 
 // R4.5 · 日志查看器：按级别（错误/警告/信息）着色 + 级别筛选 + 关键词搜索 + 清空按钮。
+// R4.12 · 增强：自动滚动跟随（可暂停）+ 导出当前过滤结果为 .txt。
 // 优先使用服务端结构化 entries（diagnostics.nodeLogEntries / downloaderLogEntries），
 // 旧服务端无 entries 时回退到原始文本并做客户端分级，保证向后兼容。
 function clientClassifyLogLevel(text) {
@@ -1214,6 +1222,8 @@ function clientClassifyLogLevel(text) {
 function LogViewer({ title, entries, rawTail, onClear, clearBusy }) {
   const [levelFilter, setLevelFilter] = useState("all");
   const [search, setSearch] = useState("");
+  const [follow, setFollow] = useState(true);
+  const linesRef = useRef(null);
   const source = entries && entries.length
     ? entries
     : (rawTail ? rawTail.split("\n").map((t) => t.replace(/\s+$/, "")).filter(Boolean).map((text) => ({ level: clientClassifyLogLevel(text), text })) : []);
@@ -1222,6 +1232,31 @@ function LogViewer({ title, entries, rawTail, onClear, clearBusy }) {
     (!search || e.text.toLowerCase().includes(search.toLowerCase()))
   );
   const counts = source.reduce((acc, e) => { acc[e.level] = (acc[e.level] || 0) + 1; return acc; }, {});
+
+  // 自动滚动跟随：内容变化时若开关打开且用户没有向上翻阅（距底 <96px），滚到最新一行。
+  useEffect(() => {
+    const element = linesRef.current;
+    if (!follow || !element) return;
+    if (element.scrollHeight - element.scrollTop - element.clientHeight < 160) {
+      element.scrollTop = element.scrollHeight;
+    }
+  }, [filtered, follow]);
+
+  // 导出当前过滤结果：Blob 下载为 .txt，文件名带级别与时间便于归档。
+  function exportLogs() {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const levelLabel = levelFilter === "all" ? "all" : levelFilter;
+    const blob = new Blob([filtered.map((e) => `[${e.level.toUpperCase()}] ${e.text}`).join("\n")], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `feigram-${title.includes("Go") ? "downloader" : "node"}-${levelLabel}-${stamp}.log`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div className="log-viewer">
       <div className="log-viewer-head">
@@ -1231,6 +1266,7 @@ function LogViewer({ title, entries, rawTail, onClear, clearBusy }) {
           <span className="lc-warn">{counts.warn || 0} 警告</span>
           <span className="lc-info">{counts.info || 0} 信息</span>
         </span>
+        <button className="icon-button" type="button" disabled={!filtered.length} onClick={exportLogs} title="导出当前过滤结果为 .txt">导出日志</button>
         {onClear && <button className="icon-button danger-button" type="button" disabled={clearBusy} onClick={onClear}>清空日志</button>}
       </div>
       <div className="log-toolbar">
@@ -1242,8 +1278,12 @@ function LogViewer({ title, entries, rawTail, onClear, clearBusy }) {
           ))}
         </div>
         <input className="log-search" placeholder="搜索日志内容…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <label className="log-follow-toggle">
+          <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} />
+          <span>跟随最新</span>
+        </label>
       </div>
-      <div className="log-lines">
+      <div className="log-lines" ref={linesRef}>
         {filtered.length ? filtered.map((e, i) => (
           <div className={`log-line ${e.level}`} key={i}>{e.text}</div>
         )) : <div className="empty">没有匹配的日志</div>}
@@ -1821,7 +1861,18 @@ function App() {
       setChats(list);
       if (appSettings.foldersAutoSelectFirst && !activeChat && visible[0]) selectChat(visible[0]);
     } catch (err) {
-      setError(err.message);
+      const message = String(err.message || "");
+      // 当前账号未就绪（failed/needs-relogin）时不要把整个会话页顶成报错卡：
+      // 自动切到第一个就绪账号（accountId 变化会触发 effect 重新加载）。
+      if (message.includes("尚未就绪")) {
+        const fallback = accounts.find((account) => account.id !== accountId && (account.connected || account.goReady));
+        if (fallback) {
+          setAccountId(fallback.id);
+          showToast(`当前账号未就绪，已自动切换到 ${fallback.displayName || fallback.phone || fallback.id}`);
+          return;
+        }
+      }
+      setError(message);
     } finally {
       setBusy(false);
     }
