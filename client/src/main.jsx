@@ -1024,6 +1024,16 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
             <h3>通知设置</h3>
             <label className="check-row"><input type="checkbox" checked={settings.notificationEnabled} onChange={(e) => setSettings({ ...settings, notificationEnabled: e.target.checked })} /><span>启用桌面通知</span></label>
             <label className="check-row"><input type="checkbox" checked={settings.notificationPreview} onChange={(e) => setSettings({ ...settings, notificationPreview: e.target.checked })} /><span>通知显示消息预览</span></label>
+            {/* 浏览器通知权限申请入口：只在「未询问」时展示按钮；被拒绝时给出去浏览器设置的指引。 */}
+            {notificationPermission === "default" && (
+              <div className="notification-permission-row">
+                <button type="button" className="secondary" onClick={requestNotificationPermission}>申请桌面通知权限</button>
+                <small>开启后，收到新消息时会弹系统通知。</small>
+              </div>
+            )}
+            {notificationPermission === "denied" && (
+              <small className="muted">桌面通知权限已被浏览器拒绝；如需开启，请在浏览器站点设置中允许「通知」后刷新页面。</small>
+            )}
           </section>
           <section className="admin-card">
             <h3>隐私设置</h3>
@@ -1556,6 +1566,11 @@ function App() {
   const [view, setView] = useState("home");
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [notifications, setNotifications] = useState("Notification" in window && Notification.permission === "granted");
+  /* 通知权限三态：unsupported / default / granted / denied——设置页据此渲染申请入口，
+     权限申请已从公告铃铛移到设置页（铃铛点击只管看公告，不再触发浏览器权限弹窗）。 */
+  const [notificationPermission, setNotificationPermission] = useState(
+    "Notification" in window ? Notification.permission : "unsupported"
+  );
   const [announcements, setAnnouncements] = useState([]);
   const [about, setAbout] = useState({});
   const [announcementOpen, setAnnouncementOpen] = useState(false);
@@ -2106,8 +2121,10 @@ function App() {
         new Promise((resolve) => setTimeout(() => resolve("timeout"), 8000))
       ]);
       setNotifications(result === "granted");
+      setNotificationPermission(result === "timeout" ? Notification.permission : result);
     } catch {
       setNotifications(false);
+      setNotificationPermission("denied");
     }
   }
 
@@ -2260,7 +2277,7 @@ function App() {
             {view === "chats" && activeChat && <small>/ {activeChat.title}</small>}
           </div>
           <div className="fn-topbar-actions">
-            <button className={cx("icon-button", unreadAnnouncement && "has-notice")} onClick={() => { openAnnouncements(); requestNotificationPermission(); }} title="通知与公告" aria-label="通知与公告"><Bell size={18} /></button>
+            <button className={cx("icon-button", unreadAnnouncement && "has-notice")} onClick={openAnnouncements} title="通知与公告" aria-label="通知与公告"><Bell size={18} /></button>
           </div>
         </header>
         <div className={cx("fn-content", view === "chats" && "fn-content--flush")}>

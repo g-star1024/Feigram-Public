@@ -120,6 +120,14 @@ marker = "const announcements = [\n"
 if marker not in c:
     sys.exit("找不到 announcements 数组起点")
 c = c.replace(marker, marker + entry, 1)
+
+# 公告历史只保留最近 5 条（应用内公告是时效性内容，历史归档在 docs/release-notes.md）。
+m = re.search(r"const announcements = \[\n(.*?)^\];", c, flags=re.S | re.M)
+if m:
+    entries = re.findall(r"^  \{\n.*?^  \},\n", m.group(1), flags=re.S | re.M)
+    if len(entries) > 5:
+        c = c[:m.start(1)] + "".join(entries[:5]) + c[m.end(1):]
+        print(f"公告历史已裁剪至 5 条（移除 {len(entries) - 5} 条旧公告）")
 write(p, c)
 
 # ⑤ release-notes.md —— 在首个「## 版本」前插入新版本

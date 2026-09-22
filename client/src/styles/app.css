@@ -2035,3 +2035,22 @@ textarea {
     grid-template-columns: 1fr;
   }
 }
+
+  /* R4.9 通知权限申请入口（设置页 → 隐私 → 通知设置）：权限申请从公告铃铛移入设置页。 */
+  .notification-permission-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: var(--fn-radius, 12px);
+    background: var(--fn-surface-2, rgba(0, 0, 0, 0.03));
+  }
+
+  .notification-permission-row small {
+    color: var(--fn-text-muted, #6b7280);
+  }
+
+  .muted {
+    color: var(--fn-text-muted, #6b7280);
+  }
