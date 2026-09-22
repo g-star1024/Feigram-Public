@@ -26,10 +26,26 @@ import {
   X
 } from "lucide-react";
 import { api, appLogin, getToken, setToken as saveToken } from "./api";
+import "./styles/tokens.css";
 import "./styles/app.css";
 
 function cx(...items) {
   return items.filter(Boolean).join(" ");
+}
+
+/*
+ * fnOS 主题引导（04-feigram-ui-upgrade.md §7）：
+ * ?theme=dark|light → localStorage 手动选择 → fnOS 注入的 cookie → 系统偏好 → 亮色兜底。
+ */
+function resolveInitialTheme() {
+  const fromQuery = new URLSearchParams(window.location.search).get("theme");
+  if (fromQuery === "dark" || fromQuery === "light") return fromQuery;
+  const stored = localStorage.getItem("feigrame.theme");
+  if (stored === "dark" || stored === "light") return stored;
+  const cookie = (document.cookie.match(/fnos_theme=(\w+)/) || [])[1];
+  if (cookie === "dark" || cookie === "light") return cookie;
+  if (window.matchMedia?.("(prefers-color-scheme: dark)").matches) return "dark";
+  return "light";
 }
 
 function formatTime(value) {
@@ -1271,7 +1287,7 @@ function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, aut
 function App() {
   const [token, setTokenState] = useState(getToken());
   const [me, setMe] = useState(null);
-  const [theme, setTheme] = useState(localStorage.getItem("feigrame.theme") || "dark");
+  const [theme, setTheme] = useState(resolveInitialTheme);
   const [accounts, setAccounts] = useState([]);
   const [accountId, setAccountId] = useState("");
   const [chats, setChats] = useState([]);
@@ -1347,8 +1363,13 @@ function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    localStorage.setItem("feigrame.theme", theme);
   }, [theme]);
+
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    localStorage.setItem("feigrame.theme", next);
+    setTheme(next);
+  }
 
   useEffect(() => {
     if (!token) return;
@@ -1903,7 +1924,7 @@ function App() {
         <div className="topbar">
           <div className="brand-compact"><MessageSquare size={20} /> Feigram</div>
           <div className="tools">
-            <button className="icon-button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="切换主题">{theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}</button>
+            <button className="icon-button" onClick={toggleTheme} title="切换主题">{theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}</button>
             <button className={cx("icon-button", unreadAnnouncement && "has-notice")} onClick={enableNotifications} title="通知与公告"><Bell size={18} /></button>
             <button className="icon-button" onClick={() => { setAdminInitialTab("accounts"); setAdminOpen(true); }} title={me?.role === "admin" ? "管理员后台" : "账号后台"}><Users size={18} /></button>
           </div>

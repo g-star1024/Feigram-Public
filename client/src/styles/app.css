@@ -1,16 +1,4 @@
-:root {
-  color-scheme: dark;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 15px;
-  background: #101312;
-  color: #eef3ef;
-}
-
-:root[data-theme="light"] {
-  color-scheme: light;
-  background: #f4f6f5;
-  color: #17201c;
-}
+/* 基准色/字体/color-scheme 由 tokens.css 的 :root 提供（--fn-* 真源） */
 
 * {
   box-sizing: border-box;
@@ -1928,28 +1916,26 @@ textarea {
   top: 12px;
 }
 
+/*
+ * 旧变量别名层（U1 过渡期双写）：旧名一律映射到 tokens.css 的 --fn-* 真源。
+ * U5 清理阶段将把调用点直接替换为 --fn-* 后删除本块。
+ */
 :root {
-  --accent: #24786c;
-  --bubble: #171f1d;
-  --input: #111816;
-  --line: #2b3935;
-  --mine: #1d3d37;
-  --muted: #91a09b;
-  --page: #101312;
-  --panel: #141a18;
-  --soft: #202926;
-}
-
-:root[data-theme="light"] {
-  --accent: #227066;
-  --bubble: #ffffff;
-  --input: #ffffff;
-  --line: #d9e0dd;
-  --mine: #dff1ec;
-  --muted: #61706b;
-  --page: #eef2f0;
-  --panel: #f9fbfa;
-  --soft: #e9efec;
+  --accent: var(--fn-primary);
+  --bubble: var(--fn-surface);
+  --input: var(--fn-surface);
+  --line: var(--fn-border);
+  --mine: var(--fn-primary-a);
+  --muted: var(--fn-text-2);
+  --page: var(--fn-bg);
+  --panel: var(--fn-surface);
+  --soft: var(--fn-surface-2);
+  /* 散落的兜底变量名（legal-notice 等） */
+  --text: var(--fn-text);
+  --text-muted: var(--fn-text-2);
+  --surface-2: var(--fn-surface-2);
+  --border: var(--fn-border);
+  --primary: var(--fn-primary);
 }
 
 @media (max-width: 820px) {

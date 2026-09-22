@@ -1,0 +1,110 @@
+/*
+ * Feigram fnOS 设计 token（唯一真源）
+ * 依据：outputs/04-feigram-ui-upgrade.md §3.2–3.6
+ * 规则：所有颜色/圆角/阴影一律引用 --fn-*；旧变量（--accent 等）在 app.css 中别名到此处。
+ */
+
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* 表面 */
+  --fn-bg:        #F4F6FA;
+  --fn-surface:   #FFFFFF;
+  --fn-surface-2: #EEF1F6;
+  --fn-surface-3: #E6EAF2;
+
+  /* 描边 */
+  --fn-border:    #E2E8F1;
+  --fn-border-2:  #D2DAE6;
+
+  /* 文字 */
+  --fn-text:      #1F2733;
+  --fn-text-2:    #5A6573;
+  --fn-text-3:    #8A94A3;
+
+  /* 主色（飞牛蓝） */
+  --fn-primary:   #2D6CDF;
+  --fn-primary-h: #245BC4;
+  --fn-primary-a: #E8F0FE;
+
+  /* 语义色 */
+  --fn-success:   #1FAA6B; --fn-success-a: #E6F7EF;
+  --fn-warning:   #E0922B; --fn-warning-a: #FCEFDD;
+  --fn-danger:    #E5484D; --fn-danger-a:  #FDECEC;
+
+  /* 阴影（禁用纯黑重影） */
+  --fn-shadow-sm: 0 1px 2px rgba(20, 30, 60, 0.06), 0 2px 8px rgba(20, 30, 60, 0.06);
+  --fn-shadow-md: 0 6px 20px rgba(20, 30, 60, 0.08);
+  --fn-shadow-lg: 0 12px 36px rgba(20, 30, 60, 0.12);
+
+  /* 毛玻璃 */
+  --fn-glass:     rgba(255, 255, 255, 0.72);
+  --fn-glass-brd: rgba(255, 255, 255, 0.55);
+
+  /* 圆角 */
+  --fn-radius-sm: 8px;
+  --fn-radius:    12px;
+  --fn-radius-lg: 16px;
+  --fn-radius-pill: 999px;
+
+  /* 动效 */
+  --fn-ease: cubic-bezier(0.32, 0.72, 0.36, 1);
+  --fn-dur: 200ms;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --fn-bg:        #0F1217;
+  --fn-surface:   #171C24;
+  --fn-surface-2: #1E2430;
+  --fn-surface-3: #262D3B;
+
+  --fn-border:    #2A313D;
+  --fn-border-2:  #38414F;
+
+  --fn-text:      #E6EAF0;
+  --fn-text-2:    #A6B0BE;
+  --fn-text-3:    #6E7886;
+
+  --fn-primary:   #4C8DFF;
+  --fn-primary-h: #6BA0FF;
+  --fn-primary-a: #1B2A45;
+
+  --fn-success:   #36C389; --fn-success-a: #11301F;
+  --fn-warning:   #F0A93C; --fn-warning-a: #332710;
+  --fn-danger:    #F26267; --fn-danger-a:  #3A1B1D;
+
+  --fn-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.35);
+  --fn-shadow-md: 0 6px 20px rgba(0, 0, 0, 0.45);
+  --fn-shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.55);
+
+  --fn-glass:     rgba(23, 28, 36, 0.66);
+  --fn-glass-brd: rgba(255, 255, 255, 0.08);
+}
+
+/* 全局基准：亮色为主、暗色并列 */
+:root {
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", Inter, system-ui, sans-serif;
+  font-size: 15px;
+  background: var(--fn-bg);
+  color: var(--fn-text);
+}
+
+/* 动效可关闭 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* 统一焦点环（无障碍） */
+:focus-visible {
+  outline: 2px solid var(--fn-primary);
+  outline-offset: 2px;
+}
