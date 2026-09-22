@@ -14,6 +14,16 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.4.0",
+    title: "Feigram 2.4.0 更新",
+    version: "2.4.0",
+    level: "success",
+    createdAt: "2026-09-22T15:16:03.000Z",
+    body: [
+"Feigram 2.4.0 常规更新"
+    ].join("\n")
+  },
+  {
     id: "release-2.3.1",
     title: "Feigram 2.3.1 更新",
     version: "2.3.1",

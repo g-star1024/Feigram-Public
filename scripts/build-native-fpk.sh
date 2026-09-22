@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${VERSION:-2.3.1}"
+VERSION="${VERSION:-2.4.0}"
 PKG_NAME="feigrampub-${VERSION}"
 RELEASE_DIR="${ROOT_DIR}/release"
 # 使用时间戳 staging 目录：staging 永远不会预先存在，从而无需对其执行批量删除。
