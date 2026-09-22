@@ -1,5 +1,14 @@
 # Feigram Public 发布说明
 
+## 版本 2.1.3
+
+### 修复
+
+- **首次登录 100% 失败（`native account is not prepared`）**：`POST /api/auth/start`（登录弹窗「发送验证码」）由 Node 生成全新 `accountId` 后直发 Go，而 Go 侧 `startNativeLogin` 要求该账号记录已存在——全新账号永远没有记录，导致**所有**首次登录必失败；扫码登录（`/api/auth/qr/start`）同样命中。2.1.2 及之前版本全部受影响。
+  - **修复**：登录入口新增 `ensureNativeAccountLocked`，缺记录时用请求自带的手机号 + API 凭据自动建档；凭据缺失时报明确的 `apiId/apiHash is required`，不再报含糊的 not prepared。
+  - **为何此前未被发现**：E2E 脚本预先 `POST /api/native/accounts` 建过档，判据盲区掩盖了首次登录路径。
+- **验证**：新增 3 条建档单元测试；真实二进制 E2E（全新数据目录、零预建档案）6/6 全绿——缺凭据明确报错、全新账号走到网络层并返回 40s 超时 + 代理诊断提示、记录自动落盘含手机号与 apiId。
+
 ## 版本 2.1.2
 
 ### 新增

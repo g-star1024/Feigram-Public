@@ -14,6 +14,17 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.1.3",
+    title: "Feigram 2.1.3 更新",
+    version: "2.1.3",
+    level: "success",
+    createdAt: "2026-09-22T09:40:00.000Z",
+    body: [
+      "修复首次登录报「native account is not prepared」：全新账号登录时服务器会自动用登录请求里的手机号与 API 凭据建档，不再要求账号记录预先存在。2.1.2 及之前版本的所有首次登录都会命中此问题。",
+      "扫码登录入口同步修复；API 凭据缺失时改为明确提示「apiId/apiHash is required」。"
+    ].join("\n")
+  },
+  {
     id: "release-2.1.2",
     title: "Feigram 2.1.2 更新",
     version: "2.1.2",

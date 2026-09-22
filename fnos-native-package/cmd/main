@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.1.2"
-export APP_CHANGELOG="新增网络代理支持：没有代理无法登录/运行的设备，可在「设置 → 网络代理」填写 SOCKS5 或 HTTP 代理，改完立即生效，也可用 FEIGRAM_PROXY_URL 等环境变量兜底；MTProto 登录与媒体下载都走代理，本机地址自动直连；代理写错会明确报错而非静默直连，代理连不上时给出可操作提示。并加固登录流程：同账号重复登录取消旧流程，发起超时或代理变更取消在途登录。"
+export APP_VERSION="2.1.3"
+export APP_CHANGELOG="修复首次登录报 native account is not prepared：全新账号登录自动建档（手机号 + API 凭据随请求带入），扫码登录入口同步修复，凭据缺失时明确提示。"
 export NODE_ENV="production"
 
 is_running() {

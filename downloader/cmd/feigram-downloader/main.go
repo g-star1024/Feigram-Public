@@ -2182,15 +2182,45 @@ func (a *App) finalizeNativeAuthorization(userID, accountID string) (NativeAccou
 	return NativeAccount{}, errors.New("Telegram 已授权，但 gotd session 尚未持久化，请重新扫码")
 }
 
+// ensureNativeAccountLocked 在登录入口补建缺失的 native 账号记录（调用方持有 a.mu）。
+//
+// 首次登录（POST /api/auth/start、/api/auth/qr/start）的 accountId 由 Node 侧新生成，
+// Go 侧必然没有记录；此前这里直接报 "native account is not prepared"，导致所有
+// 全新账号登录必失败（E2E 因预先建过档而未暴露）。请求里已带手机号与 API 凭据，
+// 直接建档即可；凭据不全时返回明确错误而不是含糊的 not prepared。
+// 已有记录时原样返回（admin 重登链路凭据可能留空，靠存储值解密回填）。
+func (a *App) ensureNativeAccountLocked(userID, accountID, phone string, apiID int, apiHash string) (*NativeAccount, error) {
+	key := nativeAccountKey(userID, accountID)
+	if account := a.native[key]; account != nil {
+		return account, nil
+	}
+	if userID == "" || accountID == "" {
+		return nil, errors.New("userId and accountId are required")
+	}
+	if apiID <= 0 || apiHash == "" {
+		return nil, errors.New("apiId/apiHash is required")
+	}
+	account := &NativeAccount{
+		UserID:    userID,
+		AccountID: accountID,
+		Phone:     phone,
+		APIID:     apiID,
+		Status:    "needs-relogin",
+		CreatedAt: now(),
+	}
+	a.native[key] = account
+	return account, nil
+}
+
 func (a *App) startNativeLogin(userID, accountID, phone string, apiID int, apiHash string) (nativeLoginResult, error) {
 	if phone == "" {
 		return nativeLoginResult{}, errors.New("phone is required")
 	}
 	a.mu.Lock()
-	account := a.native[nativeAccountKey(userID, accountID)]
-	if account == nil {
+	account, err := a.ensureNativeAccountLocked(userID, accountID, phone, apiID, apiHash)
+	if err != nil {
 		a.mu.Unlock()
-		return nativeLoginResult{}, errors.New("native account is not prepared")
+		return nativeLoginResult{}, err
 	}
 	if apiID <= 0 {
 		apiID = account.APIID
@@ -2307,10 +2337,10 @@ func (a *App) continueNativeLogin(loginID, step, code, password string) (nativeL
 
 func (a *App) startNativeQRLogin(userID, accountID string, apiID int, apiHash string) (nativeQRLoginResult, error) {
 	a.mu.Lock()
-	account := a.native[nativeAccountKey(userID, accountID)]
-	if account == nil {
+	account, err := a.ensureNativeAccountLocked(userID, accountID, "", apiID, apiHash)
+	if err != nil {
 		a.mu.Unlock()
-		return nativeQRLoginResult{}, errors.New("native account is not prepared")
+		return nativeQRLoginResult{}, err
 	}
 	if apiID <= 0 {
 		apiID = account.APIID
