@@ -85,8 +85,8 @@ bash scripts/build-native-fpk.sh
 Feigram 使用和打包了以下主要开源项目：
 
 - React、React DOM、Vite：前端界面和构建。
-- GramJS `telegram`：Telegram MTProto 客户端能力。
-- Express、Socket.IO、cors、dotenv、fs-extra、mime-types：后端服务和实时通信。
+- Go `gotd/td`：Telegram MTProto 客户端能力（原生单客户端架构，自 2.0.46 起不再使用 Node 侧 GramJS）。
+- Express、Socket.IO、cors、dotenv、fs-extra、mime-types、big-integer：后端服务和实时通信。
 - lucide-react：界面图标。
 - Node.js：FPK 内置运行时。
 - Go：构建 FPK 时用于编译内嵌下载 sidecar。
