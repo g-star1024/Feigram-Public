@@ -244,12 +244,6 @@
   color: #fff;
 }
 
-.fn-chats .video-mode-pill {
-  background: var(--fn-glass);
-  border: 1px solid var(--fn-glass-brd);
-  color: var(--fn-text);
-}
-
 .fn-chats .inline-button-row button {
   background: var(--fn-primary-a);
   border: 1px solid transparent;

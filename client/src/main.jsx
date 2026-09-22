@@ -2106,7 +2106,7 @@ function App() {
             onPlay={playDownload}
             onClose={() => setView("home")}
           />}
-          {view === "chats" && <div className="app-shell fn-chats">
+          {view === "chats" && <div className={cx("app-shell fn-chats", activeChat && "chat-open")}>
       <aside className="sidebar">
         <div className="account-row current-account-row">
           {activeAccount ? <>
