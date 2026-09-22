@@ -1616,6 +1616,17 @@ function App() {
   }, [socket]);
 
   useEffect(() => {
+    if (!socket) return;
+    // R4.1：Go 侧自动健康检查/巡检导致状态变化时，刷新账号列表，
+    // 用户无需手动刷新即可看到「检查中 → healthy」的跳转。
+    const changed = (account) => {
+      if (account?.accountId) refreshAccounts();
+    };
+    socket.on("native:account-changed", changed);
+    return () => socket.off("native:account-changed", changed);
+  }, [socket]);
+
+  useEffect(() => {
     if (!token) return;
     const timer = window.setInterval(() => {
       loadDownloads();

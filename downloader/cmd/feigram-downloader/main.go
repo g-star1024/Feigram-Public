@@ -236,6 +236,8 @@ type App struct {
 	logins     map[string]*NativeLogin
 	qrLogins   map[string]*NativeQRLogin
 	running    map[string]chan struct{}
+	// healthRunning 记录当前有自动健康检查在跑的账号（R4.1 去重）。
+	healthRunning map[string]bool
 	client     *http.Client
 	// proxy 是当前生效的网络代理（MTProto dialer + 媒体 transport 共用），
 	// 用独立锁保护，避免与 App.mu 相互等待。详见 proxy.go。
@@ -284,6 +286,7 @@ func main() {
 	}
 	log.Printf("%s", app.proxy.describeProxyConfig())
 	go app.pump()
+	go app.healthLoop()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", app.handleHealth)
@@ -2041,13 +2044,22 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 			account.LastHealthDC = dc
 			account.LastHealthDurationMS = duration.Milliseconds()
 			account.Error = fmt.Sprintf("健康检查已从 Telegram DC %d 读取 %d 字节，耗时 %d ms", dc, bytesRead, duration.Milliseconds())
+		} else if location, sampleDC, found := a.findAutoSampleLocation(ctx, client); found {
+			// R4.1：没有缓存任务时自动找一个低体积媒体（缩略图）抽样，
+			// 让账号在登录后无需「先手动缓存视频」就能完成文件池验证。
+			bytesRead, dc, duration, err := a.readLocationSample(ctx, client, location, sampleDC)
+			if err != nil {
+				return fmt.Errorf("Go 原生文件抽样读取失败：%w", classifyNativeReadError(err))
+			}
+			account.LastHealthBytes = bytesRead
+			account.LastHealthDC = dc
+			account.LastHealthDurationMS = duration.Milliseconds()
+			account.Error = fmt.Sprintf("健康检查已自动抽样 Telegram DC %d 媒体，读取 %d 字节，耗时 %d ms", dc, bytesRead, duration.Milliseconds())
 		} else {
-			// Auth().Status 已经完成了一次真实的授权 RPC（能走到这里说明 session 有效、DC 可达）。
-			// 此前无缓存文件时直接报错并把账号打成 failed，过于严厉——用户刚登录成功就会被
-			// 「请先缓存一个视频」顶回来。改为基础检查通过：不推进 healthPasses（文件池尚未验证），
-			// 也不标记失败，只说明缺什么。
+			// 最近会话里完全没有可抽样媒体：Auth().Status 已完成真实授权 RPC，
+			// 判基础检查通过，不标记失败；下次巡检时再尝试补抽样。
 			liteCheck = true
-			account.Error = "session 已授权（基础检查通过）；暂无缓存文件任务，文件池抽样将在缓存视频后自动补做"
+			account.Error = "session 已授权（基础检查通过）；暂无可抽样媒体，文件池抽样将在后续巡检时自动补做"
 		}
 		return nil
 	})
@@ -2200,6 +2212,9 @@ func (a *App) finalizeNativeAuthorization(userID, accountID string) (NativeAccou
 			result := *account
 			err := a.saveNativeLocked()
 			a.mu.Unlock()
+			// R4.1：所有授权成功路径（手机登录/二维码）都收口于此，
+			// 统一调度一次自动健康检查；去重在 schedule 内兜底。
+			go a.scheduleAutoHealthCheck(userID, accountID, "登录成功")
 			return result, err
 		}
 		a.mu.Unlock()

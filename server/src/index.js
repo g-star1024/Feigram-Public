@@ -26,6 +26,7 @@ const downloaderSidecar = require("./downloaderSidecar");
 const { migrateStore, schemaVersion } = require("./migrations");
 const { rateLimit } = require("./rateLimit");
 const { pickAccountsSummary, sidecarTaskCount } = require("./healthSummary");
+const { startDefaultMonitor } = require("./nativeHealthMonitor");
 const tg = require("./telegramService");
 
 const port = Number(process.env.APP_PORT || 3088);
@@ -488,6 +489,8 @@ ensureStore()
     }, 30 * 1000).unref?.();
     server.listen(port, "0.0.0.0", () => {
       console.log(`Feigram Public is listening on http://0.0.0.0:${port}`);
+      // R4.1：启动账号状态巡检，状态变化经 socket 推给对应用户。
+      startDefaultMonitor(io).start();
       // 把应用内代理下发给 Go（sidecar 通常还在启动中，故带重试）。
       readSettings()
         .then((settings) => pushProxyToSidecar(settings, { attempts: 8, delayMs: 2500 }))
