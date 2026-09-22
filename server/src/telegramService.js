@@ -1118,6 +1118,7 @@ async function listChats(userId, accountId, query = "") {
   if (await nativeAccountRecord(userId, accountId)) {
     return listNativeChats(userId, accountId, query);
   }
+  throw reloginError(accountId);
   return foregroundTelegramOperation(accountId, async () => {
   const client = await getClient(userId, accountId);
   const dialogs = await withTimeout(
@@ -1154,6 +1155,7 @@ async function listFolders(userId, accountId) {
   if (await nativeAccountRecord(userId, accountId)) {
     return listNativeFolders(userId, accountId);
   }
+  throw reloginError(accountId);
   return foregroundTelegramOperation(accountId, async () => {
   const client = await getClient(userId, accountId);
   const [filterResult, dialogs] = await Promise.all([
@@ -1211,6 +1213,7 @@ async function resolvePeer(userId, accountId, peerId) {
   if (await nativeAccountRecord(userId, accountId)) {
     return resolveNativePeerEntity(userId, accountId, peerId);
   }
+  throw reloginError(accountId);
   const cached = peerCache.get(accountId)?.get(peerId);
   if (cached) return cached;
 
@@ -1235,6 +1238,7 @@ async function listMessages(userId, accountId, peerId, limit = 50, before = 0, a
   if (await nativeAccountRecord(userId, accountId)) {
     return listNativeMessages(userId, accountId, peerId, limit, before, around);
   }
+  throw reloginError(accountId);
   return foregroundTelegramOperation(accountId, async () => {
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
@@ -1269,6 +1273,7 @@ async function chatDetails(userId, accountId, peerId) {
   if (await nativeAccountRecord(userId, accountId)) {
     return downloaderSidecar.accountDetails({ userId, accountId, peer: peerId, limit: 30 });
   }
+  throw reloginError(accountId);
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
   const chat = serializeEntity(entity);
@@ -1313,6 +1318,7 @@ async function chatMedia(userId, accountId, peerId, { before = 0, limit = 30 } =
       hasMore: list.length >= pageSize
     };
   }
+  throw reloginError(accountId);
   return foregroundTelegramOperation(accountId, async () => {
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
@@ -1337,6 +1343,7 @@ async function sendText(userId, accountId, peerId, text) {
   if (await nativeAccountRecord(userId, accountId)) {
     return downloaderSidecar.accountSend({ userId, accountId, peer: peerId, text });
   }
+  throw reloginError(accountId);
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
   const message = await withTimeout(client.sendMessage(entity, { message: text }), 15000, "发送消息超时，请稍后再试");
@@ -1352,6 +1359,7 @@ async function clickMessageButton(userId, accountId, peerId, messageId, data) {
   if (await nativeAccountRecord(userId, accountId)) {
     return downloaderSidecar.accountButton({ userId, accountId, peer: peerId, message: messageId, data });
   }
+  throw reloginError(accountId);
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
   let answer;
@@ -1396,6 +1404,7 @@ async function resolveTelegramLink(userId, accountId, url) {
     }
     return downloaderSidecar.accountResolve({ userId, accountId, link: url, messageId });
   }
+  throw reloginError(accountId);
   const client = await getClient(userId, accountId);
   await ensurePeerCache();
   let entity = null;
@@ -1419,6 +1428,7 @@ async function search(userId, accountId, query) {
       .catch(() => []);
     return { chats: dialogs, messages };
   }
+  throw reloginError(accountId);
   const client = await getClient(userId, accountId);
   const dialogs = await listChats(userId, accountId, query);
   const global = query
@@ -1607,6 +1617,7 @@ function emitSilentCacheDelete(io, task) {
 }
 
 async function mediaMessage(userId, accountId, peerId, messageId) {
+  throw reloginError(accountId);
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
   const [message] = await client.getMessages(entity, { ids: [Number(messageId)] });
@@ -1712,6 +1723,7 @@ async function downloadSilentMedia(client, entity, message, outputFile, progress
 }
 
 async function ensureDownloadTask(userId, accountId, peerId, messageId, options = {}) {
+  throw reloginError(accountId);
   const id = downloadTaskId(userId, accountId, peerId, messageId);
   const existing = downloadTasks.get(id);
   if (existing) {
@@ -1795,6 +1807,7 @@ async function startDownloadTask(userId, accountId, peerId, messageId, io, optio
 }
 
 async function runDownloadTask(task, io) {
+  throw reloginError(task.accountId);
   if (task.status === "downloading") return;
   const cancelToken = { cancelled: false, paused: false, requeue: false };
   task.cancelToken = cancelToken;
@@ -2015,6 +2028,7 @@ function pumpSilentCacheQueue(io = realtimeIo) {
 }
 
 async function runSilentCacheTask(record, io = realtimeIo, runToken = null) {
+  throw reloginError(record.accountId);
   if (await fs.pathExists(record.filePath)) {
     const stat = await fs.stat(record.filePath).catch(() => null);
     if (stat) {
@@ -2138,6 +2152,7 @@ async function runSilentCacheTask(record, io = realtimeIo, runToken = null) {
 }
 
 async function cacheLargeVideosInChat(userId, accountId, peerId, io = realtimeIo) {
+  throw reloginError(accountId);
   realtimeIo = io || realtimeIo;
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
@@ -2169,6 +2184,7 @@ function listSilentCacheTasks(userId) {
 }
 
 async function silentCacheSpeedDiagnostics(userId, payload = {}) {
+  throw reloginError(userId);
   monitorSilentCacheTasks(realtimeIo);
   const maxSampleBytes = 32 * 1024 * 1024;
   const forceProbe = Boolean(payload.forceProbe);
@@ -2474,6 +2490,11 @@ function cancelDownloadTask(userId, taskId, io) {
 }
 
 async function mediaThumbnail(userId, accountId, peerId, messageId) {
+  // B：原生账号媒体由 Go blob 端点提供；遗留 GramJS 账号需重新登录转原生。
+  if (await nativeAccountRecord(userId, accountId)) {
+    return { blobUrl: goBlobSourceUrl(userId, accountId, peerId, messageId), contentType: "image/jpeg", fileName: `${accountId}-${peerId}-${messageId}.jpg` };
+  }
+  throw reloginError(accountId);
   const { client, message } = await mediaMessage(userId, accountId, peerId, messageId);
   const contentType = message.photo ? "image/jpeg" : message.document?.mimeType || "";
   const kind = mediaKind(message, contentType);
@@ -2533,6 +2554,24 @@ function clearDownloadTask(userId, taskId, io) {
 }
 
 async function downloadMedia(userId, accountId, peerId, messageId, options = {}) {
+  // B：原生账号媒体由 Go blob 端点提供（返回 blobUrl 由路由代理）；遗留 GramJS 账号需重新登录。
+  if (await nativeAccountRecord(userId, accountId)) {
+    const meta = await mediaNativeMetadata(userId, accountId, peerId, messageId).catch(() => null);
+    const message = meta?.message;
+    const isPhoto = Boolean(message?.photo);
+    const contentType = message?.document?.mimeType || (isPhoto ? "image/jpeg" : "application/octet-stream");
+    const fileName = message?.file?.name || `telegram-${accountId}-${messageId}`;
+    const size = Number(message?.file?.size || message?.document?.size || 0);
+    return {
+      blobUrl: goBlobSourceUrl(userId, accountId, peerId, messageId),
+      fileName,
+      contentType,
+      size,
+      kind: isPhoto ? "image" : (String(contentType).startsWith("video") ? "video" : "file"),
+      cacheable: false
+    };
+  }
+  throw reloginError(accountId);
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
   const [message] = await client.getMessages(entity, { ids: [Number(messageId)] });
@@ -2574,6 +2613,11 @@ async function cacheMedia(userId, accountId, peerId, messageId) {
 }
 
 async function streamVideoMedia(userId, accountId, peerId, messageId, rangeHeader, res) {
+  // B：原生账号视频走 Go blob 端点（支持 Range）；遗留 GramJS 账号需重新登录转原生。
+  if (await nativeAccountRecord(userId, accountId)) {
+    return proxyBlob(res, goBlobSourceUrl(userId, accountId, peerId, messageId), { inline: true, fileName: `media-${messageId}`, range: rangeHeader });
+  }
+  throw reloginError(accountId);
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
   const [message] = await client.getMessages(entity, { ids: [Number(messageId)] });
@@ -2682,6 +2726,7 @@ async function profilePhoto(userId, accountId, peerId = "__self") {
       fileName: `${safeId("avatar")}.jpg`
     };
   }
+  throw reloginError(accountId);
   const client = await getClient(userId, accountId);
   const entity = peerId === "__self" ? await client.getMe() : await resolvePeer(userId, accountId, peerId);
   const directories = await cacheSettings();
@@ -2701,6 +2746,40 @@ async function profilePhoto(userId, accountId, peerId = "__self") {
 
 function goDownloaderTaskId(userId, accountId, peerId, messageId) {
   return downloadTaskId(userId, accountId, peerId, messageId);
+}
+
+// B：遗留 GramJS 账号已不再受支持；统一引导重新登录转原生模式。
+function reloginError(accountId) {
+  return Object.assign(new Error("该账号需重新登录以升级到原生模式（Feigram 已移除旧版 GramJS 客户端）"), {
+    status: 409,
+    needsRelogin: true,
+    accountId
+  });
+}
+
+// B：原生账号媒体字节流统一经 Go 原生 blob 端点（支持 Range / FILE_MIGRATE / file_reference 续期），
+// Node 侧仅做服务端代理，不整份落地。
+async function proxyBlob(res, blobUrl, { inline = true, fileName = "media", range } = {}) {
+  const upstream = await fetch(blobUrl, { headers: range ? { Range: String(range) } : {} });
+  if (!upstream.ok && upstream.status !== 206) return false;
+  const status = upstream.status === 206 ? 206 : 200;
+  const headers = {};
+  const ct = upstream.headers.get("content-type");
+  const cl = upstream.headers.get("content-length");
+  const cr = upstream.headers.get("content-range");
+  if (ct) headers["Content-Type"] = ct;
+  if (cl) headers["Content-Length"] = cl;
+  if (cr) headers["Content-Range"] = cr;
+  headers["Accept-Ranges"] = "bytes";
+  headers["Cache-Control"] = "no-store";
+  headers["Content-Disposition"] = `${inline ? "inline" : "attachment"}; filename="${encodeURIComponent(fileName)}"`;
+  res.writeHead(status, headers);
+  for await (const chunk of upstream.body) {
+    if (res.destroyed) break;
+    if (!res.write(chunk)) await new Promise((resolve) => res.once("drain", resolve));
+  }
+  res.end();
+  return true;
 }
 
 // M4.1：Go 下载器的 http-bridge 回退源直接指向 Go 原生 blob 端点，
@@ -3023,6 +3102,7 @@ async function cacheLargeVideosInChatGo(userId, accountId, peerId, io = realtime
     }
     return { queued };
   }
+  throw reloginError(accountId);
   const client = await getClient(userId, accountId);
   const entity = await resolvePeer(userId, accountId, peerId);
   const recent = await client.getMessages(entity, { limit: 120 }).catch(() => []);
@@ -3251,6 +3331,7 @@ module.exports = {
   resumeDownloadTask: resumeGoDownloadTask,
   startDownloadTask: startGoDownloadTask,
   streamVideoMedia,
+  proxyBlob,
   listAccounts,
   migrateAccountToGo,
   listChats,

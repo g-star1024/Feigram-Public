@@ -303,6 +303,10 @@ app.get("/api/media/:account/:peer/:messageId", asyncRoute(async (req, res) => {
   }
   const media = await tg.downloadMedia(req.user.id, req.params.account, req.params.peer, req.params.messageId);
   const range = req.headers.range;
+  if (media.blobUrl) {
+    await tg.proxyBlob(res, media.blobUrl, { inline: req.query.inline === "1", fileName: media.fileName, range });
+    return;
+  }
   if (media.buffer) {
     res.setHeader("Content-Type", media.contentType);
     res.setHeader("Content-Length", media.size);
@@ -341,6 +345,10 @@ app.get("/api/media/:account/:peer/:messageId", asyncRoute(async (req, res) => {
 
 app.get("/api/media/:account/:peer/:messageId/thumbnail", asyncRoute(async (req, res) => {
   const thumb = await tg.mediaThumbnail(req.user.id, req.params.account, req.params.peer, req.params.messageId);
+  if (thumb.blobUrl) {
+    await tg.proxyBlob(res, thumb.blobUrl, { inline: true, fileName: thumb.fileName });
+    return;
+  }
   res.setHeader("Content-Type", thumb.contentType);
   res.setHeader("Cache-Control", "private, max-age=86400");
   res.sendFile(thumb.filePath);
