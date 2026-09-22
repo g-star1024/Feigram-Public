@@ -6,7 +6,9 @@ import {
   Download,
   ExternalLink,
   Folder,
+  Home,
   Info,
+  Library,
   LogOut,
   MessageSquare,
   Moon,
@@ -28,6 +30,7 @@ import {
 import { api, appLogin, getToken, setToken as saveToken } from "./api";
 import "./styles/tokens.css";
 import "./styles/app.css";
+import "./styles/shell.css";
 
 function cx(...items) {
   return items.filter(Boolean).join(" ");
@@ -1284,6 +1287,89 @@ function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, aut
   );
 }
 
+/* fnOS 风首页 Dashboard（04 §6.2）：统计卡 + 快捷操作 + 近期活动 */
+function Dashboard({ accounts, downloads, silentCaches, silentCacheState, me, activeDownloads, onOpenView, onAddAccount, onOpenAnnouncements }) {
+  const completed = downloads.filter((item) => item.status === "completed").length;
+  const stats = [
+    { icon: <Users size={20} />, tone: "blue", value: accounts.length, label: `Telegram 账号${accounts.length ? ` · ${accounts.filter((item) => item.authMode === "native").length} 个原生` : ""}` },
+    { icon: <Download size={20} />, tone: "amber", value: activeDownloads, label: "进行中下载" },
+    { icon: <Library size={20} />, tone: "green", value: completed, label: "已完成下载" },
+    { icon: <Folder size={20} />, tone: "red", value: silentCaches.length, label: `缓存任务${silentCacheState?.enabled ? "" : "（已暂停）"}` }
+  ];
+  const recent = downloads.slice(0, 6);
+  return (
+    <div className="fn-dash">
+      <div className="fn-stat-grid">
+        {stats.map((stat) => <div className="fn-card fn-stat-card" key={stat.label}>
+          <span className={cx("fn-stat-icon", `fn-stat-icon--${stat.tone}`)}>{stat.icon}</span>
+          <span className="fn-stat-copy"><strong>{stat.value}</strong><span>{stat.label}</span></span>
+        </div>)}
+      </div>
+      <div className="fn-dash-sections">
+        <section className="fn-card">
+          <div className="fn-card-header">
+            <h3>近期活动</h3>
+            <button className="fn-btn fn-btn--ghost" onClick={() => onOpenView("downloads")}>下载中心</button>
+          </div>
+          <div className="fn-card-body">
+            <div className="fn-activity-list">
+              {recent.map((item) => <button className="fn-activity-item" key={item.id} onClick={() => onOpenView("downloads")}>
+                <span className={cx("fn-stat-icon", item.status === "completed" ? "fn-stat-icon--green" : "fn-stat-icon--blue")} style={{ height: 32, width: 32 }}>
+                  {item.kind === "video" ? <Play size={15} /> : <Download size={15} />}
+                </span>
+                <span className="fn-activity-copy">
+                  <strong>{item.fileName || "未命名文件"}</strong>
+                  <small>{item.status === "completed" ? "已完成" : item.status === "error" ? "失败" : item.status === "downloading" ? `下载中 ${formatBytes(item.downloaded)}/${formatBytes(item.size)}` : "排队中"} · {formatTime(item.updatedAt)}</small>
+                </span>
+              </button>)}
+              {!recent.length && <div className="fn-empty">
+                <Library size={28} />
+                <h3>还没有下载记录</h3>
+                <span>从会话中选择媒体即可开始缓存或下载</span>
+              </div>}
+            </div>
+          </div>
+        </section>
+        <section className="fn-card">
+          <div className="fn-card-header"><h3>快捷操作</h3></div>
+          <div className="fn-card-body">
+            <div className="fn-quick-actions">
+              <button className="fn-quick-action" onClick={() => onOpenView("chats")}><MessageSquare size={18} />打开会话</button>
+              <button className="fn-quick-action" onClick={onAddAccount}><Plus size={18} />添加账号</button>
+              <button className="fn-quick-action" onClick={() => onOpenView("library")}><Library size={18} />资源库</button>
+              <button className="fn-quick-action" onClick={onOpenAnnouncements}><Bell size={18} />公告与通知</button>
+            </div>
+            {me?.username && <p style={{ color: "var(--fn-text-3)", fontSize: 13, margin: "16px 0 0" }}>当前登录：{me.username}{me.role === "admin" ? "（管理员）" : ""}</p>}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+/* 资源库（04 §6.6）：已缓存媒体卡片网格 */
+function LibraryPage({ accountId, silentCaches, onPlay }) {
+  const cached = silentCaches.filter((task) => task.status === "completed" || task.fileName);
+  return <div className="fn-dash">
+    <div className="fn-lib-grid">
+      {cached.map((task) => <button className="fn-card fn-lib-card" key={task.id} onClick={() => onPlay(task)}>
+        <span className="fn-lib-icon">{task.kind === "image" ? <Library size={18} /> : task.kind === "file" ? <Folder size={18} /> : <Play size={18} />}</span>
+        <span className="fn-lib-copy">
+          <strong>{task.fileName || `消息 ${task.messageId}`}</strong>
+          <small>{task.kind || "video"} · {formatBytes(task.size)} · {formatTime(task.updatedAt || task.createdAt)}</small>
+        </span>
+        {task.status && <span className={cx("fn-badge fn-badge--soft", task.status !== "completed" && `fn-badge--${task.status === "error" ? "danger" : "warning"}`)}>{task.status === "completed" ? "已缓存" : task.status === "error" ? "失败" : "缓存中"}</span>}
+      </button>)}
+      {!cached.length && <div className="fn-card fn-empty" style={{ gridColumn: "1 / -1" }}>
+        <Library size={28} />
+        <h3>资源库为空</h3>
+        <span>开启后台缓存的会话会自动把大视频收录到这里</span>
+      </div>}
+    </div>
+    {!accountId && <p style={{ color: "var(--fn-text-3)", fontSize: 13 }}>尚未选择 Telegram 账号，部分媒体可能无法打开。</p>}
+  </div>;
+}
+
 function App() {
   const [token, setTokenState] = useState(getToken());
   const [me, setMe] = useState(null);
@@ -1316,6 +1402,8 @@ function App() {
   const [toast, setToast] = useState("");
   const [adminOpen, setAdminOpen] = useState(false);
   const [adminInitialTab, setAdminInitialTab] = useState("accounts");
+  const [view, setView] = useState("home");
+  const [downloadOpen, setDownloadOpen] = useState(false);
   const [notifications, setNotifications] = useState("Notification" in window && Notification.permission === "granted");
   const [announcements, setAnnouncements] = useState([]);
   const [about, setAbout] = useState({});
@@ -1620,6 +1708,25 @@ function App() {
     setPlayback(item);
   }
 
+  function openLibraryItem(task) {
+    if (!task?.accountId || !task?.peerId) {
+      notify("该缓存任务缺少来源账号信息，无法打开");
+      return;
+    }
+    const item = {
+      accountId: task.accountId,
+      peerId: task.peerId,
+      messageId: task.messageId,
+      fileName: task.fileName,
+      kind: task.kind || "video"
+    };
+    if (item.kind === "video") {
+      setPlayback(item);
+      return;
+    }
+    window.open(mediaUrl(task.accountId, task.peerId, task.messageId, item.kind === "image"), "_blank", "noopener,noreferrer");
+  }
+
   function openInfoMedia(file) {
     if (!activeChat || !file) return;
     const item = {
@@ -1917,18 +2024,64 @@ function App() {
 
   if (!token) return <AuthGate onReady={(nextToken, user) => { setTokenState(nextToken); setMe(user); }} />;
 
+  const activeDownloads = downloads.filter((item) => ["queued", "downloading"].includes(item.status)).length;
+  const viewTitles = { home: "首页", chats: "会话", downloads: "下载中心", library: "资源库" };
+
   return (
-    <main className={cx("app-shell", activeChat && "chat-open")}>
-      {toast && <div className="toast-banner">{toast}</div>}
-      <aside className="sidebar">
-        <div className="topbar">
-          <div className="brand-compact"><MessageSquare size={20} /> Feigram</div>
-          <div className="tools">
-            <button className="icon-button" onClick={toggleTheme} title="切换主题">{theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}</button>
-            <button className={cx("icon-button", unreadAnnouncement && "has-notice")} onClick={enableNotifications} title="通知与公告"><Bell size={18} /></button>
-            <button className="icon-button" onClick={() => { setAdminInitialTab("accounts"); setAdminOpen(true); }} title={me?.role === "admin" ? "管理员后台" : "账号后台"}><Users size={18} /></button>
-          </div>
+    <div className="fn-layout">
+      {toast && <div className="toast-banner" role="status">{toast}</div>}
+      <nav className="fn-dock" aria-label="主导航">
+        <div className="fn-dock-brand" title="Feigram"><MessageSquare size={22} /></div>
+        <div className="fn-dock-items">
+          <button className={cx("fn-dock-item", view === "home" && "active")} onClick={() => setView("home")} title="首页" aria-label="首页"><Home size={20} /><span>首页</span></button>
+          <button className={cx("fn-dock-item", view === "chats" && "active")} onClick={() => setView("chats")} title="会话" aria-label="会话"><MessageSquare size={20} /><span>会话</span></button>
+          <button className={cx("fn-dock-item", view === "downloads" && "active")} onClick={() => setView("downloads")} title="下载中心" aria-label="下载中心">
+            <Download size={20} /><span>下载</span>
+            {activeDownloads > 0 && <b className="fn-dock-count">{activeDownloads}</b>}
+          </button>
+          <button className={cx("fn-dock-item", view === "library" && "active")} onClick={() => setView("library")} title="资源库" aria-label="资源库"><Library size={20} /><span>资源库</span></button>
+          <button className="fn-dock-item" onClick={() => { setAdminInitialTab("accounts"); setAdminOpen(true); }} title={me?.role === "admin" ? "管理员后台" : "账号后台"} aria-label="管理"><Users size={20} /><span>管理</span></button>
+          {me?.role === "admin" && <button className="fn-dock-item" onClick={() => { setAdminInitialTab("server"); setAdminOpen(true); }} title="设置" aria-label="设置"><Settings size={20} /><span>设置</span></button>}
         </div>
+        <div className="fn-dock-foot">
+          <button className="fn-dock-item" onClick={toggleTheme} title="切换主题" aria-label="切换主题">{theme === "dark" ? <Sun size={20} /> : <Moon size={20} />}<span>主题</span></button>
+        </div>
+      </nav>
+      <div className="fn-main">
+        <header className="fn-topbar">
+          <div className="fn-topbar-title">
+            {viewTitles[view] || "Feigram"}
+            {view === "chats" && activeChat && <small>/ {activeChat.title}</small>}
+          </div>
+          <div className="fn-topbar-actions">
+            <button className={cx("icon-button", unreadAnnouncement && "has-notice")} onClick={enableNotifications} title="通知与公告" aria-label="通知与公告"><Bell size={18} /></button>
+          </div>
+        </header>
+        <div className={cx("fn-content", view === "chats" && "fn-content--flush")}>
+          {view === "home" && <Dashboard
+            accounts={accounts}
+            downloads={downloads}
+            silentCaches={silentCaches}
+            silentCacheState={silentCacheState}
+            me={me}
+            activeDownloads={activeDownloads}
+            onOpenView={setView}
+            onAddAccount={() => { setAdminInitialTab("accounts"); setAdminOpen(true); }}
+            onOpenAnnouncements={enableNotifications}
+          />}
+          {view === "library" && <LibraryPage accountId={accountId} silentCaches={silentCaches} onPlay={openLibraryItem} />}
+          {view === "downloads" && <DownloadCenter
+            open
+            downloads={downloads}
+            onStart={startDownload}
+            onCancel={cancelDownload}
+            onClear={clearDownload}
+            onDelete={deleteDownload}
+            onPlay={playDownload}
+            onClose={() => setView("home")}
+          />}
+          {view === "chats" && <div className="app-shell fn-chats">
+      <aside className="sidebar">
         <div className="account-row current-account-row">
           {activeAccount ? <>
             <Avatar accountId={activeAccount.id} label={activeAccount.displayName || activeAccount.label} size={40} />
@@ -2039,6 +2192,9 @@ function App() {
           }}><RefreshCw size={16} />重新加载</button>}
         </div>}
       </section>
+          </div>}
+        </div>
+      </div>
       <ChatInfoPanel
         open={chatInfoOpen}
         accountId={accountId}
@@ -2079,7 +2235,7 @@ function App() {
       />
       <InfoModal announcements={announcements} about={about} open={announcementOpen} onClose={() => setAnnouncementOpen(false)} />
       <PlaybackModal item={playback} playerMode={appSettings.playerMode} onClose={() => setPlayback(null)} />
-    </main>
+    </div>
   );
 }
 
