@@ -36,24 +36,33 @@ echo "核证 $(basename "$FPK")"
 gzip -t "$FPK" && say 0 "gzip 完整性" || say 1 "gzip 完整性"
 
 # manifest version
-MAN_VERSION="$(tar -xzOf "$FPK" manifest | grep -E '^version=' | head -1 | cut -d= -f2)"
+# 注意：本脚本开了 pipefail，`cmd | grep -q` 会因 grep 提前退出、上游 SIGPIPE(141)
+# 而被误判为失败（概率性竞态，2026-09-22 踩中：包内确实有前端 bundle 却报"缺少"）。
+# 故一律用 grep -m1 早停取首行，条件判定用 here-string（无管道）规避 SIGPIPE。
+MAN_VERSION="$(tar -xzOf "$FPK" manifest | grep -E -m1 '^version=' | cut -d= -f2)"
 [ "$MAN_VERSION" = "$VERSION" ] && say 0 "manifest version=${VERSION}" || say 1 "manifest version（实际 ${MAN_VERSION}）"
 
 # cmd/main APP_VERSION
-APPVER="$(tar -xzOf "$FPK" cmd/main | grep -E '^export APP_VERSION=' | head -1 | sed -E 's/.*="([^"]*)".*/\1/')"
+APPVER="$(tar -xzOf "$FPK" cmd/main | grep -E -m1 '^export APP_VERSION=' | sed -E 's/.*="([^"]*)".*/\1/')"
 [ "$APPVER" = "$VERSION" ] && say 0 "cmd/main APP_VERSION=${VERSION}" || say 1 "cmd/main APP_VERSION（实际 ${APPVER}）"
 
 # app.tgz 内置顶公告版本
 TOP_ID="$(tar -xzOf "$FPK" app.tgz | tar -xzO ./server/src/releaseContent.js 2>/dev/null \
-  | grep -E 'id: "release-' | head -1 | sed -E 's/.*release-([^"]*)".*/\1/')"
+  | grep -E -m1 'id: "release-' | sed -E 's/.*release-([^"]*)".*/\1/')"
 [ "$TOP_ID" = "$VERSION" ] && say 0 "应用内置顶公告 release-${VERSION}" || say 1 "置顶公告（实际 ${TOP_ID}）"
 
 # 包内 Go 二进制与前端 bundle 存在（均在 app.tgz 内，归档路径无 app/ 前缀）
 APP_LISTING="$(tar -xzOf "$FPK" app.tgz | tar -tz 2>/dev/null)"
-echo "$APP_LISTING" | grep -Eq 'bin/feigram-downloader$' \
-  && say 0 "包含 Go 下载器二进制" || say 1 "缺少 Go 下载器二进制"
-echo "$APP_LISTING" | grep -Eq 'server/public/assets/index-.*\.(js|css)$' \
-  && say 0 "包含前端 bundle" || say 1 "缺少前端 bundle"
+if grep -Eq 'bin/feigram-downloader$' <<<"$APP_LISTING"; then
+  say 0 "包含 Go 下载器二进制"
+else
+  say 1 "缺少 Go 下载器二进制"
+fi
+if grep -Eq 'server/public/assets/index-.*\.(js|css)$' <<<"$APP_LISTING"; then
+  say 0 "包含前端 bundle"
+else
+  say 1 "缺少前端 bundle"
+fi
 
 echo
 if [ "$ok" = "1" ]; then
