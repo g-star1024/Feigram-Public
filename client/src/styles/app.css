@@ -1993,3 +1993,45 @@ textarea {
   background: var(--fn-warning-a);
   border: 1px solid var(--fn-warning);
 }
+
+/* R4.6 · 管理后台服务端/隐私设置 tab 与诊断/缓存 tab 视觉对齐：每个设置分组用统一卡片包裹。 */
+.admin-card {
+  background: var(--fn-surface-2);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius);
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.admin-card > h3 {
+  margin: 0;
+}
+
+/* R4.6 · 双端必做：窄屏（平板/手机）下管理后台布局核查，避免横向溢出与卡片挤压。 */
+@media (max-width: 720px) {
+  .admin-modal {
+    width: 100%;
+    height: calc(100dvh - 16px);
+    max-height: calc(100dvh - 16px);
+  }
+
+  .account-admin-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .account-admin-row > div {
+    flex: 1 1 180px;
+  }
+
+  .silent-cache-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .cache-speed-controls.downloader-config-controls {
+    grid-template-columns: 1fr;
+  }
+}

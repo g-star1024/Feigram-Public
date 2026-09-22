@@ -908,36 +908,46 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
           </div>
         </div>}
         {canAdmin && tab === "server" && <form className="stack" onSubmit={saveSettings}>
-          <h3>服务端设置</h3>
-          <label><span>公开访问地址</span><input value={settings.publicBaseUrl} onChange={(e) => setSettings({ ...settings, publicBaseUrl: e.target.value })} placeholder="https://feigram.example.com" required /></label>
-          <label><span>Telegram API ID</span><input type="password" inputMode="numeric" autoComplete="off" value={settings.telegramApiId} onChange={(e) => setSettings({ ...settings, telegramApiId: e.target.value })} placeholder={apiIdPlaceholder} /></label>
-          <label><span>Telegram API Hash</span><input type="password" value={settings.telegramApiHash} onChange={(e) => setSettings({ ...settings, telegramApiHash: e.target.value })} placeholder={hashPlaceholder} /></label>
-          {settings.telegramLegalNotice ? <p className="legal-notice">{settings.telegramLegalNotice}</p> : null}
-          <h3>缓存下载设置</h3>
-          <label><span>基础缓存下载位置</span><input value={settings.cacheBaseDir} onChange={(e) => setSettings({ ...settings, cacheBaseDir: e.target.value })} placeholder="/data/downloads" required /></label>
-          <label><span>图片缓存位置</span><input value={settings.imageCacheDir} onChange={(e) => setSettings({ ...settings, imageCacheDir: e.target.value })} placeholder="留空则使用 基础缓存/images" /></label>
-          <label><span>视频缓存位置</span><input value={settings.videoCacheDir} onChange={(e) => setSettings({ ...settings, videoCacheDir: e.target.value })} placeholder="留空则使用 基础缓存/videos" /></label>
-          <label><span>文件缓存位置</span><input value={settings.fileCacheDir} onChange={(e) => setSettings({ ...settings, fileCacheDir: e.target.value })} placeholder="留空则使用 基础缓存/files" /></label>
-          <label><span>聊天缓存自动清除天数</span><input type="number" min="1" max="3650" value={settings.cacheRetentionDays} onChange={(e) => setSettings({ ...settings, cacheRetentionDays: e.target.value })} required /></label>
-          <h3>播放器设置</h3>
-          <label><span>视频在线播放模式</span><select value={settings.playerMode} onChange={(e) => setSettings({ ...settings, playerMode: e.target.value })}>
-            <option value="browser">原始视频在线播放（推荐）</option>
-            <option value="local">本地播放器（下载后打开）</option>
-          </select></label>
-          <p className="hint">推荐优先使用原始视频在线播放；遇到浏览器不支持的编码时，可切换为本地播放器模式。</p>
-          <h3>网络代理</h3>
-          <label><span>代理地址</span><input value={settings.proxyUrl} onChange={(e) => setSettings({ ...settings, proxyUrl: e.target.value })} placeholder="socks5://127.0.0.1:7890（留空则直连）" /></label>
-          <p className="hint">Telegram 登录、会话与媒体下载都由 Go 侧出网，这里配置的代理会同时作用于 MTProto 连接与文件下载。支持 socks5 / socks5h / http / https，可带账号密码。留空时回落到环境变量（FEIGRAM_PROXY_URL、ALL_PROXY、HTTPS_PROXY 等），仍然留空则直连。</p>
-          {downloaderState?.proxy ? <p className={cx("proxy-status", downloaderState.proxy.source === "invalid" && "is-error")}>
-            <span>当前生效：<b>{proxySourceLabel(downloaderState.proxy.source)}</b></span>
-            {downloaderState.proxy.address ? <span className="proxy-address">{downloaderState.proxy.address}</span> : null}
-            {downloaderState.proxy.error ? <span className="proxy-error">{downloaderState.proxy.error}</span> : null}
-          </p> : <p className="hint">Go 下载服务尚未就绪，暂时读不到代理的生效状态。</p>}
-          <h3>下载服务</h3>
-          <label><span>Go 下载服务地址</span><input value={settings.downloaderSidecarUrl} onChange={(e) => setSettings({ ...settings, downloaderSidecarUrl: e.target.value })} placeholder="http://127.0.0.1:3090" /></label>
-          <p className="hint">Go 下载服务已接管大文件队列、断点续传、限速、并发和文件落盘；当前媒体源仍通过本机 Telegram 桥接，后续会继续迁移到原生 Go/tdl 传输层。</p>
-          {saved && <p className="success">{saved}</p>}
-          <button className="primary"><Settings size={18} />保存服务端设置</button>
+          <section className="admin-card">
+            <h3>服务端设置</h3>
+            <label><span>公开访问地址</span><input value={settings.publicBaseUrl} onChange={(e) => setSettings({ ...settings, publicBaseUrl: e.target.value })} placeholder="https://feigram.example.com" required /></label>
+            <label><span>Telegram API ID</span><input type="password" inputMode="numeric" autoComplete="off" value={settings.telegramApiId} onChange={(e) => setSettings({ ...settings, telegramApiId: e.target.value })} placeholder={apiIdPlaceholder} /></label>
+            <label><span>Telegram API Hash</span><input type="password" value={settings.telegramApiHash} onChange={(e) => setSettings({ ...settings, telegramApiHash: e.target.value })} placeholder={hashPlaceholder} /></label>
+            {settings.telegramLegalNotice ? <p className="legal-notice">{settings.telegramLegalNotice}</p> : null}
+          </section>
+          <section className="admin-card">
+            <h3>缓存下载设置</h3>
+            <label><span>基础缓存下载位置</span><input value={settings.cacheBaseDir} onChange={(e) => setSettings({ ...settings, cacheBaseDir: e.target.value })} placeholder="/data/downloads" required /></label>
+            <label><span>图片缓存位置</span><input value={settings.imageCacheDir} onChange={(e) => setSettings({ ...settings, imageCacheDir: e.target.value })} placeholder="留空则使用 基础缓存/images" /></label>
+            <label><span>视频缓存位置</span><input value={settings.videoCacheDir} onChange={(e) => setSettings({ ...settings, videoCacheDir: e.target.value })} placeholder="留空则使用 基础缓存/videos" /></label>
+            <label><span>文件缓存位置</span><input value={settings.fileCacheDir} onChange={(e) => setSettings({ ...settings, fileCacheDir: e.target.value })} placeholder="留空则使用 基础缓存/files" /></label>
+            <label><span>聊天缓存自动清除天数</span><input type="number" min="1" max="3650" value={settings.cacheRetentionDays} onChange={(e) => setSettings({ ...settings, cacheRetentionDays: e.target.value })} required /></label>
+          </section>
+          <section className="admin-card">
+            <h3>播放器设置</h3>
+            <label><span>视频在线播放模式</span><select value={settings.playerMode} onChange={(e) => setSettings({ ...settings, playerMode: e.target.value })}>
+              <option value="browser">原始视频在线播放（推荐）</option>
+              <option value="local">本地播放器（下载后打开）</option>
+            </select></label>
+            <p className="hint">推荐优先使用原始视频在线播放；遇到浏览器不支持的编码时，可切换为本地播放器模式。</p>
+          </section>
+          <section className="admin-card">
+            <h3>网络代理</h3>
+            <label><span>代理地址</span><input value={settings.proxyUrl} onChange={(e) => setSettings({ ...settings, proxyUrl: e.target.value })} placeholder="socks5://127.0.0.1:7890（留空则直连）" /></label>
+            <p className="hint">Telegram 登录、会话与媒体下载都由 Go 侧出网，这里配置的代理会同时作用于 MTProto 连接与文件下载。支持 socks5 / socks5h / http / https，可带账号密码。留空时回落到环境变量（FEIGRAM_PROXY_URL、ALL_PROXY、HTTPS_PROXY 等），仍然留空则直连。</p>
+            {downloaderState?.proxy ? <p className={cx("proxy-status", downloaderState.proxy.source === "invalid" && "is-error")}>
+              <span>当前生效：<b>{proxySourceLabel(downloaderState.proxy.source)}</b></span>
+              {downloaderState.proxy.address ? <span className="proxy-address">{downloaderState.proxy.address}</span> : null}
+              {downloaderState.proxy.error ? <span className="proxy-error">{downloaderState.proxy.error}</span> : null}
+            </p> : <p className="hint">Go 下载服务尚未就绪，暂时读不到代理的生效状态。</p>}
+          </section>
+          <section className="admin-card">
+            <h3>下载服务</h3>
+            <label><span>Go 下载服务地址</span><input value={settings.downloaderSidecarUrl} onChange={(e) => setSettings({ ...settings, downloaderSidecarUrl: e.target.value })} placeholder="http://127.0.0.1:3090" /></label>
+            <p className="hint">Go 下载服务已接管大文件队列、断点续传、限速、并发和文件落盘；当前媒体源仍通过本机 Telegram 桥接，后续会继续迁移到原生 Go/tdl 传输层。</p>
+            {saved && <p className="success">{saved}</p>}
+            <button className="primary"><Settings size={18} />保存服务端设置</button>
+          </section>
         </form>}
         {canAdmin && tab === "cache-info" && <div className="silent-cache-panel">
           <div className="silent-cache-head">
@@ -1010,17 +1020,23 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
           </div>
         </div>}
         {canAdmin && tab === "privacy" && <form className="stack" onSubmit={saveSettings}>
-          <h3>通知设置</h3>
-          <label className="check-row"><input type="checkbox" checked={settings.notificationEnabled} onChange={(e) => setSettings({ ...settings, notificationEnabled: e.target.checked })} /><span>启用桌面通知</span></label>
-          <label className="check-row"><input type="checkbox" checked={settings.notificationPreview} onChange={(e) => setSettings({ ...settings, notificationPreview: e.target.checked })} /><span>通知显示消息预览</span></label>
-          <h3>隐私设置</h3>
-          <label className="check-row"><input type="checkbox" checked={settings.privacyOpenTelegramLinksInApp} onChange={(e) => setSettings({ ...settings, privacyOpenTelegramLinksInApp: e.target.checked })} /><span>Telegram 链接优先在客户端内打开</span></label>
-          <label className="check-row"><input type="checkbox" checked={settings.privacyMediaPreview} onChange={(e) => setSettings({ ...settings, privacyMediaPreview: e.target.checked })} /><span>聊天中显示图片和视频预览</span></label>
-          <label className="check-row"><input type="checkbox" checked={settings.messageShowSender} onChange={(e) => setSettings({ ...settings, messageShowSender: e.target.checked })} /><span>群聊消息显示发言人头像和 ID</span></label>
-          <h3>分组设置</h3>
-          <label className="check-row"><input type="checkbox" checked={settings.foldersEnabled} onChange={(e) => setSettings({ ...settings, foldersEnabled: e.target.checked })} /><span>同步 Telegram 聊天文件夹</span></label>
-          <label className="check-row"><input type="checkbox" checked={settings.foldersShowArchived} onChange={(e) => setSettings({ ...settings, foldersShowArchived: e.target.checked })} /><span>会话列表显示归档会话</span></label>
-          <label className="check-row"><input type="checkbox" checked={settings.foldersAutoSelectFirst} onChange={(e) => setSettings({ ...settings, foldersAutoSelectFirst: e.target.checked })} /><span>打开账号后自动选择第一个会话</span></label>
+          <section className="admin-card">
+            <h3>通知设置</h3>
+            <label className="check-row"><input type="checkbox" checked={settings.notificationEnabled} onChange={(e) => setSettings({ ...settings, notificationEnabled: e.target.checked })} /><span>启用桌面通知</span></label>
+            <label className="check-row"><input type="checkbox" checked={settings.notificationPreview} onChange={(e) => setSettings({ ...settings, notificationPreview: e.target.checked })} /><span>通知显示消息预览</span></label>
+          </section>
+          <section className="admin-card">
+            <h3>隐私设置</h3>
+            <label className="check-row"><input type="checkbox" checked={settings.privacyOpenTelegramLinksInApp} onChange={(e) => setSettings({ ...settings, privacyOpenTelegramLinksInApp: e.target.checked })} /><span>Telegram 链接优先在客户端内打开</span></label>
+            <label className="check-row"><input type="checkbox" checked={settings.privacyMediaPreview} onChange={(e) => setSettings({ ...settings, privacyMediaPreview: e.target.checked })} /><span>聊天中显示图片和视频预览</span></label>
+            <label className="check-row"><input type="checkbox" checked={settings.messageShowSender} onChange={(e) => setSettings({ ...settings, messageShowSender: e.target.checked })} /><span>群聊消息显示发言人头像和 ID</span></label>
+          </section>
+          <section className="admin-card">
+            <h3>分组设置</h3>
+            <label className="check-row"><input type="checkbox" checked={settings.foldersEnabled} onChange={(e) => setSettings({ ...settings, foldersEnabled: e.target.checked })} /><span>同步 Telegram 聊天文件夹</span></label>
+            <label className="check-row"><input type="checkbox" checked={settings.foldersShowArchived} onChange={(e) => setSettings({ ...settings, foldersShowArchived: e.target.checked })} /><span>会话列表显示归档会话</span></label>
+            <label className="check-row"><input type="checkbox" checked={settings.foldersAutoSelectFirst} onChange={(e) => setSettings({ ...settings, foldersAutoSelectFirst: e.target.checked })} /><span>打开账号后自动选择第一个会话</span></label>
+          </section>
           {saved && <p className="success">{saved}</p>}
           <button className="primary"><Settings size={18} />保存隐私设置</button>
         </form>}
