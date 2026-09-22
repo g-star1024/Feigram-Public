@@ -248,7 +248,8 @@ app.delete("/api/accounts/:id", asyncRoute(async (req, res) => {
 }));
 
 app.get("/api/chats", asyncRoute(async (req, res) => {
-  res.json(await tg.listChats(req.user.id, req.query.account, req.query.query || ""));
+  const includeArchived = req.query.includeArchived === "1" || req.query.includeArchived === "true";
+  res.json(await tg.listChats(req.user.id, req.query.account, req.query.query || "", includeArchived));
 }));
 
 app.get("/api/chats/:account/:peer/details", asyncRoute(async (req, res) => {

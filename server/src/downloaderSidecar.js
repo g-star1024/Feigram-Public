@@ -227,8 +227,13 @@ function accountChatPath(accountId, action, params = {}) {
   return `/api/accounts/${encodeURIComponent(accountId)}/${action}${query ? `?${query}` : ""}`;
 }
 
-function accountDialogs({ userId, accountId, limit = 0, query = "" }) {
-  return request(accountChatPath(accountId, "dialogs", { userId, limit, query }), { timeoutMs: 45000 });
+function accountDialogs({ userId, accountId, limit = 0, query = "", includeArchived = false }) {
+  // R4.0a：Node 超时（原 45s）曾短于 Go 的 60s，慢网络下必然先被 Node 掐断、
+  // 用户只能看到一句无指向的 abort。改为 65s，让 Go 侧带分类的错误能正常返回。
+  return request(
+    accountChatPath(accountId, "dialogs", { userId, limit, query, includeArchived: includeArchived ? 1 : 0 }),
+    { timeoutMs: 65000 }
+  );
 }
 
 function accountFolders({ userId, accountId }) {

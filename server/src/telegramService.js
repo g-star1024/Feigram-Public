@@ -391,13 +391,24 @@ function rememberNativePeers(accountId, chats) {
   });
 }
 
-async function listNativeChats(userId, accountId, query = "") {
-  const items = await downloaderSidecar.accountDialogs({
-    userId,
-    accountId,
-    limit: DIALOG_FETCH_LIMIT,
-    query
-  });
+async function listNativeChats(userId, accountId, query = "", includeArchived = false) {
+  let items;
+  try {
+    items = await downloaderSidecar.accountDialogs({
+      userId,
+      accountId,
+      limit: DIALOG_FETCH_LIMIT,
+      query,
+      includeArchived
+    });
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      // R4.0a：裸 AbortError（"The operation was aborted"）对用户无意义，
+      // 换成可读文案并给出可操作的排查方向。
+      throw new Error("会话列表加载超时（超过 65 秒）。网络可能不通，请在「设置 → 网络代理」核对地址与端口，或稍后重试");
+    }
+    throw error;
+  }
   const chats = Array.isArray(items) ? items : [];
   rememberNativePeers(accountId, chats);
   return chats;
@@ -436,10 +447,10 @@ async function resolveNativePeerEntity(userId, accountId, peerId) {
   return entity;
 }
 
-async function listChats(userId, accountId, query = "") {
+async function listChats(userId, accountId, query = "", includeArchived = false) {
   // M4.2：native 账号经 Go 原生 MTProto 读取会话列表，返回结构与 GramJS 路径一致。
   if (await nativeAccountRecord(userId, accountId)) {
-    return listNativeChats(userId, accountId, query);
+    return listNativeChats(userId, accountId, query, includeArchived);
   }
   throw reloginError(accountId);
 }

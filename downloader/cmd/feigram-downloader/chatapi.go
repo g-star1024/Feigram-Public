@@ -167,8 +167,11 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "dialogs":
 		limit := clampChatLimit(query.Get("limit"), defaultChatDialogLimit, maxChatDialogLimit)
+		// R4.0a：默认不显示归档时，没必要每次都额外拉 folder 1（双倍 RPC 开销，
+		// 结果还会被前端过滤掉）。只有调用方显式要归档才拉。
+		includeArchived := query.Get("includeArchived") == "1" || query.Get("includeArchived") == "true"
 		items, err := a.runNativeChatQuery(ctx, client, func(ctx context.Context, api *tg.Client) (any, error) {
-			return a.fetchNativeDialogs(ctx, api, account, limit, query.Get("query"))
+			return a.fetchNativeDialogs(ctx, api, account, limit, query.Get("query"), includeArchived)
 		})
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": compactError(err)})
@@ -308,13 +311,14 @@ func (a *App) resolveChatAccount(userID, accountID string) (NativeAccount, error
 
 // --- 会话列表 -------------------------------------------------------------
 
-func (a *App) fetchNativeDialogs(ctx context.Context, api *tg.Client, account NativeAccount, limit int, query string) ([]map[string]any, error) {
+func (a *App) fetchNativeDialogs(ctx context.Context, api *tg.Client, account NativeAccount, limit int, query string, includeArchived bool) ([]map[string]any, error) {
 	items := []map[string]any{}
 	index := map[string]nativePeerInfo{}
 	seen := map[string]bool{}
 	normalized := strings.ToLower(strings.TrimSpace(query))
 
-	for _, folderID := range []int{0, 1} {
+	fetchFolders := dialogFolderIDs(includeArchived)
+	for _, folderID := range fetchFolders {
 		request := &tg.MessagesGetDialogsRequest{
 			OffsetPeer: &tg.InputPeerEmpty{},
 			Limit:      limit,
@@ -383,6 +387,16 @@ func (a *App) fetchNativeDialogs(ctx context.Context, api *tg.Client, account Na
 	}
 	storeNativePeerIndex(account.UserID, account.AccountID, index)
 	return items, nil
+}
+
+// dialogFolderIDs 决定本次会话列表要拉取的归档文件夹。
+// R4.0a：默认（不显示归档）只拉 folder 0，省掉一次必然被前端过滤的 folder 1 拉取；
+// 需要归档时才同时拉 0 和 1。
+func dialogFolderIDs(includeArchived bool) []int {
+	if includeArchived {
+		return []int{0, 1}
+	}
+	return []int{0}
 }
 
 func flattenNativeDialogs(result tg.MessagesDialogsClass) ([]tg.DialogClass, []tg.MessageClass, []tg.ChatClass, []tg.UserClass, bool) {
@@ -515,7 +529,7 @@ func nativeDialogMuted(dialog *tg.Dialog) bool {
 // --- 文件夹 ---------------------------------------------------------------
 
 func (a *App) fetchNativeFolders(ctx context.Context, api *tg.Client, account NativeAccount) ([]map[string]any, error) {
-	chats, err := a.fetchNativeDialogs(ctx, api, account, maxChatDialogLimit, "")
+		chats, err := a.fetchNativeDialogs(ctx, api, account, maxChatDialogLimit, "", true)
 	if err != nil {
 		return nil, err
 	}
@@ -1117,7 +1131,7 @@ func (a *App) resolveNativePeer(ctx context.Context, api *tg.Client, account Nat
 			return info, nil
 		}
 	}
-	if _, err := a.fetchNativeDialogs(ctx, api, account, maxChatDialogLimit, ""); err != nil {
+	if _, err := a.fetchNativeDialogs(ctx, api, account, maxChatDialogLimit, "", true); err != nil {
 		return nativePeerInfo{}, err
 	}
 	index := loadNativePeerIndex(account.UserID, account.AccountID)

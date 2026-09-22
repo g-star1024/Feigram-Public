@@ -1700,9 +1700,9 @@ function App() {
     setBusy(true);
     setError("");
     try {
-      const list = await api(`/api/chats?account=${encodeURIComponent(accountId)}&query=${encodeURIComponent(nextQuery)}`);
-      const visible = appSettings.foldersShowArchived ? list : list.filter((chat) => !chat.archived);
-      setChats(visible);
+      const includeArchived = appSettings.foldersShowArchived ? 1 : 0;
+      const list = await api(`/api/chats?account=${encodeURIComponent(accountId)}&query=${encodeURIComponent(nextQuery)}&includeArchived=${includeArchived}`);
+      setChats(list);
       if (appSettings.foldersAutoSelectFirst && !activeChat && visible[0]) selectChat(visible[0]);
     } catch (err) {
       setError(err.message);
