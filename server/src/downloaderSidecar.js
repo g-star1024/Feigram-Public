@@ -265,6 +265,16 @@ function accountDetails({ userId, accountId, peer, limit = 0, before = 0 }) {
   return request(accountChatPath(accountId, "details", { userId, peer, limit, before }), { timeoutMs: 45000 });
 }
 
+// --- M4.4: 链接解析与全局搜索（原生账号无 GramJS 客户端时的对等实现） ---
+
+function accountResolve({ userId, accountId, link, messageId = 0 }) {
+  return request(accountChatPath(accountId, "resolve", { userId, peer: link, message: messageId }), { timeoutMs: 30000 });
+}
+
+function accountSearch({ userId, accountId, query, limit = 0 }) {
+  return request(accountChatPath(accountId, "search", { userId, query, limit }), { timeoutMs: 45000 });
+}
+
 // 头像是二进制，不能用 JSON request()，单独走 arrayBuffer。
 async function accountAvatar({ userId, accountId, peer }) {
   const controller = new AbortController();
@@ -320,5 +330,7 @@ module.exports = {
   accountAvatar,
   accountSend,
   accountButton,
-  accountDetails
+  accountDetails,
+  accountResolve,
+  accountSearch
 };

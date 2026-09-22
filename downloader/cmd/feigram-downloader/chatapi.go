@@ -117,7 +117,7 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	// M4.1：blob 走二进制直出（支持 Range），不进入 JSON 分支。
 	switch action {
-	case "dialogs", "folders", "messages", "media", "avatar", "peer", "blob", "details":
+	case "dialogs", "folders", "messages", "media", "avatar", "peer", "blob", "details", "resolve", "search":
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET required"})
 			return
@@ -151,8 +151,13 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 
 	// M4.3：写路径（send/button）与会话详情（details）转交 chatwrite.go，
 	// 它自带超时控制与 JSON body 解析，避免在此处重复分支。
+	// M4.4：链接解析（resolve）与全局搜索（search）转交 chatsearch.go。
 	if action == "send" || action == "button" || action == "details" {
 		a.handleAccountWrite(w, r, action, account, client, r.URL.Query())
+		return
+	}
+	if action == "resolve" || action == "search" {
+		a.handleAccountSearch(w, r, action, account, client, r.URL.Query())
 		return
 	}
 

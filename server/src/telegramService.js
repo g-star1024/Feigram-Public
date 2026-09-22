@@ -1378,9 +1378,26 @@ async function clickMessageButton(userId, accountId, peerId, messageId, data) {
 async function resolveTelegramLink(userId, accountId, url) {
   return foregroundTelegramOperation(accountId, async () => {
   const domain = linkDomain(url);
-  const client = await getClient(userId, accountId);
-  if (!peerCache.has(accountId)) await listChats(userId, accountId);
   const privatePeerId = linkPrivatePeerId(url);
+  const messageId = linkMessageId(url);
+  const ensurePeerCache = async () => {
+    if (!peerCache.has(accountId)) await listChats(userId, accountId);
+  };
+  // M4.4：native 账号改走 Go 原生 MTProto（contacts.resolveUsername）；
+  // 私有频道链接（t.me/c/<id>）先在已缓存会话里命中，命中不了再交给 Go。
+  if (await nativeAccountRecord(userId, accountId)) {
+    await ensurePeerCache();
+    if (privatePeerId) {
+      const cached = peerCache.get(accountId)?.get(privatePeerId) || null;
+      if (cached) {
+        const chat = serializeEntity(cached);
+        return { ...chat, avatarKey: chat.id, messageId };
+      }
+    }
+    return downloaderSidecar.accountResolve({ userId, accountId, link: url, messageId });
+  }
+  const client = await getClient(userId, accountId);
+  await ensurePeerCache();
   let entity = null;
   if (privatePeerId) entity = peerCache.get(accountId)?.get(privatePeerId) || null;
   if (!entity && domain) entity = await client.getEntity(domain);
@@ -1394,6 +1411,14 @@ async function resolveTelegramLink(userId, accountId, url) {
 
 async function search(userId, accountId, query) {
   return foregroundTelegramOperation(accountId, async () => {
+  // M4.4：native 账号的会话检索已由 Go 提供，全局消息搜索改走 Go 的 messages.search。
+  if (await nativeAccountRecord(userId, accountId)) {
+    const dialogs = await listChats(userId, accountId, query);
+    const messages = await downloaderSidecar
+      .accountSearch({ userId, accountId, query })
+      .catch(() => []);
+    return { chats: dialogs, messages };
+  }
   const client = await getClient(userId, accountId);
   const dialogs = await listChats(userId, accountId, query);
   const global = query
