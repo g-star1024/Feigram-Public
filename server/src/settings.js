@@ -1,6 +1,7 @@
 const fs = require("fs-extra");
 const path = require("path");
 const { dataDir, ensureStore } = require("./store");
+const { normalizeProxyUrl } = require("./proxyConfig");
 
 const settingsPath = path.join(dataDir, "settings.json");
 
@@ -29,7 +30,10 @@ function envDefaults() {
     foldersAutoSelectFirst: process.env.FOLDERS_AUTO_SELECT_FIRST !== "false",
     playerMode: process.env.PLAYER_MODE || "browser",
     downloaderEngine: process.env.DOWNLOADER_ENGINE || "go-sidecar",
-    downloaderSidecarUrl: process.env.FEIGRAM_DOWNLOADER_URL || "http://127.0.0.1:3090"
+    downloaderSidecarUrl: process.env.FEIGRAM_DOWNLOADER_URL || "http://127.0.0.1:3090",
+    // 网络代理：空表示回落到环境变量（ALL_PROXY / HTTPS_PROXY ...），都没有则直连。
+    // 真正生效的是 Go 侧，这里保存的值会在保存设置时推送给 Go（见 index.js 的 pushProxyToSidecar）。
+    proxyUrl: process.env.FEIGRAM_PROXY_URL || ""
   };
 }
 
@@ -56,7 +60,10 @@ function sanitize(input = {}) {
     foldersAutoSelectFirst: bool(input.foldersAutoSelectFirst, true),
     playerMode: ["browser", "local"].includes(input.playerMode) ? input.playerMode : "browser",
     downloaderEngine: ["node", "go-sidecar"].includes(input.downloaderEngine) ? input.downloaderEngine : "go-sidecar",
-    downloaderSidecarUrl: String(input.downloaderSidecarUrl ?? "http://127.0.0.1:3090").trim()
+    downloaderSidecarUrl: String(input.downloaderSidecarUrl ?? "http://127.0.0.1:3090").trim(),
+    // 校验通过则存规范化结果；不通过则原样保留用户输入，
+    // 让 Go 侧把具体原因通过 /api/state 的 proxy.error 报给界面，避免这里吞掉错误。
+    proxyUrl: normalizeProxyUrl(input.proxyUrl).value
   };
 }
 
@@ -104,7 +111,8 @@ function publicSettings(settings) {
     foldersAutoSelectFirst: settings.foldersAutoSelectFirst,
     playerMode: settings.playerMode,
     downloaderEngine: settings.downloaderEngine,
-    downloaderSidecarUrl: settings.downloaderSidecarUrl
+    downloaderSidecarUrl: settings.downloaderSidecarUrl,
+    proxyUrl: settings.proxyUrl
   };
 }
 

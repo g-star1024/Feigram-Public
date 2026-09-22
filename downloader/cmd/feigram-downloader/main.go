@@ -29,6 +29,7 @@ import (
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
+	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
 	"rsc.io/qr"
 )
@@ -73,7 +74,11 @@ type Config struct {
 	PartSize     int64  `json:"partSize"`
 	Backend      string `json:"backend"`
 	Transport    string `json:"transport"`
-	UpdatedAt    string `json:"updatedAt"`
+	// ProxyURL 是应用内配置的代理地址（socks5://、socks5h://、http://、https://）。
+	// 为空时回落到环境变量（FEIGRAM_PROXY_URL / ALL_PROXY / HTTPS_PROXY / ...），
+	// 两者都没有则直连。详见 proxy.go。
+	ProxyURL  string `json:"proxyUrl"`
+	UpdatedAt string `json:"updatedAt"`
 }
 
 type Task struct {
@@ -232,16 +237,22 @@ type App struct {
 	qrLogins   map[string]*NativeQRLogin
 	running    map[string]chan struct{}
 	client     *http.Client
+	// proxy 是当前生效的网络代理（MTProto dialer + 媒体 transport 共用），
+	// 用独立锁保护，避免与 App.mu 相互等待。详见 proxy.go。
+	proxy *proxyRuntime
 }
 
 func main() {
 	dataDir := env("FEIGRAM_DOWNLOADER_DATA", filepath.Join(env("DATA_DIR", "data"), "downloader"))
 	port := env("FEIGRAM_DOWNLOADER_PORT", "3090")
+	// 先建代理运行时，让 App 与媒体 transport 共用同一个实例。
+	proxy := newProxyRuntime()
 	app := &App{
 		dataDir:    dataDir,
 		storePath:  filepath.Join(dataDir, "tasks.json"),
 		nativePath: filepath.Join(dataDir, "native-sessions.json"),
 		startedAt:  time.Now(),
+		proxy:      proxy,
 		config: Config{
 			Enabled:      true,
 			Concurrency:  1,
@@ -250,8 +261,10 @@ func main() {
 			PartSize:     defaultPartSize,
 			Backend:      "go-sidecar",
 			// M3.1：默认走 Go 原生 MTProto；http-bridge 仅作为显式降级开关保留。
-			Transport:    "native-mtproto",
-			UpdatedAt:    now(),
+			Transport: "native-mtproto",
+			// 应用内代理留空，由 proxyRuntime 决定是否回落到环境变量。
+			ProxyURL:  "",
+			UpdatedAt: now(),
 		},
 		tasks:    map[string]*Task{},
 		native:   map[string]*NativeAccount{},
@@ -259,18 +272,17 @@ func main() {
 		qrLogins: map[string]*NativeQRLogin{},
 		running:  map[string]chan struct{}{},
 		client: &http.Client{
-			Timeout: 0,
-			Transport: &http.Transport{
-				Proxy:               http.ProxyFromEnvironment,
-				MaxIdleConns:        32,
-				MaxIdleConnsPerHost: 16,
-				IdleConnTimeout:     90 * time.Second,
-			},
+			Timeout:   0,
+			Transport: newMediaTransport(proxy),
 		},
 	}
 	if err := app.load(); err != nil {
 		log.Printf("load store: %v", err)
 	}
+	if _, reason := app.proxy.apply(app.config.ProxyURL); reason != "" {
+		log.Printf("网络代理配置无效：%s", reason)
+	}
+	log.Printf("%s", app.proxy.describeProxyConfig())
 	go app.pump()
 
 	mux := http.NewServeMux()
@@ -1167,6 +1179,7 @@ func (a *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"running":       len(a.running),
 		"accounts":      a.accountsSummaryLocked(),
 		"config":        a.config,
+		"proxy":         a.proxy.status(),
 	})
 }
 
@@ -1187,16 +1200,33 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
+	previousProxyURL := a.config.ProxyURL
 	a.config = sanitizeConfig(applyConfigPatch(a.config, patch))
 	if a.config.Transport == "native-mtproto" && !a.nativeReadyLocked() {
 		a.config.Transport = "http-bridge"
 	}
 	a.config.UpdatedAt = now()
+	nextProxyURL := a.config.ProxyURL
 	err := a.saveLocked()
 	a.mu.Unlock()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	// 代理改动立即生效：dialer 在 newTelegramClient 时读取，媒体 transport 每次请求读取。
+	if _, reason := a.proxy.apply(nextProxyURL); reason != "" {
+		log.Printf("网络代理配置无效：%s", reason)
+	}
+	log.Printf("%s", a.proxy.describeProxyConfig())
+	if nextProxyURL != previousProxyURL {
+		// 在途登录把旧 dialer 固定在 gotd client 里，不取消就会继续对旧代理拨号重试，
+		// 并在结束时把账号状态覆盖成失败。代理一变，这些流程就该让位给重新发起的登录。
+		a.mu.Lock()
+		cancelled := a.cancelLoginsLocked("", "")
+		a.mu.Unlock()
+		if cancelled > 0 {
+			log.Printf("网络代理已变更，取消 %d 个进行中的登录流程以改用新代理", cancelled)
+		}
 	}
 	go a.pumpOnce()
 	writeJSON(w, http.StatusOK, a.snapshot())
@@ -1494,6 +1524,7 @@ func (a *App) stateLocked() map[string]any {
 		"nativeMTProto": native,
 		"accounts":      a.accountsSummaryLocked(),
 		"strategy":      strategy,
+		"proxy":         a.proxy.status(),
 	}
 }
 
@@ -1712,6 +1743,9 @@ func sanitizeConfig(input Config) Config {
 		input.Backend = "go-sidecar"
 	}
 	input.Transport = normalizeTransport(input.Transport)
+	// 代理地址只做去空白，合法性由 proxyRuntime.apply 判定并把原因写进 /health，
+	// 保留用户原始输入便于前端回显与纠错。
+	input.ProxyURL = strings.TrimSpace(input.ProxyURL)
 	if input.UpdatedAt == "" {
 		input.UpdatedAt = now()
 	}
@@ -1736,6 +1770,9 @@ func applyConfigPatch(current Config, patch map[string]any) Config {
 	}
 	if value, ok := stringValue(patch["transport"]); ok {
 		current.Transport = value
+	}
+	if value, ok := stringValue(patch["proxyUrl"]); ok {
+		current.ProxyURL = value
 	}
 	return current
 }
@@ -1936,6 +1973,12 @@ func (a *App) newTelegramClient(account NativeAccount, apiHash string) (*telegra
 	if account.Session == "" {
 		options.SessionStorage = nativeSessionStorage{app: a, userID: account.UserID, accountID: account.AccountID}
 	}
+	if dialer := a.proxy.dialer(); dialer != nil {
+		// gotd 的默认 resolver 是 dcs.Plain(dcs.PlainOptions{})，其 Dial 退化为裸 net.Dialer，
+		// 因此不显式注入就会直连 Telegram DC。这里只替换 Dial，
+		// 其余默认值（Intermediate 传输协议、加密随机源、tcp、优先 IPv4）保持 gotd 原样。
+		options.Resolver = dcs.Plain(dcs.PlainOptions{Dial: dialer})
+	}
 	return telegram.NewClient(account.APIID, apiHash, options), nil
 }
 
@@ -1959,7 +2002,7 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 	if err != nil {
 		account.Ready = false
 		account.Status = "failed"
-		account.Error = err.Error()
+		account.Error = a.withNetworkHint(err)
 		return a.saveNativeAccount(account)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -1997,6 +2040,10 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 			account.Status = "failed"
 		}
 		account.Error = compactError(err)
+		if hint := networkHintFor(err, a.proxy.dialer() != nil); hint != "" && !strings.Contains(account.Error, hint) {
+			// 连不上 DC 时把「是不是没代理」讲清楚，避免用户只看超时无从下手。
+			account.Error = account.Error + " —— " + hint
+		}
 		return a.saveNativeAccount(account)
 	}
 	if account.Ready && account.HealthPasses == 0 {
@@ -2179,8 +2226,14 @@ func (a *App) startNativeLogin(userID, accountID, phone string, apiID int, apiHa
 	account.Error = ""
 	account.UpdatedAt = now()
 	_ = a.saveNativeLocked()
+	// 同一账号重复点「登录」时先取消旧流程：旧流程持有旧 dialer（可能对应改前的网络代理），
+	// 若放任并行，两边都会拨号，且旧流程收尾时会把账号状态覆盖成失败。
+	if superseded := a.cancelLoginsLocked(userID, accountID); superseded > 0 {
+		log.Printf("账号 %s/%s 仍有 %d 个登录流程在进行，已取消后重新开始", userID, accountID, superseded)
+	}
 	loginID := taskID("native-login", userID, accountID, phone, time.Now().UnixNano())
-	ctx, cancel := context.WithCancel(context.Background())
+	// 必须有上限：前端超时放弃后 goroutine 不能永久重试 Telegram DC。
+	ctx, cancel := context.WithTimeout(context.Background(), loginLifetime)
 	login := &NativeLogin{
 		ID:          loginID,
 		UserID:      userID,
@@ -2204,8 +2257,17 @@ func (a *App) startNativeLogin(userID, accountID, phone string, apiID int, apiHa
 	select {
 	case result := <-login.StartResult:
 		return result, result.Error
-	case <-time.After(40 * time.Second):
-		return nativeLoginResult{}, errors.New("发送 Telegram 验证码超时")
+	case <-time.After(loginStartTimeout):
+		// 走到这里说明前端拿不到 loginID，这个流程已经无法被继续：
+		// 必须就地取消，否则它会一直对 Telegram DC 重试（代理不通时尤其明显）。
+		cancel()
+		a.mu.Lock()
+		delete(a.logins, loginID)
+		a.mu.Unlock()
+		// 这类超时基本都出在网络出口上：直接把代理提示写进错误，
+		// 用户才不用去翻日志猜「是不是没配代理」。
+		return nativeLoginResult{}, fmt.Errorf(
+			"发送 Telegram 验证码超时（%s）：%s", loginStartTimeout, a.proxyHintFor())
 	}
 }
 
@@ -2610,7 +2672,39 @@ func qrPNGDataURL(value string) string {
 	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(code.PNG())
 }
 
+// loginLifetime 限制单次登录流程的最大存活时间。
+// gotd 会对连不上的 Telegram DC 持续重试，若 context 永不过期，
+// 前端超时放弃后 goroutine 仍会一直拨号（没配代理时尤其明显，日志与连接都会被刷满）。
+const loginLifetime = 10 * time.Minute
+
+// loginStartTimeout 是「发起登录 → 拿到验证码」这一步的等待上限。
+// 超过它前端就拿不到 loginID，登录流程已无法被继续，必须取消。
+const loginStartTimeout = 40 * time.Second
+
+// cancelLoginsLocked 取消进行中的登录并返回数量，调用方需持有 a.mu。
+// userID 为空表示取消全部；否则只取消该账号的登录流程。
+func (a *App) cancelLoginsLocked(userID, accountID string) int {
+	count := 0
+	for id, login := range a.logins {
+		if userID != "" && (login.UserID != userID || login.AccountID != accountID) {
+			continue
+		}
+		if login.Cancel != nil {
+			login.Cancel()
+		}
+		delete(a.logins, id)
+		count++
+	}
+	return count
+}
+
 func (a *App) runNativeLogin(ctx context.Context, login *NativeLogin) {
+	defer func() {
+		// 流程结束即摘掉登记，避免 a.logins 随「前端没轮询结果」的登录流程堆积。
+		a.mu.Lock()
+		delete(a.logins, login.ID)
+		a.mu.Unlock()
+	}()
 	account, err := a.nativeAccountSnapshot(login.UserID, login.AccountID)
 	if err != nil {
 		login.StartResult <- nativeLoginResult{Error: err, LoginID: login.ID}
@@ -2678,7 +2772,26 @@ func (a *App) runNativeLogin(ctx context.Context, login *NativeLogin) {
 		return nil
 	})
 	if err != nil {
+		// 被同账号的新登录取代（或被代理变更取消）时，旧流程不能再写账号状态：
+		// 否则会把新流程刚写入的进度/成功结果覆盖成「失败」。
+		if errors.Is(ctx.Err(), context.Canceled) {
+			log.Printf("登录流程 %s 已取消（可能被更新的登录流程接管），不再更新账号状态", login.ID)
+			result := nativeLoginResult{Account: account, LoginID: login.ID, Error: err}
+			select {
+			case login.StartResult <- result:
+			default:
+			}
+			return
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("登录流程超时（%s）未完成：%w", loginLifetime, err)
+		}
 		account.Error = compactError(err)
+		if hint := networkHintFor(err, a.proxy.dialer() != nil); hint != "" && !strings.Contains(account.Error, hint) {
+			// 登录是最常见的「连不上」入口：把「是不是没配代理」直接写进错误里，
+			// 用户不用再去翻日志猜。
+			account.Error = account.Error + " —— " + hint
+		}
 		account.Ready = false
 		account.Status = "failed"
 		account, _ = a.saveNativeAccount(account)

@@ -470,6 +470,16 @@ function AccountLogin({ socket, onDone, legalNotice }) {
   );
 }
 
+// 代理来源的中文展示文案（对应 server/src/proxyConfig.js 的 describeProxySource，
+// 也对应 Go 侧 /api/state 的 proxy.source）。UI 文案放前端，服务端只回结构化取值。
+function proxySourceLabel(source) {
+  const value = String(source || "");
+  if (value === "settings") return "应用内设置";
+  if (value === "invalid") return "配置无效";
+  if (value.startsWith("env:")) return `环境变量 ${value.slice(4)}`;
+  return "未启用（直连）";
+}
+
 function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountLogout, onAccountsChanged, onSettingsChanged, open, onClose, initialTab = "accounts", socket, silentCacheState, silentCaches = [], onRefreshSilentCaches, onSilentCacheControl, onCancelSilentCache }) {
   const [tab, setTab] = useState(initialTab);
   const [users, setUsers] = useState([]);
@@ -493,7 +503,8 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
     foldersAutoSelectFirst: true,
     playerMode: "browser",
     downloaderEngine: "go-sidecar",
-    downloaderSidecarUrl: "http://127.0.0.1:3090"
+    downloaderSidecarUrl: "http://127.0.0.1:3090",
+    proxyUrl: ""
   });
   const [apiIdPlaceholder, setApiIdPlaceholder] = useState("");
   const [hashPlaceholder, setHashPlaceholder] = useState("");
@@ -555,11 +566,14 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
         foldersAutoSelectFirst: nextSettings.foldersAutoSelectFirst !== false,
         playerMode: nextSettings.playerMode || "browser",
         downloaderEngine: nextSettings.downloaderEngine || "go-sidecar",
-        downloaderSidecarUrl: nextSettings.downloaderSidecarUrl || "http://127.0.0.1:3090"
+        downloaderSidecarUrl: nextSettings.downloaderSidecarUrl || "http://127.0.0.1:3090",
+        proxyUrl: nextSettings.proxyUrl || ""
       });
       setApiIdPlaceholder(nextSettings.telegramApiIdSet ? "已保存，留空则不修改" : "请输入 Telegram API ID");
       setHashPlaceholder(nextSettings.telegramApiHashSet ? "已保存，留空则不修改" : "请输入 Telegram API Hash");
       setNativeAccounts(await api("/api/admin/native-accounts").catch(() => []));
+      // Go 侧 /api/state 里的 proxy 字段是「代理是否真的生效」的权威来源，用于回显生效状态。
+      setDownloaderState(await api("/api/admin/downloader").catch(() => null));
     }
   }
 
@@ -884,6 +898,14 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
             <option value="local">本地播放器（下载后打开）</option>
           </select></label>
           <p className="hint">推荐优先使用原始视频在线播放；遇到浏览器不支持的编码时，可切换为本地播放器模式。</p>
+          <h3>网络代理</h3>
+          <label><span>代理地址</span><input value={settings.proxyUrl} onChange={(e) => setSettings({ ...settings, proxyUrl: e.target.value })} placeholder="socks5://127.0.0.1:7890（留空则直连）" /></label>
+          <p className="hint">Telegram 登录、会话与媒体下载都由 Go 侧出网，这里配置的代理会同时作用于 MTProto 连接与文件下载。支持 socks5 / socks5h / http / https，可带账号密码。留空时回落到环境变量（FEIGRAM_PROXY_URL、ALL_PROXY、HTTPS_PROXY 等），仍然留空则直连。</p>
+          {downloaderState?.proxy ? <p className={cx("proxy-status", downloaderState.proxy.source === "invalid" && "is-error")}>
+            <span>当前生效：<b>{proxySourceLabel(downloaderState.proxy.source)}</b></span>
+            {downloaderState.proxy.address ? <span className="proxy-address">{downloaderState.proxy.address}</span> : null}
+            {downloaderState.proxy.error ? <span className="proxy-error">{downloaderState.proxy.error}</span> : null}
+          </p> : <p className="hint">Go 下载服务尚未就绪，暂时读不到代理的生效状态。</p>}
           <h3>下载服务</h3>
           <label><span>Go 下载服务地址</span><input value={settings.downloaderSidecarUrl} onChange={(e) => setSettings({ ...settings, downloaderSidecarUrl: e.target.value })} placeholder="http://127.0.0.1:3090" /></label>
           <p className="hint">Go 下载服务已接管大文件队列、断点续传、限速、并发和文件落盘；当前媒体源仍通过本机 Telegram 桥接，后续会继续迁移到原生 Go/tdl 传输层。</p>

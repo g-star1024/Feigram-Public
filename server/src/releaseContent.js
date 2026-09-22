@@ -14,6 +14,20 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.1.2",
+    title: "Feigram 2.1.2 更新",
+    version: "2.1.2",
+    level: "success",
+    createdAt: "2026-09-22T08:50:00.000Z",
+    body: [
+      "新增网络代理支持：此前原生模式完全无法走代理，在不能直连 Telegram 的网络里会表现为「登录转圈、一直失败」。现在可在「设置 → 网络代理」填写 SOCKS5（含 socks5h）或 HTTP/HTTPS 代理。",
+      "代理改完立即生效，无需重启；也可用环境变量兜底（FEIGRAM_PROXY_URL / ALL_PROXY / SOCKS5 / HTTPS_PROXY / HTTP_PROXY）。",
+      "MTProto 登录与媒体下载都会走代理；指向本机的地址（回环）自动直连，不会因为配了代理而打断本机网关调用。",
+      "代理地址写错会明确报出原因，不再静默直连；代理连不上时，登录与诊断里会给出「检查代理进程 / 核对地址端口」的可操作提示。",
+      "加固登录流程：同一账号重复点登录会取消上一个流程；发起登录超时或代理变更时会取消在途登录，避免旧代理被持续拨号、并把新登录的状态覆盖成失败。"
+    ].join("\n")
+  },
+  {
     id: "release-2.1.1",
     title: "Feigram 2.1.1 更新",
     version: "2.1.1",

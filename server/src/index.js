@@ -18,6 +18,7 @@ const {
 const { ensureStore, findUserByUsername, readUsers, safeId, upsertUser } = require("./store");
 const { hashPassword } = require("./cryptoBox");
 const { publicSettings, readSettings, writeSettings } = require("./settings");
+const { maskProxyUrl } = require("./proxyConfig");
 const { readPolicies } = require("./policies");
 const { readAbout, readAnnouncements } = require("./releaseContent");
 const { checkForUpdates, diagnostics } = require("./diagnostics");
@@ -49,6 +50,29 @@ function asyncRoute(handler) {
   };
 }
 
+// 网络出口在 Go 侧（MTProto 建连与媒体下载都在那里），
+// 因此应用内配置的代理必须推送给 Go 才真正生效。
+// 失败只告警不阻断：cmd/main 是「先起 Node、再起 Go sidecar」，
+// 启动时 sidecar 可能还没就绪，所以启动路径带重试，保存设置时只试一次。
+async function pushProxyToSidecar(settings, { attempts = 1, delayMs = 2000 } = {}) {
+  const proxyUrl = String(settings?.proxyUrl || "");
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const result = await downloaderSidecar.updateConfig({ proxyUrl });
+    if (result && result.ok !== false) {
+      console.log(
+        `[proxy] 已同步代理到 Go 下载服务：${proxyUrl ? maskProxyUrl(proxyUrl) : "空（回落环境变量或直连）"}`
+      );
+      return true;
+    }
+    if (attempt === attempts) {
+      console.warn(`[proxy] 同步代理到 Go 下载服务失败（已尝试 ${attempts} 次）：${result?.error || "未知原因"}`);
+      return false;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return false;
+}
+
 // M5.2：健康接口扩充 schemaVersion / transport / sidecar 状态 / 账户健康分布。
 // M5.3：汇总逻辑已抽到 healthSummary.js（纯函数，可单测），此处只做装配。
 app.get("/api/health", asyncRoute(async (_req, res) => {
@@ -71,6 +95,9 @@ app.get("/api/health", asyncRoute(async (_req, res) => {
       taskCount: sidecarTaskCount(sidecarState),
       running: sidecarState.ok ? sidecarState.running : undefined
     },
+    // 网络代理的权威状态来自 Go 侧（MTProto dialer 与媒体 transport 都在那里）。
+    // source: settings / env:<KEY> / none / invalid；address 已脱敏。
+    proxy: sidecarState.ok ? sidecarState.proxy : undefined,
     accounts
   });
 }));
@@ -95,6 +122,7 @@ app.get("/api/settings", asyncRoute(async (_req, res) => {
 
 app.put("/api/settings", adminOnly, asyncRoute(async (req, res) => {
   const next = await writeSettings(req.body || {});
+  await pushProxyToSidecar(next);
   res.json({ settings: publicSettings(next) });
 }));
 
@@ -455,6 +483,10 @@ ensureStore()
     }, 30 * 1000).unref?.();
     server.listen(port, "0.0.0.0", () => {
       console.log(`Feigram Public is listening on http://0.0.0.0:${port}`);
+      // 把应用内代理下发给 Go（sidecar 通常还在启动中，故带重试）。
+      readSettings()
+        .then((settings) => pushProxyToSidecar(settings, { attempts: 8, delayMs: 2500 }))
+        .catch((error) => console.warn(`[proxy] 读取设置失败：${error.message}`));
       tg.restoreBackgroundTasks(io)
         .catch((error) => console.warn("Download task restore failed:", error.message))
         .then(() => tg.cleanupCache().catch((error) => console.warn("Cache cleanup failed:", error.message)));

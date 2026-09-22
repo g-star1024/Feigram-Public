@@ -701,3 +701,42 @@
 
 /* 无障碍： Escape 关闭的视觉反馈不适用，焦点环已由 tokens.css :focus-visible 提供 */
 
+/* 网络代理生效状态（服务端设置 Tab） */
+.proxy-status {
+  align-items: center;
+  background: var(--fn-success-a);
+  border: 1px solid var(--fn-success);
+  border-radius: var(--fn-radius-sm);
+  color: var(--fn-text-2);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 6px 12px;
+  line-height: 1.5;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+}
+
+.proxy-status b {
+  color: var(--fn-success);
+  font-weight: 500;
+}
+
+.proxy-status .proxy-address {
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.proxy-status.is-error {
+  background: var(--fn-danger-a);
+  border-color: var(--fn-danger);
+}
+
+.proxy-status.is-error b,
+.proxy-status.is-error .proxy-error {
+  color: var(--fn-danger);
+}
+
+.proxy-status .proxy-error {
+  flex-basis: 100%;
+}
+

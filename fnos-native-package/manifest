@@ -1,5 +1,5 @@
 appname=feigrampub
-version=2.1.1
+version=2.1.2
 display_name=Feigram
 desc="""<p><strong>Feigram 2.0 fnOS Client Edition</strong> 是第三方开发的非官方 Telegram 客户端，支持管理员后台、飞牛账户隔离、加密 Telegram session、Telegram 文件夹、媒体预览、后台任务恢复、运行诊断和更新检测。</p><p>仅适用于 x86_64 / amd64 飞牛 OS 设备。</p>"""
 platform=all
@@ -12,4 +12,4 @@ desktop_uidir=ui
 desktop_applaunchname=feigrampub.proxy.Application
 service_port=3088
 checkport=true
-changelog=修复公告弹窗交互：通知权限申请不再阻塞弹窗打开（部分环境下点击铃铛无反应），新增背板点击关闭，关闭按钮改为醒目的圆形按钮，并修复弹窗与管理后台可能叠加导致无法关闭的问题。
+changelog=新增网络代理支持：没有代理就无法登录/运行的设备，现在可在「设置 → 网络代理」填写 SOCKS5 或 HTTP 代理，改完立即生效，也可用 FEIGRAM_PROXY_URL 等环境变量兜底；MTProto 登录与媒体下载都会走代理，本机地址自动直连；代理写错会明确报错而不是静默直连，代理连不上时会给出可操作提示。同时加固登录流程：同一账号重复登录会取消旧流程，发起超时或代理变更会取消在途登录，避免旧代理被持续拨号。
