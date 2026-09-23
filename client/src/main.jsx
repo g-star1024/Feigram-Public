@@ -2458,16 +2458,33 @@ function App() {
           </> : <button className="secondary action-button" onClick={() => { setAdminInitialTab("accounts"); setAnnouncementOpen(false); setAdminOpen(true); }}><Plus size={18} />添加 Telegram 账号</button>}
         </div>
         <div className="sidebar-main">
-          {appSettings.foldersEnabled && <nav className="folder-tabs">
-            <button className={cx(activeFolder === "all" && "active")} onClick={() => setActiveFolder("all")}>
-              <MessageSquare size={24} /><span>全部</span>
+          {/* R4.24：文件夹改回「左侧竖排图标栏」（用户拍板方案 3）。此前横排胶囊行在
+              文件夹多时挤压聊天列表且不好切换；竖轨只占 64px 宽、图标 + 角标、标题走
+              tooltip，既保留一键切换又把空间还给会话列表。 */}
+          {appSettings.foldersEnabled && <nav className="folder-rail" aria-label="聊天文件夹">
+            <button
+              className={cx("folder-rail-item", activeFolder === "all" && "active")}
+              type="button"
+              title="全部会话"
+              aria-label="全部会话"
+              onClick={() => setActiveFolder("all")}
+            >
+              <MessageSquare size={20} />
             </button>
-            {folders.map((folder) => <button key={folder.id} className={cx(String(activeFolder) === String(folder.id) && "active")} onClick={() => setActiveFolder(folder.id)}>
-              <Folder size={24} /><span>{folder.emoticon ? `${folder.emoticon} ` : ""}{folder.title}</span>
-              {!!folder.chatIds?.length && <b>{folder.chatIds.length}</b>}
-            </button>)}
-            {/* R4.23：移除「编辑」入口——文件夹管理仍在 管理后台 → 隐私设置/分组，
-                侧栏不再常驻一个低频按钮占位。 */}
+            {folders.map((folder) => {
+              const label = `${folder.emoticon ? `${folder.emoticon} ` : ""}${folder.title}`;
+              return <button
+                key={folder.id}
+                className={cx("folder-rail-item", String(activeFolder) === String(folder.id) && "active")}
+                type="button"
+                title={folder.chatIds?.length ? `${label}（${folder.chatIds.length}）` : label}
+                aria-label={label}
+                onClick={() => setActiveFolder(folder.id)}
+              >
+                {folder.emoticon ? <span className="folder-rail-emoji">{folder.emoticon}</span> : <Folder size={20} />}
+                {!!folder.chatIds?.length && <b>{folder.chatIds.length}</b>}
+              </button>;
+            })}
           </nav>}
           <div className="chat-pane">
             <form className="search" onSubmit={(event) => { event.preventDefault(); loadChats(query); }}>
