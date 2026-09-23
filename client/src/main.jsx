@@ -19,7 +19,6 @@ import {
   Send,
   Settings,
   Shield,
-  SlidersHorizontal,
   Sun,
   ArrowLeft,
   Trash2,
@@ -634,11 +633,6 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
     }
   }
 
-  async function refreshNativeAccounts() {
-    if (!canAdmin) return;
-    setNativeAccounts(await api("/api/admin/native-accounts").catch(() => []));
-  }
-
   async function checkNativeAccount(accountId) {
     setError("");
     const result = await api(`/api/admin/native-accounts/${accountId}/health`, { method: "POST" }).catch((err) => {
@@ -726,10 +720,28 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
     setError("");
     try {
       const started = await api(`/api/admin/native-accounts/${item.accountId}/login/qr-start`, { method: "POST", body: JSON.stringify({}) });
-      setNativeQr({ ...started, accountId: item.accountId, title: item.displayName || item.phone || item.accountId });
+      // R4.23：把 phone/displayName 一并记入面板状态，供「改用验证码登录」兜底入口直接复用。
+      setNativeQr({
+        ...started,
+        accountId: item.accountId,
+        title: item.displayName || item.phone || item.accountId,
+        phone: item.phone || "",
+        displayName: item.displayName || ""
+      });
     } catch (err) {
       setError(err.message);
     }
+  }
+
+  // R4.23：扫码面板内的验证码兜底入口——关闭扫码面板，转走验证码登录流程。
+  function fallbackToCodeLogin() {
+    const item = {
+      accountId: nativeQr?.accountId,
+      phone: nativeQr?.phone || "",
+      displayName: nativeQr?.displayName || nativeQr?.title || ""
+    };
+    setNativeQr(null);
+    reloginNativeAccount(item);
   }
 
   useEffect(() => {
@@ -817,6 +829,8 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
             {nativeQr.done && <p className="success">Go 原生 MTProto session 已生成，请关闭弹窗后连续执行两次健康检查。</p>}
             {nativeQr.error && <p className="error">{nativeQr.error}</p>}
             {nativeQr.expires && !nativeQr.done && <small>二维码有效期：{formatTime(nativeQr.expires)}，过期会自动刷新。</small>}
+            {/* R4.23：验证码兜底入口收进扫码面板，账号行只保留一个「重新登录」按钮。 */}
+            {!nativeQr.done && <button className="icon-button" type="button" onClick={fallbackToCodeLogin}>扫不了码？改用验证码登录</button>}
           </div>
         </div>}
         {tab === "accounts" && <div className="account-admin">
@@ -863,10 +877,12 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
                       : native.lastSuccessAt ? `最近成功 ${formatTime(native.lastSuccessAt)}` : ""}
                   </small>}
                 </div>
-                <button className="icon-button" onClick={() => onAccountChange(account.id)}>{account.id === accountId ? "当前" : "切换"}</button>
-                {canAdmin && <button className="icon-button" type="button" onClick={() => startNativeQrLogin(native || { accountId: account.id, displayName: account.displayName || account.label, phone: account.phoneNumber })}>扫码登录 Go</button>}
-                {canAdmin && <button className="icon-button" type="button" onClick={() => native ? checkNativeAccount(account.id) : refreshNativeAccounts()}>健康检查</button>}
-                {canAdmin && <button className="icon-button" type="button" onClick={() => reloginNativeAccount(native || { accountId: account.id, phone: account.phoneNumber, displayName: account.displayName || account.label })}>验证码兜底</button>}
+                {/* R4.23：按钮简化——「当前」只是状态不是动作；健康检查自动化后去掉手动入口；
+                    扫码 + 验证码两种登录方式合并进「重新登录」一个入口（扫码面板内可切验证码兜底）。 */}
+                {account.id === accountId
+                  ? <span className="native-status ready">当前</span>
+                  : <button className="icon-button" onClick={() => onAccountChange(account.id)}>切换</button>}
+                {canAdmin && <button className="icon-button" type="button" onClick={() => startNativeQrLogin(native || { accountId: account.id, displayName: account.displayName || account.label, phone: account.phoneNumber })}>重新登录</button>}
                 {canAdmin && account.needsMigration && <button className="icon-button primary-button" type="button" onClick={() => migrateAccountToGo(account)}>迁移到 Go</button>}
                 {canAdmin && account.authMode === "native" && <span className="native-status ready">已迁移 Go</span>}
                 <button className="icon-button danger-button" onClick={() => onAccountLogout(account.id)}><LogOut size={16} />退出</button>
@@ -903,7 +919,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
             <h3>网络代理</h3>
             <label><span>代理地址</span><input value={settings.proxyUrl} onChange={(e) => setSettings({ ...settings, proxyUrl: e.target.value })} placeholder="http://127.0.0.1:20171（v2rayA 默认；留空则直连）" /></label>
             <p className="hint">Telegram 登录、会话与媒体下载都由 Go 侧出网，这里配置的代理会同时作用于 MTProto 连接与文件下载。支持 socks5 / socks5h / http / https，可带账号密码。留空时回落到环境变量（FEIGRAM_PROXY_URL、ALL_PROXY、HTTPS_PROXY 等），仍然留空则直连。</p>
-            <p className="hint">如果这台设备已经通过路由器/系统代理全局科学上网，可直接填本机代理端口，Go 会经由它连接 Telegram。注意协议要与端口配对：v2rayA 默认 HTTP 是 20171、SOCKS5 是 20170（填成 socks5://…:20171 这种「协议错位」会连不上）；Clash 系默认 socks5://127.0.0.1:7890。若填了代理但下载仍显示「HTTP 回退」，通常是该代理端口不通或协议配错，可用「运行诊断」页的代理状态核对。</p>
+            <p className="hint">如果这台设备已经通过路由器/系统代理全局科学上网，可直接填本机代理端口，Go 会经由它连接 Telegram。注意协议要与端口配对：v2rayA 默认 HTTP 是 20171、SOCKS5 是 20170（填成 socks5://…:20171 这种「协议错位」会连不上）；Clash 系默认 socks5://127.0.0.1:7890。若填了代理但账号健康检查仍失败，通常是该代理端口不通或协议配错，可用「运行诊断」页的代理状态核对。</p>
             {downloaderState?.proxy ? <p className={cx("proxy-status", downloaderState.proxy.source === "invalid" && "is-error")}>
               <span>当前生效：<b>{proxySourceLabel(downloaderState.proxy.source)}</b></span>
               {downloaderState.proxy.address ? <span className="proxy-address">{downloaderState.proxy.address}</span> : null}
@@ -913,7 +929,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
           <section className="admin-card">
             <h3>下载服务</h3>
             <label><span>Go 下载服务地址</span><input value={settings.downloaderSidecarUrl} onChange={(e) => setSettings({ ...settings, downloaderSidecarUrl: e.target.value })} placeholder="http://127.0.0.1:3090" /></label>
-            <p className="hint">Go 下载服务已接管大文件队列、断点续传、限速、并发和文件落盘；当前媒体源仍通过本机 Telegram 桥接，后续会继续迁移到原生 Go/tdl 传输层。</p>
+            <p className="hint">Go 下载服务已接管大文件队列、断点续传、限速、并发和文件落盘；全部媒体经 Go 原生 MTProto 传输，账号未就绪时任务自动等待恢复后续传。</p>
             {saved && <p className="success">{saved}</p>}
             <button className="primary"><Settings size={18} />保存服务端设置</button>
           </section>
@@ -983,7 +999,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
               <span><b>并发</b>{downloaderState.config?.concurrency || "-"}</span>
               <span><b>限速</b>{downloaderState.config?.rateLimitBps ? `${formatBytes(downloaderState.config.rateLimitBps)}/s` : "不限速"}</span>
               <span><b>模式</b>{downloaderState.config?.mode === "fast" ? "高速" : "保守"}</span>
-              <span><b>媒体源</b>{(downloaderState.config?.transport || downloaderState.transport) === "native-mtproto" ? "Go 原生 MTProto" : "HTTP 桥接"}</span>
+              {/* R4.23：移除「媒体源」条目——单一 Go 原生 MTProto 后恒定不变，不再展示。 */}
             </div>
             <div className="silent-cache-controls downloader-config-controls">
               <label className="check-row"><input type="checkbox" checked={downloaderState.config?.enabled !== false} onChange={(e) => saveDownloaderConfig({ enabled: e.target.checked })} /><span>{downloaderState.config?.enabled !== false ? "Go 队列已启用" : "Go 队列已暂停"}</span></label>
@@ -1000,10 +1016,8 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
                 <option value="conservative">保守</option>
                 <option value="fast">高速</option>
               </select></label>
-              <label><span>媒体源传输层</span><select value={downloaderState.config?.transport || "http-bridge"} onChange={(e) => saveDownloaderConfig({ transport: e.target.value })}>
-                <option value="http-bridge">HTTP 桥接（稳定）</option>
-                <option value="native-mtproto" disabled={!downloaderState.nativeMTProto?.ready}>Go 原生 MTProto（健康后可选）</option>
-              </select></label>
+              {/* R4.23：移除「媒体源传输层」下拉——单一 Go 原生 MTProto 后无意义，
+                  旧入口还会把任务建到已自环的 http-bridge 上（2.6.0 后台缓存全挂的帮凶）。 */}
             </div>
             {downloaderState.nativeMTProto && <p className="hint">{downloaderState.nativeMTProto.note}</p>}
             <p className="hint">{downloaderState.strategy || "Go sidecar 已就绪，等待 Telegram 下载桥接。"}</p>
@@ -1275,7 +1289,7 @@ function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onCon
       </div>
       <div className="cache-runtime-summary">
         <span><b>运行中</b>{silentCacheState.running || 0} / {silentCacheState.effectiveConcurrency || silentCacheState.concurrency || 1}</span>
-        <span><b>传输层</b>{silentCacheState.transport === "native-mtproto" ? "Go 原生 MTProto" : "HTTP 回退"}</span>
+        {/* R4.23：移除「传输层 HTTP 回退」统计——单一 Go 原生 MTProto 后恒定，且「回退」一词易误导。 */}
         <span><b>任务数</b>{silentCaches.length}</span>
       </div>
       {error && <p className="error">{error}</p>}
@@ -2452,9 +2466,8 @@ function App() {
               <Folder size={24} /><span>{folder.emoticon ? `${folder.emoticon} ` : ""}{folder.title}</span>
               {!!folder.chatIds?.length && <b>{folder.chatIds.length}</b>}
             </button>)}
-            <button onClick={() => { setAdminInitialTab("folders"); setAnnouncementOpen(false); setAdminOpen(true); }}>
-              <SlidersHorizontal size={24} /><span>编辑</span>
-            </button>
+            {/* R4.23：移除「编辑」入口——文件夹管理仍在 管理后台 → 隐私设置/分组，
+                侧栏不再常驻一个低频按钮占位。 */}
           </nav>}
           <div className="chat-pane">
             <form className="search" onSubmit={(event) => { event.preventDefault(); loadChats(query); }}>

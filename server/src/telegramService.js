@@ -843,14 +843,11 @@ async function ensureGoDownloadTask(userId, accountId, peerId, messageId, option
   await fs.ensureDir(downloadDir);
   const id = goDownloaderTaskId(userId, accountId, peerId, messageId);
   const source = options.source || "manual";
-  const downloaderState = await downloaderSidecar.state().catch(() => null);
-  // M3.1：默认与 Go 一致走 native-mtproto（http-bridge 仅作显式降级）。
-  const configuredTransport = downloaderState?.config?.transport || "native-mtproto";
-  const readyAccountKeys = Array.isArray(downloaderState?.nativeMTProto?.readyAccountKeys)
-    ? downloaderState.nativeMTProto.readyAccountKeys
-    : [];
-  const nativeEligible = size >= 100 * 1024 * 1024 && readyAccountKeys.includes(`${userId}|${accountId}`);
-  const transport = configuredTransport === "native-mtproto" || nativeEligible ? "native-mtproto" : "http-bridge";
+  // R4.23：单一传输层。此前这里按「全局配置 / 体积≥100MB 且账号就绪」挑选
+  // http-bridge，但 M4.1 后 http-bridge 的源只能指向 Go 自己的 blob 端点（自环），
+  // 账号未就绪时把「尚未就绪」包装成 404 终态错误，后台缓存任务全挂。
+  // 现在一律 native-mtproto；账号未就绪由 Go 调度层等待恢复（自动续传）。
+  const transport = "native-mtproto";
   const task = await downloaderSidecar.enqueueTask({
     id,
     userId,

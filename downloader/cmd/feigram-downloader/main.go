@@ -354,6 +354,12 @@ func (a *App) load() error {
 			task.RetryAfter = 0
 			task.Error = "账号未就绪，等待健康检查通过后自动续传"
 		}
+		// R4.23：2.5.x/2.6.0 落盘的 http-bridge 任务，其源全部是 Go blob 自环源
+		//（M4.1 后 Node 已无外部媒体桥）。落盘时直接归一化回默认传输，
+		// 不再依赖运行时 taskTransport 的兜底判断。
+		if task.Transport == "http-bridge" && isGoBlobSourceURL(task.SourceURL) {
+			task.Transport = ""
+		}
 		if task.Status != "downloading" && task.Status != "running" {
 			task.SpeedBps = 0
 		}
@@ -728,6 +734,14 @@ func (a *App) downloadHTTPBridge(task *Task, cancel <-chan struct{}) error {
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		// R4.23：源是我们自己的 blob 端点时，404 body 里带「尚未就绪」说明账号
+		// 此刻不可用——这不是媒体源故障，必须归类为瞬态（errAccountNotReady），
+		// 账号恢复后自动续传；否则任务被记成终态错误，用户只能手动重试
+		//（2.6.0 实测：14:27:54 任务终态失败，14:27:56 账号已恢复却无人续传）。
+		if resp.StatusCode == http.StatusNotFound && strings.Contains(string(body), "尚未就绪") {
+			account, accountErr := a.nativeAccountSnapshot(task.UserID, task.AccountID)
+			return accountNotReadyError(task, account, accountErr)
+		}
 		return fmt.Errorf("source returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	if task.Size <= 0 && resp.ContentLength > 0 {
@@ -1248,11 +1262,27 @@ func (a *App) refreshNativeFileLocationFromMetadataURL(taskID string) (NativeFil
 	return payload.NativeFile, nil
 }
 
+// isGoBlobSourceURL 判断 SourceURL 是否指向 Go 自己的 blob 端点。
+// M4.1 删除 Node 侧媒体桥后，goBlobSourceUrl（server/src/telegramService.js）把
+// http-bridge 任务的源指向 `/api/accounts/{id}/blob?...`——同一实现的自环源。
+func isGoBlobSourceURL(sourceURL string) bool {
+	return strings.Contains(sourceURL, "/api/accounts/") && strings.Contains(sourceURL, "/blob?")
+}
+
 func (a *App) taskTransport(task Task) string {
-	if task.Transport != "" {
-		return normalizeTransport(task.Transport)
+	transport := task.Transport
+	if transport == "" {
+		transport = a.config.Transport
 	}
-	return normalizeTransport(a.config.Transport)
+	normalized := normalizeTransport(transport)
+	// R4.23：blob 自环源的 http-bridge 任务一律升级回 native-mtproto。
+	// 自环源只会把「账号未就绪」二次包装成 `source returned 404` 终态错误，
+	// 让已恢复的账号永远拉不起任务（2.6.0 实测后台缓存全挂的根因）。
+	// 存量任务（2.5.x/2.6.0 落盘）与旧客户端创建的任务都在这里被兜住。
+	if normalized == "http-bridge" && isGoBlobSourceURL(task.SourceURL) {
+		return "native-mtproto"
+	}
+	return normalized
 }
 
 func (a *App) throttle(windowBytes int64, windowStart time.Time, cancel <-chan struct{}) error {
@@ -1331,9 +1361,11 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	previousProxyURL := a.config.ProxyURL
 	a.config = sanitizeConfig(applyConfigPatch(a.config, patch))
-	if a.config.Transport == "native-mtproto" && !a.nativeReadyLocked() {
-		a.config.Transport = "http-bridge"
-	}
+	// R4.23：移除「账号未就绪就把全局 Transport 降级为 http-bridge」的逻辑。
+	// 根因（2.6.0 实测）：启动期 Node 回推配置时账号常未就绪，全局配置被降级成
+	// http-bridge，此后新建任务全部带 http-bridge + Go blob 自环源；账号未就绪时
+	// blob 404、错误被当成终态，下载/后台缓存「还是不行」。现在 R4.22 语义下
+	// 任务本来就该等账号恢复（taskCanStartLocked 一票否决），降级只会制造自环任务。
 	a.config.UpdatedAt = now()
 	nextProxyURL := a.config.ProxyURL
 	err := a.saveLocked()
