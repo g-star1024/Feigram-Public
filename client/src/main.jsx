@@ -938,9 +938,9 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
           </section>
           <section className="admin-card">
             <h3>网络代理</h3>
-            <label><span>代理地址</span><input value={settings.proxyUrl} onChange={(e) => setSettings({ ...settings, proxyUrl: e.target.value })} placeholder="socks5://127.0.0.1:7890（留空则直连）" /></label>
+            <label><span>代理地址</span><input value={settings.proxyUrl} onChange={(e) => setSettings({ ...settings, proxyUrl: e.target.value })} placeholder="http://127.0.0.1:20171（v2rayA 默认；留空则直连）" /></label>
             <p className="hint">Telegram 登录、会话与媒体下载都由 Go 侧出网，这里配置的代理会同时作用于 MTProto 连接与文件下载。支持 socks5 / socks5h / http / https，可带账号密码。留空时回落到环境变量（FEIGRAM_PROXY_URL、ALL_PROXY、HTTPS_PROXY 等），仍然留空则直连。</p>
-            <p className="hint">如果这台设备已经通过路由器/系统代理全局科学上网，可直接填本机代理端口（如 socks5://127.0.0.1:7890），Go 会经由它连接 Telegram；若填了代理但下载仍显示「HTTP 回退」，通常是该代理端口不通或未放行 UDP 出口，可用「运行诊断」页的代理状态核对。</p>
+            <p className="hint">如果这台设备已经通过路由器/系统代理全局科学上网，可直接填本机代理端口，Go 会经由它连接 Telegram。注意协议要与端口配对：v2rayA 默认 HTTP 是 20171、SOCKS5 是 20170（填成 socks5://…:20171 这种「协议错位」会连不上）；Clash 系默认 socks5://127.0.0.1:7890。若填了代理但下载仍显示「HTTP 回退」，通常是该代理端口不通或协议配错，可用「运行诊断」页的代理状态核对。</p>
             {downloaderState?.proxy ? <p className={cx("proxy-status", downloaderState.proxy.source === "invalid" && "is-error")}>
               <span>当前生效：<b>{proxySourceLabel(downloaderState.proxy.source)}</b></span>
               {downloaderState.proxy.address ? <span className="proxy-address">{downloaderState.proxy.address}</span> : null}

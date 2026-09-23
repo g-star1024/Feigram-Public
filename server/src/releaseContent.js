@@ -14,6 +14,17 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.4.6",
+    title: "Feigram 2.4.6 更新",
+    version: "2.4.6",
+    level: "success",
+    createdAt: "2026-09-23T02:14:30.000Z",
+    body: [
+"修复：应用重启后 failed 账号不再干等 30 分钟——每次配置同步（含启动回推）都会立即全量重检",
+      "优化：代理设置提示明确 v2rayA 端口配对（HTTP=20171、SOCKS5=20170），避免协议错位连不上"
+    ].join("\n")
+  },
+  {
     id: "release-2.4.5",
     title: "Feigram 2.4.5 更新",
     version: "2.4.5",
@@ -61,16 +72,6 @@ const announcements = [
 "公告瘦身：应用内公告历史只保留最近 5 条版本，避免列表越积越长；完整更新说明仍可在 docs/release-notes.md 查看。",
       "通知权限入口优化：桌面通知的权限申请从公告铃铛移到「设置 → 隐私 → 通知设置」，点铃铛只管看公告，不再弹浏览器授权窗；被拒绝时页面给出恢复指引。",
       "工程清理：删除已废弃的旧版打包脚本，发版只走 build-native-fpk.sh 一条路径。"
-    ].join("\n")
-  },
-  {
-    id: "release-2.4.1",
-    title: "Feigram 2.4.1 更新",
-    version: "2.4.1",
-    level: "success",
-    createdAt: "2026-09-22T15:38:03.000Z",
-    body: [
-"诊断日志分级着色/级别与关键词过滤/清空按钮 + 管理后台服务端/隐私设置 tab 视觉对齐诊断页 + 双端窄屏布局核查"
     ].join("\n")
   },
 ];

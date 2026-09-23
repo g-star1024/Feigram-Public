@@ -1310,11 +1310,13 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 		if cancelled > 0 {
 			log.Printf("网络代理已变更，取消 %d 个进行中的登录流程以改用新代理", cancelled)
 		}
-		// 代理变了，此前因网络不通被判 failed / degraded 的账号大概率已恢复，
-		// 立即触发全量健康检查，不再等最长 30 分钟的定时巡检。
-		go a.scheduleAllHealthChecks("代理变更重检")
 	}
 	go a.pumpOnce()
+	// 配置每次同步都触发全量健康检查（per-account 去重兜底）：
+	// 2.4.5 实测缺口——应用重启时 Node 回推的代理 URL 与存储值相同，
+	// 若只在「URL 变更」时重检，重启后 failed 账号要干等最长 30 分钟巡检。
+	// 启动期 Node 会在 Go 就绪后立即 PUT 一次配置，这里顺带覆盖了「开机即重检」。
+	go a.scheduleAllHealthChecks("配置同步重检")
 	writeJSON(w, http.StatusOK, a.snapshot())
 }
 
