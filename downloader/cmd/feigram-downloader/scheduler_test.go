@@ -13,6 +13,8 @@ package main
 // 否则会与异步 goroutine 竞争而产生 flaky。
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -31,11 +33,16 @@ func newTestApp(t *testing.T, cfg Config) *App {
 		config: cfg,
 		// saveLocked 写的是 a.storePath（不是 dataDir），两者都要指向临时目录，
 		// 否则 rename 失败被误判成产品缺陷。
-		dataDir:   dir,
-		storePath: filepath.Join(dir, "tasks.json"),
-		tasks:     map[string]*Task{},
-		native:    map[string]*NativeAccount{},
-		running:   map[string]chan struct{}{},
+		dataDir:    dir,
+		storePath:  filepath.Join(dir, "tasks.json"),
+		tasks:      map[string]*Task{},
+		native:     map[string]*NativeAccount{},
+		running:    map[string]chan struct{}{},
+		taskSpawns: map[string]*spawnStat{},
+		taskLogs:   map[string]*taskLogState{},
+		// http-bridge 用例需要非 nil 的 a.client（downloadHTTPBridge 直接使用）。
+		client: &http.Client{},
+		proxy:  &proxyRuntime{},
 	}
 }
 
@@ -242,5 +249,219 @@ func TestNormalizeNativeStatusNeverHealthyWhenNotReady(t *testing.T) {
 func TestNativeNoProgressTimeoutSane(t *testing.T) {
 	if nativeNoProgressTimeout < 30*time.Second || nativeNoProgressTimeout > 10*time.Minute {
 		t.Fatalf("无进度窗口不合理: %v", nativeNoProgressTimeout)
+	}
+}
+
+// --- R4.26：调度限流 / 复活收敛 / 日志限频 / 空响应瞬态化 ---
+
+// spawn 限流纯逻辑：首次放行；10s 内连续重复调度累计爆发次数，
+// 触顶进入冷却；冷却期内一律拒绝；冷却过期恢复放行；间隔足够长则计数清零。
+func TestSpawnRateLimitClampsRapidRespawn(t *testing.T) {
+	app := newTestApp(t, Config{Enabled: true, Concurrency: 1, Mode: "conservative"})
+	app.mu.Lock()
+	defer app.mu.Unlock()
+
+	if allowed, cd := app.spawnAllowedLocked("t1"); !allowed || cd != 0 {
+		t.Fatalf("首次调度应放行，got allowed=%v cooldown=%v", allowed, cd)
+	}
+	app.markSpawnLocked("t1")
+
+	// 爆发限额内（taskSpawnBurstLimit-1 次）放行
+	for i := 0; i < taskSpawnBurstLimit-1; i++ {
+		if allowed, _ := app.spawnAllowedLocked("t1"); !allowed {
+			t.Fatalf("爆发内第 %d 次调度应放行", i+2)
+		}
+		app.markSpawnLocked("t1")
+	}
+	allowed, cooldown := app.spawnAllowedLocked("t1")
+	if allowed || cooldown <= 0 {
+		t.Fatalf("爆发触顶必须拒绝并带冷却，got allowed=%v cooldown=%v", allowed, cooldown)
+	}
+	if cooldown > taskSpawnCooldownMax {
+		t.Fatalf("冷却不得超过上限 %v，got %v", taskSpawnCooldownMax, cooldown)
+	}
+
+	// 冷却期内一律拒绝
+	if allowed, _ := app.spawnAllowedLocked("t1"); allowed {
+		t.Fatal("冷却期内的调度必须拒绝")
+	}
+
+	// 冷却过期：恢复放行
+	app.taskSpawns["t1"].cooldownUntil = time.Now().Add(-time.Second)
+	if allowed, cd := app.spawnAllowedLocked("t1"); !allowed {
+		t.Fatalf("冷却过期后应放行，got cooldown=%v", cd)
+	}
+
+	// 间隔足够长：爆发计数清零
+	app.taskSpawns["t1"].last = time.Now().Add(-2 * taskSpawnMinInterval)
+	app.taskSpawns["t1"].bursts = taskSpawnBurstLimit - 1
+	if allowed, _ := app.spawnAllowedLocked("t1"); !allowed {
+		t.Fatal("长间隔后的调度应放行")
+	}
+	if stat := app.taskSpawns["t1"]; stat.bursts != 0 {
+		t.Fatalf("长间隔后爆发计数应清零，got %d", stat.bursts)
+	}
+}
+
+// 集成：error 任务被外部反复复活时，pumpOnce 的 spawn 限流必须在爆发触顶后
+// 拒绝继续调度——无论复活来自谁（ensure 轮询/用户点击），紧循环都被掐断。
+func TestPumpOnceClampsReviveTightLoop(t *testing.T) {
+	app := newTestApp(t, Config{Enabled: true, Concurrency: 1, Mode: "conservative"})
+	defer drainRunTasks(t, app)
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound) // 404 不在瞬态表内 → 快速终态失败
+		_, _ = w.Write([]byte("nope"))
+	}))
+	defer source.Close()
+
+	task := &Task{
+		ID: "t1", UserID: "u1", AccountID: "a1", Status: "queued",
+		Transport: "http-bridge", SourceURL: source.URL,
+		FilePath: filepath.Join(t.TempDir(), "out.bin"), Size: 10,
+	}
+	app.tasks[task.ID] = task
+
+	revive := func() {
+		app.mu.Lock()
+		task.Status = "queued" // 模拟 ensure 轮询把 error 任务复活（upsert 收敛后的外部视角）
+		task.RetryAfter = 0
+		app.mu.Unlock()
+	}
+
+	spawned := 0
+	for i := 0; i < 6; i++ {
+		if i > 0 {
+			drainRunTasks(t, app)
+			revive()
+		}
+		if app.pumpOnce() {
+			spawned++
+		}
+	}
+	drainRunTasks(t, app)
+	if spawned > taskSpawnBurstLimit+1 {
+		t.Fatalf("spawn 限流未生效：%s 内被调度 %d 次（上限 %d 次爆发 + 首次）", taskSpawnMinInterval, spawned, taskSpawnBurstLimit)
+	}
+	app.mu.Lock()
+	finalStatus := task.Status
+	app.mu.Unlock()
+	if finalStatus != "queued" {
+		t.Fatalf("被限流拒绝后任务应留在 queued，got %q", finalStatus)
+	}
+}
+
+// 复活收敛：cancelled 不得被 auto 来源复活；error 复活保留 RetryCount；
+// 有活 goroutine 的任务一律不复活。
+func TestUpsertReviveConvergence(t *testing.T) {
+	app := newTestApp(t, Config{Enabled: true})
+
+	// cancelled + auto 来源：不复活
+	app.mu.Lock()
+	app.tasks["t1"] = &Task{ID: "t1", Status: "cancelled", RetryCount: 4}
+	got := app.upsertTaskLocked(Task{ID: "t1", Source: "auto"})
+	if got.Status != "cancelled" {
+		t.Fatalf("auto 来源不得复活 cancelled 任务，got %q", got.Status)
+	}
+	// cancelled + 显式来源（用户重新点下载）：复活，但 RetryCount 不清零
+	got = app.upsertTaskLocked(Task{ID: "t1", Source: "manual"})
+	if got.Status != "queued" {
+		t.Fatalf("显式来源应复活 cancelled 任务，got %q", got.Status)
+	}
+	if got.RetryCount != 4 {
+		t.Fatalf("复活不得清零 RetryCount（只有 queue 动作清零），got %d", got.RetryCount)
+	}
+
+	// error + 有活 goroutine：不复活（避免双 goroutine 写同一 part 文件）
+	app.tasks["t2"] = &Task{ID: "t2", Status: "error", RetryCount: 2}
+	app.running["t2"] = make(chan struct{})
+	got = app.upsertTaskLocked(Task{ID: "t2", Source: "manual"})
+	if got.Status != "error" {
+		t.Fatalf("有活 goroutine 的任务不得复活，got %q", got.Status)
+	}
+	// error + 无活 goroutine：复活且保留 RetryCount
+	delete(app.running, "t2")
+	got = app.upsertTaskLocked(Task{ID: "t2", Source: "manual"})
+	if got.Status != "queued" || got.RetryCount != 2 {
+		t.Fatalf("error 任务应复活且保留 RetryCount，got status=%q retryCount=%d", got.Status, got.RetryCount)
+	}
+	app.mu.Unlock()
+}
+
+// 瞬态表：deadline exceeded 与空响应必须按瞬态；部分下载后的 incomplete 仍是终态。
+func TestTransientDeadlineExceededAndEmptyResponse(t *testing.T) {
+	if !transientSourceError(fmt.Errorf("connect Telegram media DC 2: context deadline exceeded")) {
+		t.Fatal("context deadline exceeded（拨号/RPC 超时）应按瞬态处理")
+	}
+	wrapped := fmt.Errorf("媒体源返回空响应（已取 0 / 171931369 字节）：%w", errEmptyMediaResponse)
+	if !transientSourceError(wrapped) {
+		t.Fatal("空响应（0 分块）应按瞬态处理")
+	}
+	if transientSourceError(errors.New("file incomplete: 100 / 200")) {
+		t.Fatal("已下载部分字节后的 incomplete 仍是终态，不得误判瞬态")
+	}
+}
+
+// 日志限频：同任务同一条错误在窗口内只打一条，其余计数；不同错误互不影响。
+func TestTaskEventLogDedup(t *testing.T) {
+	app := newTestApp(t, Config{Enabled: true})
+	app.taskEventLog("t9", "failed: same error")
+	app.taskEventLog("t9", "failed: same error")
+	app.taskEventLog("t9", "failed: same error")
+	app.taskEventLog("t9", "failed: another error")
+	app.mu.Lock()
+	state := app.taskLogs["t9"]
+	suppressedSame := state.suppressed["failed: same error"]
+	suppressedOther := state.suppressed["failed: another error"]
+	_, lastSeen := state.last["failed: same error"]
+	app.mu.Unlock()
+	if suppressedSame != 2 {
+		t.Fatalf("重复错误应抑制 2 条，got %d", suppressedSame)
+	}
+	if suppressedOther != 0 || !lastSeen {
+		t.Fatalf("不同错误不受抑制且应记录最近输出时间，got suppressed=%d lastSeen=%v", suppressedOther, lastSeen)
+	}
+}
+
+// R4.26 根因回归：spawn 时必须把 downloading 状态写到**存储任务**上。
+// 此前写在了 listTasksLocked() 的值拷贝上，存储任务永远停在 queued，
+// 下一轮 pumpOnce 的幻影清理立即误杀刚 spawn 的坑再重新 spawn——
+// 2.6.2「永远排队、运行 0/1」与 2.6.3「同秒几十条 stalled/failed 日志风暴」
+// 的共同根因。
+func TestPumpOnceMarksStoredTaskDownloading(t *testing.T) {
+	app := newTestApp(t, Config{Enabled: true, Concurrency: 1, Mode: "conservative", Transport: "http-bridge"})
+	defer drainRunTasks(t, app)
+	release := make(chan struct{})
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release // 挂住 goroutine，让 running 条目稳定存活
+	}))
+	defer source.Close()
+	defer close(release)
+
+	task := &Task{
+		ID: "t1", UserID: "u1", AccountID: "a1", Status: "queued",
+		Transport: "http-bridge", SourceURL: source.URL,
+		FilePath: filepath.Join(t.TempDir(), "out.bin"), Size: 10,
+	}
+	app.tasks[task.ID] = task
+
+	if !app.pumpOnce() {
+		t.Fatal("pumpOnce 应启动任务")
+	}
+	app.mu.Lock()
+	storedStatus := app.tasks["t1"].Status
+	app.mu.Unlock()
+	if storedStatus != "downloading" {
+		t.Fatalf("spawn 后存储任务状态必须为 downloading，got %q（拷贝突变未落库）", storedStatus)
+	}
+
+	// 第二轮 pumpOnce：不得把活跃坑误判为幻影，也不得重复 spawn
+	if app.pumpOnce() {
+		t.Fatal("任务已在传输态时第二轮 pumpOnce 不应再启动任何任务")
+	}
+	app.mu.Lock()
+	_, entryAlive := app.running["t1"]
+	app.mu.Unlock()
+	if !entryAlive {
+		t.Fatal("活跃任务的 running 条目不得被幻影清理回收")
 	}
 }

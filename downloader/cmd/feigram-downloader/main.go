@@ -56,6 +56,11 @@ var version = "dev"
 // 且错误文案必须直指「媒体路径无进度」这一事实，让用户能区分「慢」与「挂死」。
 var errDownloadStalled = errors.New("下载超过 120 秒没有任何进度（媒体路径疑似挂死：请检查代理是否放行 Telegram 媒体 DC 网段），将自动重试")
 
+// errEmptyMediaResponse 表示本次尝试一个有效分块都没拿到（R4.26）。
+// 它是瞬态错误：链路/账号层故障的典型表现（配合看门狗 stalled 成对出现），
+// 按退避自动续传，而不是终态失败后被外部反复复活。
+var errEmptyMediaResponse = errors.New("媒体源返回空响应")
+
 // errMissingFilePathReason 是任务缺少落盘路径时的等待原因文案。
 // R4.25：此前 FilePath 为空直接在调度循环里 continue（零日志零提示），
 // 用户在下载中心只能看到永久「排队中」——补上可读原因，避免二次排障盲区。
@@ -261,7 +266,15 @@ type App struct {
 	healthRunning map[string]bool
 	// accessRecheck 记录各账号上次「访问时未就绪补检」时间（冷却去重，见 healthauto.go）。
 	accessRecheck map[string]time.Time
-	client        *http.Client
+	// taskSpawns 记录每任务的最近调度时间与连续爆发次数（R4.26 调度限流）：
+	// 无论上游是谁在反复复活任务（ensure 轮询复活 error 任务、用户狂点、幻影清理
+	// 竞态），调度层对同一任务的 spawn 频率做硬限制，掐断「复活→失败→再复活」
+	// 紧循环（2.6.3 实测：同一任务同一秒刷出几十条 stalled/failed 日志）。
+	taskSpawns map[string]*spawnStat
+	// taskLogs 记录每任务各类日志的最近输出时间（R4.26 日志限频），防止异常
+	// 场景下同一条错误刷爆日志。
+	taskLogs map[string]*taskLogState
+	client   *http.Client
 	// proxy 是当前生效的网络代理（MTProto dialer + 媒体 transport 共用），
 	// 用独立锁保护，避免与 App.mu 相互等待。详见 proxy.go。
 	proxy *proxyRuntime
@@ -291,11 +304,13 @@ func main() {
 			ProxyURL:  "",
 			UpdatedAt: now(),
 		},
-		tasks:    map[string]*Task{},
-		native:   map[string]*NativeAccount{},
-		logins:   map[string]*NativeLogin{},
-		qrLogins: map[string]*NativeQRLogin{},
-		running:  map[string]chan struct{}{},
+		tasks:      map[string]*Task{},
+		native:     map[string]*NativeAccount{},
+		logins:     map[string]*NativeLogin{},
+		qrLogins:   map[string]*NativeQRLogin{},
+		running:    map[string]chan struct{}{},
+		taskSpawns: map[string]*spawnStat{},
+		taskLogs:   map[string]*taskLogState{},
 		client: &http.Client{
 			Timeout:   0,
 			Transport: newMediaTransport(proxy),
@@ -469,6 +484,107 @@ func (a *App) pump() {
 	}
 }
 
+// --- R4.26：调度限流 + 日志限频 ---
+//
+// 2.6.3 实测暴露的结构性缺口：running 守卫只能防「同任务并发重复」，
+// 防不了「快速失败 → 外部复活（ensure 轮询把 error 任务改回 queued 并清零退避）→
+// 再调度」的紧循环，表现为同一任务在同一秒内刷出几十条 stalled/failed 日志。
+// 这里在调度层加两道与上游无关的硬闸：
+//  1. spawn 限流：同任务两次调度至少间隔 taskSpawnMinInterval；
+//     间隔内重复调度累计爆发次数，超过阈值进入指数冷却；
+//  2. 日志限频：同任务同一条错误在窗口内只打一条，其余计数后汇总。
+
+const (
+	taskSpawnMinInterval  = 10 * time.Second
+	taskSpawnBurstLimit   = 3
+	taskSpawnCooldownStep = 60 * time.Second
+	taskSpawnCooldownMax  = 5 * time.Minute
+	taskLogDedupWindow    = 60 * time.Second
+)
+
+type spawnStat struct {
+	last          time.Time
+	bursts        int
+	cooldownUntil time.Time
+}
+
+type taskLogState struct {
+	last       map[string]time.Time
+	suppressed map[string]int
+}
+
+// spawnAllowedLocked 判定任务此刻是否允许被调度启动（调用方须持 a.mu）。
+// 返回 (false, cooldown>0) 表示处于冷却期；爆发次数触顶时内部会设置冷却。
+func (a *App) spawnAllowedLocked(id string) (bool, time.Duration) {
+	nowTs := time.Now()
+	stat := a.taskSpawns[id]
+	if stat == nil {
+		return true, 0
+	}
+	if nowTs.Before(stat.cooldownUntil) {
+		return false, stat.cooldownUntil.Sub(nowTs)
+	}
+	if nowTs.Sub(stat.last) < taskSpawnMinInterval {
+		stat.bursts++
+		if stat.bursts >= taskSpawnBurstLimit {
+			shift := minInt(stat.bursts-taskSpawnBurstLimit+1, 4)
+			cooldown := taskSpawnCooldownStep * (1 << shift)
+			if cooldown > taskSpawnCooldownMax {
+				cooldown = taskSpawnCooldownMax
+			}
+			stat.cooldownUntil = nowTs.Add(cooldown)
+			stat.bursts = 0
+			log.Printf("task %s: 检测到调度紧循环（%s 内第 %d 次重复调度），进入 %s 调度冷却（R4.26）", id, taskSpawnMinInterval, taskSpawnBurstLimit, cooldown)
+			return false, cooldown
+		}
+		return true, 0
+	}
+	stat.bursts = 0
+	return true, 0
+}
+
+// markSpawnLocked 记录一次调度启动（调用方须持 a.mu）。
+func (a *App) markSpawnLocked(id string) {
+	if a.taskSpawns == nil {
+		a.taskSpawns = map[string]*spawnStat{}
+	}
+	stat := a.taskSpawns[id]
+	if stat == nil {
+		stat = &spawnStat{}
+		a.taskSpawns[id] = stat
+	}
+	stat.last = time.Now()
+}
+
+// taskEventLog 同任务同一条错误在 taskLogDedupWindow 内只打一条日志，
+// 其余计数；窗口后再次出现时先补一条汇总。必须在未持有 a.mu 的上下文调用。
+func (a *App) taskEventLog(taskID, message string) {
+	a.mu.Lock()
+	if a.taskLogs == nil {
+		a.taskLogs = map[string]*taskLogState{}
+	}
+	state := a.taskLogs[taskID]
+	if state == nil {
+		state = &taskLogState{last: map[string]time.Time{}, suppressed: map[string]int{}}
+		a.taskLogs[taskID] = state
+	}
+	nowTs := time.Now()
+	if last, ok := state.last[message]; ok && nowTs.Sub(last) < taskLogDedupWindow {
+		state.suppressed[message]++
+		a.mu.Unlock()
+		return
+	}
+	state.last[message] = nowTs
+	suppressed := state.suppressed[message]
+	state.suppressed[message] = 0
+	a.mu.Unlock()
+	if suppressed > 0 {
+		log.Printf("task %s: %s（此前 %s 内同类日志已抑制 %d 条）", taskID, message, taskLogDedupWindow, suppressed)
+		return
+	}
+	log.Printf("task %s: %s", taskID, message)
+}
+
 // taskCanStartLocked 判定任务此刻是否具备启动条件（调用方须持 a.mu）。
 // 语义比 download() 的运行时处理**更严格一层**（提前止损，而非起了再失败）：
 //   - http-bridge：必须有可拉取的 SourceURL（显式降级开关）；
@@ -590,11 +706,37 @@ func (a *App) pumpOnce() bool {
 		if _, ok := a.running[task.ID]; ok {
 			continue
 		}
+		// R4.26：任务级调度限流。running 守卫只防「并发重复」，
+		// 防不了「快速失败 → 被外部复活 → 再调度」的紧循环——那是
+		// 2.6.3 实测日志风暴（同一任务同秒几十条 stalled/failed）的直接来源。
+		if allowed, cooldown := a.spawnAllowedLocked(task.ID); !allowed {
+			continue
+		} else if cooldown > 0 {
+			// 冷却期任务留在 queued，把原因写给用户看。
+			if stored := a.tasks[task.ID]; stored != nil {
+				reason := fmt.Sprintf("调度冷却中（%s 后自动重试，R4.26 防调度紧循环）", formatDuration(cooldown))
+				if stored.Error != reason {
+					stored.Error = reason
+					stored.UpdatedAt = now()
+					saveNeeded = true
+				}
+			}
+			continue
+		}
 		cancel := make(chan struct{})
 		a.running[task.ID] = cancel
-		task.Status = "downloading"
-		task.Error = ""
-		task.UpdatedAt = now()
+		a.markSpawnLocked(task.ID)
+		// R4.26 根因修复：task 是 listTasksLocked() 返回的**值拷贝**，
+		// 此前 `task.Status = "downloading"` 只改了副本，存储任务永远停在
+		// queued——下一轮 pumpOnce 的幻影清理立即把刚 spawn 的坑当僵尸杀掉
+		// 再重新 spawn，形成 spawn/误杀循环：2.6.2「永远排队、运行 0/1」、
+		// 2.6.3「同秒几十条 stalled/failed 日志风暴」的共同根因。
+		// 状态必须写到 a.tasks 里的存储任务上。
+		if stored := a.tasks[task.ID]; stored != nil {
+			stored.Status = "downloading"
+			stored.Error = ""
+			stored.UpdatedAt = now()
+		}
 		started = true
 		// R4.25：任务启动必须留日志。此前启动无日志、失败才有日志，
 		// 「任务到底有没有被调度」在用户日志里无从判断（2.6.2 排障盲区）。
@@ -610,6 +752,12 @@ func (a *App) pumpOnce() bool {
 func (a *App) runTask(id string, cancel <-chan struct{}) {
 	defer func() {
 		a.mu.Lock()
+		// R4.26：goroutine 退出审计。坑位在本 goroutine 存活期间就被移除
+		//（幻影清理/强制重启/删除任务）说明调度层与执行层出现过状态竞争，
+		// 留一条日志供排障定位（正常退出时条目仍在，不会有这条日志）。
+		if _, alive := a.running[id]; !alive {
+			log.Printf("task %s: goroutine 退出时发现调度坑位已被回收（幻影清理或强制重启）", id)
+		}
 		delete(a.running, id)
 		_ = a.saveLocked()
 		a.mu.Unlock()
@@ -670,7 +818,7 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 					t.Error = fmt.Sprintf("媒体源暂不可用，%s 后自动续传：%s", formatDuration(delay), compactError(err))
 					t.UpdatedAt = now()
 				})
-				log.Printf("task %s transient failure, retry in %s: %v", id, delay, err)
+				a.taskEventLog(id, fmt.Sprintf("transient failure, retry in %s: %v", delay, err))
 				return
 			}
 			a.updateTask(id, func(t *Task) {
@@ -688,7 +836,7 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 			if task.Transport == "native-mtproto" {
 				a.markNativeAccountResult(task.UserID, task.AccountID, false)
 			}
-			log.Printf("task %s failed: %v", id, err)
+			a.taskEventLog(id, fmt.Sprintf("failed: %v", err))
 			return
 		}
 		a.updateTask(id, func(t *Task) {
@@ -978,7 +1126,9 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 				return
 			case <-watch.C:
 				if time.Since(lastProgress) > nativeNoProgressTimeout {
-					log.Printf("task %s stalled: no bytes for %s（媒体路径无进度，看门狗终止）", task.ID, nativeNoProgressTimeout)
+					// R4.26：stalled 日志走限频。看门狗本身每个 goroutine 只打一次，
+					// 但「复活→再挂死」的循环会让这条日志反复出现，限频防刷屏。
+					a.taskEventLog(task.ID, fmt.Sprintf("stalled: no bytes for %s（媒体路径无进度，看门狗终止）", nativeNoProgressTimeout))
 					stop(errDownloadStalled)
 					return
 				}
@@ -1171,6 +1321,14 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 	}
 	size := max64(task.Size, stat.Size())
 	if !complete(stat.Size(), size) {
+		if stat.Size() == 0 {
+			// R4.26：0 字节返回按瞬态处理。实测（2.6.3）中它与「看门狗 stalled」
+			// 成对出现：链路挂死期间 upload.GetFiles 返回空体 → Run 正常返回 →
+			// 0/171931369 → 终态失败 → 被外部复活 → 再挂死，形成紧循环。
+			// 零字节说明一个有效分块都没拿到，是链路/账号层故障而非文件损坏，
+			// 应走退避续传；下载过一部分后的不完整仍是真异常，维持终态。
+			return fmt.Errorf("媒体源返回空响应（已取 0 / %d 字节）：%w", size, errEmptyMediaResponse)
+		}
 		return fmt.Errorf("file incomplete: %d / %d", stat.Size(), size)
 	}
 	return os.Rename(task.PartPath, task.FilePath)
@@ -1943,10 +2101,27 @@ func (a *App) upsertTaskLocked(input Task) Task {
 	if input.Order > 0 {
 		existing.Order = input.Order
 	}
-	if existing.Status == "cancelled" || existing.Status == "error" {
-		existing.Status = "queued"
-		existing.RetryCount = 0
-		existing.RetryAfter = 0
+	// R4.26：终态任务的复活收敛。此前 ensure（POST /api/tasks）每命中一次
+	// 就把 error/cancelled 任务静默改回 queued 并清零退避——上游以任何频率
+	// 轮询都会形成「复活→失败→再复活」的无退避紧循环（2.6.3 实测日志风暴）。
+	// 现在分三类：
+	//   - cancelled：仅显式来源（source != auto，即用户重新点下载）才复活；
+	//     后台缓存的幂等轮询（source=auto）不得擅自复活用户取消的任务；
+	//   - error：仍允许复活（前端重新点下载等价于重试），但不清零 RetryCount，
+	//     瞬态退避上限继续生效；只有「开始」（queue 动作）才清零；
+	//   - 有活 goroutine 的任务一律不复活（避免双 goroutine 写同一 part 文件）。
+	if _, live := a.running[input.ID]; !live {
+		revive := false
+		switch existing.Status {
+		case "error":
+			revive = true
+		case "cancelled":
+			revive = input.Source != "" && input.Source != "auto"
+		}
+		if revive {
+			existing.Status = "queued"
+			existing.RetryAfter = 0
+		}
 	}
 	existing.UpdatedAt = now()
 	return *existing
@@ -3372,12 +3547,20 @@ func transientSourceError(err error) bool {
 	if errors.Is(err, errDownloadStalled) {
 		return true
 	}
+	// R4.26：空响应（0 分块）同样是链路/账号层瞬态故障。
+	if errors.Is(err, errEmptyMediaResponse) {
+		return true
+	}
 	text := strings.ToLower(err.Error())
 	markers := []string{
 		"connection refused",
 		"unexpected eof",
 		"timeout",
 		"timed out",
+		// R4.26：context deadline exceeded（拨号/RPC 超时）是典型瞬态——
+		// 此前不在表内，账号failed期间的反复拨号超时被当成终态错误，
+		// 是「复活→失败→再复活」循环的燃料之一。
+		"deadline exceeded",
 		"connection reset",
 		"connection closed",
 		"broken pipe",
