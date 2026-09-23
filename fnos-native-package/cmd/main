@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.5.3"
-export APP_CHANGELOG="修复媒体 DC 与账号主 DC 相同时的 DC_ID_INVALID（改用主连接直读），健康检查抽样恢复"
+export APP_VERSION="2.5.4"
+export APP_CHANGELOG="修复会话页 visible is not defined 错误卡 + 下载目录权限提示"
 export NODE_ENV="production"
 
 is_running() {

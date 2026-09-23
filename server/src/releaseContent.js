@@ -14,6 +14,17 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.5.4",
+    title: "Feigram 2.5.4 更新",
+    version: "2.5.4",
+    level: "success",
+    createdAt: "2026-09-23T04:26:27.000Z",
+    body: [
+"修复会话页「visible is not defined」加载失败错误卡（历史重构遗留的未定义变量引用，开启「文件夹自动选第一个会话」时必现），该设置恢复生效",
+      "下载目录权限不足时给出可操作提示（给目录开放写权限或改用应用可写目录），不再裸报 permission denied"
+    ].join("\n")
+  },
+  {
     id: "release-2.5.3",
     title: "Feigram 2.5.3 更新",
     version: "2.5.3",
@@ -57,17 +68,6 @@ const announcements = [
 "下载中心整合：原管理后台「缓存信息」整块迁入下载中心，成为「下载任务 / 后台缓存」两个子标签",
       "后台缓存的设置项（开关·最大速率·缓存模式·并发）、运行统计（运行中/传输层/任务数）、任务列表、批量取消与拖拽排序全部保留",
       "首页统计卡可点击直达：进行中/已完成下载 → 下载任务分区，缓存任务 → 后台缓存分区"
-    ].join("\n")
-  },
-  {
-    id: "release-2.4.6",
-    title: "Feigram 2.4.6 更新",
-    version: "2.4.6",
-    level: "success",
-    createdAt: "2026-09-23T02:14:30.000Z",
-    body: [
-"修复：应用重启后 failed 账号不再干等 30 分钟——每次配置同步（含启动回推）都会立即全量重检",
-      "优化：代理设置提示明确 v2rayA 端口配对（HTTP=20171、SOCKS5=20170），避免协议错位连不上"
     ].join("\n")
   },
 ];
