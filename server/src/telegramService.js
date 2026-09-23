@@ -388,7 +388,18 @@ function rememberNativePeers(accountId, chats) {
   const cache = peerCache.get(accountId);
   chats.forEach((chat) => {
     const entity = syntheticNativeEntity(chat);
-    if (entity) cache.set(chat.id, entity);
+    if (!entity) return;
+    // R4.27：消息发送者缓存（listNativeMessages 传入的 {id,title,username}）不带
+    // accessHash。若用这种贫信息覆盖「会话列表」带 accessHash 的完整缓存，
+    // Go 侧按 channel accessHash 刷新 file_reference 时就会拿到空串并失败
+    //（2.6.4 实测「invalid native channel access hash: parsing \"\"」的源头之一）。
+    // 已有完整条目时，贫信息只做合并、不降级覆盖。
+    const existing = cache.get(chat.id);
+    if (existing && existing.accessHash && !entity.accessHash) {
+      cache.set(chat.id, { ...existing, title: entity.title || existing.title, username: entity.username || existing.username });
+      return;
+    }
+    cache.set(chat.id, entity);
   });
 }
 

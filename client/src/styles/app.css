@@ -256,6 +256,15 @@ textarea {
   overflow: hidden;
 }
 
+/* R4.27：侧栏收起——第一列归零并隐藏 aside，会话区占满全宽；
+   展开入口在会话头（有会话时）与空白态（无会话时）。 */
+.app-shell.sidebar-collapsed {
+  grid-template-columns: 0 minmax(0, 1fr) auto;
+}
+.app-shell.sidebar-collapsed .sidebar {
+  display: none;
+}
+
 .sidebar {
   background: var(--fn-surface);
   border-right: 1px solid var(--fn-border);
@@ -277,7 +286,8 @@ textarea {
 
 .current-account-row {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) auto;
+  /* R4.27：末列新增「收起侧栏」按钮 */
+  grid-template-columns: 40px minmax(0, 1fr) auto auto;
 }
 
 .current-account-copy {

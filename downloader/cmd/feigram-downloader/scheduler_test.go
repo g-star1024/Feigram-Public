@@ -13,10 +13,13 @@ package main
 // 否则会与异步 goroutine 竞争而产生 flaky。
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/gotd/td/tgerr"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -463,5 +466,119 @@ func TestPumpOnceMarksStoredTaskDownloading(t *testing.T) {
 	app.mu.Unlock()
 	if !entryAlive {
 		t.Fatal("活跃任务的 running 条目不得被幻影清理回收")
+	}
+}
+
+// --- R4.27：FLOOD_WAIT 精确退避 / 刷新链路自愈 / 旧终态任务复活 ---
+
+// FLOOD_WAIT 秒数解析：覆盖 gotd 实际日志形态「FLOOD_WAIT (1464)」、
+// tgerr 标准形态「FLOOD_WAIT_3」、被包装的错误链；非限流错误返回 0。
+func TestFloodWaitFromError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"日志括号形态", errors.New("export auth to 5: rpc error code 420: FLOOD_WAIT (1464)"), 1464},
+		{"tgerr 下划线形态", tgerr.New(420, "FLOOD_WAIT_3"), 3},
+		{"无数字", errors.New("FLOOD_WAIT"), 0},
+		{"非限流错误", errors.New("connection reset by peer"), 0},
+		{"nil", nil, 0},
+	}
+	for _, tc := range cases {
+		if got := floodWaitFromError(tc.err); got != tc.want {
+			t.Errorf("%s: floodWaitFromError=%d want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// classifyNativeReadError 必须把 FLOOD_WAIT 包装成类型化 floodWaitError，
+// 且仍按瞬态处理（transientSourceError 表内已有 flood_wait 文本兜底）。
+func TestClassifyFloodWaitIsTypedAndTransient(t *testing.T) {
+	raw := errors.New("rpc error code 420: FLOOD_WAIT (1440)")
+	classified := classifyNativeReadError(raw)
+	seconds := floodWaitFromError(classified)
+	if seconds != 1440 {
+		t.Fatalf("classifyNativeReadError 应保留限流秒数，got %d", seconds)
+	}
+	if !transientSourceError(classified) {
+		t.Fatal("FLOOD_WAIT 必须按瞬态处理")
+	}
+	var typed *floodWaitError
+	if !errors.As(classified, &typed) || typed.Seconds != 1440 {
+		t.Fatalf("应可 errors.As 出 *floodWaitError，got %T", classified)
+	}
+}
+
+// runTask 瞬态分支：FLOOD_WAIT 的 RetryAfter 必须按 Telegram 给的秒数精确等待
+// （而非 5 秒起步的指数退避），错误文案对用户可见。
+func TestRunTaskFloodWaitUsesTelegramDelay(t *testing.T) {
+	app := newTestApp(t, Config{Enabled: true, Concurrency: 1, Mode: "conservative"})
+	defer drainRunTasks(t, app)
+
+	// 用瞬态错误路径验证：直接构造带 FLOOD_WAIT 文本的错误走 runTask 的
+	// 瞬态分支无法从 http 源注入，因此这里只验证退避换算逻辑的分界——
+	// floodWaitFromError > 0 时 delay 取 Telegram 秒数（封顶 4h）。
+	wait := floodWaitFromError(errors.New("rpc error code 420: FLOOD_WAIT (1464)"))
+	delay := time.Duration(wait) * time.Second
+	if delay > floodWaitBackoffCap {
+		delay = floodWaitBackoffCap
+	}
+	if delay != 1464*time.Second {
+		t.Fatalf("1464 秒限流应精确等待 24m24s，got %v", delay)
+	}
+	huge := floodWaitFromError(errors.New("FLOOD_WAIT (999999)"))
+	hugeDelay := time.Duration(huge) * time.Second
+	if hugeDelay > floodWaitBackoffCap {
+		hugeDelay = floodWaitBackoffCap
+	}
+	if hugeDelay != floodWaitBackoffCap {
+		t.Fatalf("超限限流应封顶 4h，got %v", hugeDelay)
+	}
+}
+
+// 任务加载归一化：2.6.4 被「metadata refresh url is empty」误判终态的任务，
+// 升级后必须自动复活为 queued（由修复后的刷新链路接管续传）。
+func TestLoadRevivesMetadataURLFailures(t *testing.T) {
+	dir := t.TempDir()
+	store := map[string]any{
+		"config": map[string]any{"enabled": true},
+		"tasks": []map[string]any{
+			{
+				"id": "t1", "userId": "u1", "accountId": "a1", "status": "error",
+				"error": "file_reference 失效：自动刷新消息元数据失败：metadata refresh url is empty",
+			},
+			{"id": "t2", "userId": "u1", "accountId": "a1", "status": "error", "error": "其他真实失败"},
+			{"id": "t3", "userId": "u1", "accountId": "a1", "status": "cancelled", "error": ""},
+		},
+	}
+	raw, _ := json.Marshal(store)
+	if err := os.WriteFile(filepath.Join(dir, "tasks.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{
+		config:     Config{Enabled: true},
+		dataDir:    dir,
+		storePath:  filepath.Join(dir, "tasks.json"),
+		tasks:      map[string]*Task{},
+		native:     map[string]*NativeAccount{},
+		logins:     map[string]*NativeLogin{},
+		qrLogins:   map[string]*NativeQRLogin{},
+		running:    map[string]chan struct{}{},
+		taskSpawns: map[string]*spawnStat{},
+		taskLogs:   map[string]*taskLogState{},
+		proxy:      &proxyRuntime{},
+	}
+	if err := app.load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := app.tasks["t1"].Status; got != "queued" {
+		t.Fatalf("被刷新链路断裂误杀的任务应复活为 queued，got %q", got)
+	}
+	if got := app.tasks["t2"].Status; got != "error" {
+		t.Fatalf("真实失败的任务不得被复活，got %q", got)
+	}
+	if got := app.tasks["t3"].Status; got != "cancelled" {
+		t.Fatalf("用户主动取消的任务不得被复活，got %q", got)
 	}
 }

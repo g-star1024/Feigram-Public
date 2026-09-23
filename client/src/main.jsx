@@ -12,6 +12,8 @@ import {
   LogOut,
   MessageSquare,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   Play,
   Plus,
   RefreshCw,
@@ -1655,6 +1657,24 @@ function App() {
     playerMode: "browser"
   });
   const [activeFolder, setActiveFolder] = useState("all");
+  // R4.27：会话页侧栏（账号行 + 文件夹轨 + 会话列表）支持整体收起，
+  // 状态持久化到 localStorage，刷新后保持。
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("feigram:sidebarCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleSidebar = () => setSidebarCollapsed((value) => {
+    const next = !value;
+    try {
+      localStorage.setItem("feigram:sidebarCollapsed", next ? "1" : "0");
+    } catch {
+      /* localStorage 不可用时仅在当前会话生效 */
+    }
+    return next;
+  });
   const [activeChat, setActiveChat] = useState(null);
   const [chatStack, setChatStack] = useState([]);
   const [messages, setMessages] = useState([]);
@@ -2444,7 +2464,7 @@ function App() {
             onSilentCacheControl={updateSilentCacheControl}
             onCancelSilentCache={cancelSilentCache}
           />}
-          {view === "chats" && <div className={cx("app-shell fn-chats", activeChat && "chat-open")}>
+          {view === "chats" && <div className={cx("app-shell fn-chats", activeChat && "chat-open", sidebarCollapsed && "sidebar-collapsed")}>
       <aside className="sidebar">
         <div className="account-row current-account-row">
           {activeAccount ? <>
@@ -2462,6 +2482,10 @@ function App() {
               {accounts.map((account) => <option key={account.id} value={account.id}>{account.displayName || account.label}</option>)}
             </select>}
           </> : <button className="secondary action-button" onClick={() => { setAdminInitialTab("accounts"); setAnnouncementOpen(false); setAdminOpen(true); }}><Plus size={18} />添加 Telegram 账号</button>}
+          {/* R4.27：整体收起侧栏（账号行 + 文件夹轨 + 会话列表），把宽度让给会话区 */}
+          <button className="icon-button sidebar-toggle" type="button" onClick={toggleSidebar} title="收起侧栏" aria-label="收起侧栏">
+            <PanelLeftClose size={18} />
+          </button>
         </div>
         <div className="sidebar-main">
           {/* R4.24：文件夹改回「左侧竖排图标栏」（用户拍板方案 3）。此前横排胶囊行在
@@ -2522,6 +2546,7 @@ function App() {
         {activeChat ? <>
           <header className="conversation-head">
             <button className={cx("icon-button", chatStack.length ? "nav-back-button" : "back-button")} onClick={chatStack.length ? returnToPreviousChat : () => setActiveChat(null)} title={chatStack.length ? "返回上层位置" : "返回会话列表"}><ArrowLeft size={18} /></button>
+            {sidebarCollapsed && <button className="icon-button" type="button" onClick={toggleSidebar} title="展开侧栏" aria-label="展开侧栏"><PanelLeftOpen size={18} /></button>}
             <button className="conversation-title-button" type="button" onClick={openChatInfo} title="查看群组信息">
               <Avatar accountId={accountId} peerId={activeChat.id} label={activeChat.title} size={42} />
               <span><h2>{activeChat.title}</h2><p>{activeChat.type} {activeChat.username ? `@${activeChat.username}` : ""}</p></span>
@@ -2565,6 +2590,7 @@ function App() {
         </> : <div className="blank-state">
           <MessageSquare size={40} />
           <h2>选择或添加一个 Telegram 账号</h2>
+          {sidebarCollapsed && <button className="secondary action-button" type="button" onClick={toggleSidebar}><PanelLeftOpen size={16} />展开侧栏</button>}
           {error && <p className="error inline">{error}</p>}
           {error && <button className="secondary action-button" type="button" onClick={() => {
             refreshAccounts(true);

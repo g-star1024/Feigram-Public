@@ -125,7 +125,6 @@ type Task struct {
 	AutoCache   bool               `json:"autoCache"`
 	Transport   string             `json:"transport"`
 	SourceURL   string             `json:"sourceUrl"`
-	MetadataURL string             `json:"metadataUrl"`
 	FilePath    string             `json:"filePath"`
 	PartPath    string             `json:"partPath"`
 	InlineURL   string             `json:"inlineUrl"`
@@ -395,6 +394,14 @@ func (a *App) load() error {
 		// 不再依赖运行时 taskTransport 的兜底判断。
 		if task.Transport == "http-bridge" && isGoBlobSourceURL(task.SourceURL) {
 			task.Transport = ""
+		}
+		// R4.27：2.6.4 的刷新链路断裂（channel accessHash 缺失 + Node 元数据桥自环）
+		// 把一批 file_reference 过期的任务误判成终态失败。升级后自动复活为排队，
+		// 由修复后的刷新链路（peer 索引自愈 + FLOOD_WAIT 精确等待）接管续传。
+		if task.Status == "error" && strings.Contains(task.Error, "metadata refresh url is empty") {
+			task.Status = "queued"
+			task.RetryAfter = 0
+			task.Error = "2.6.5 修复刷新链路后自动复活，等待续传"
 		}
 		if task.Status != "downloading" && task.Status != "running" {
 			task.SpeedBps = 0
@@ -807,6 +814,17 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 					return
 				}
 				delay := retryDelay(nextCount)
+				// R4.27：FLOOD_WAIT 按 Telegram 给出的秒数精确等待，不再套用
+				// 指数退避——限流窗口 1400+ 秒时，5 分钟封顶的退避会让任务
+				// 反复撞墙并加深限流。
+				reason := "媒体源暂不可用"
+				if wait := floodWaitFromError(err); wait > 0 {
+					delay = time.Duration(wait) * time.Second
+					if delay > floodWaitBackoffCap {
+						delay = floodWaitBackoffCap
+					}
+					reason = "Telegram 限流（FLOOD_WAIT）"
+				}
 				a.updateTask(id, func(t *Task) {
 					if !stillCurrent(t) {
 						return
@@ -815,7 +833,7 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 					t.SpeedBps = 0
 					t.RetryCount = nextCount
 					t.RetryAfter = time.Now().Add(delay).Unix()
-					t.Error = fmt.Sprintf("媒体源暂不可用，%s 后自动续传：%s", formatDuration(delay), compactError(err))
+					t.Error = fmt.Sprintf("%s，%s 后自动续传：%s", reason, formatDuration(delay), compactError(err))
 					t.UpdatedAt = now()
 				})
 				a.taskEventLog(id, fmt.Sprintf("transient failure, retry in %s: %v", delay, err))
@@ -1234,7 +1252,7 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 					if !allowFileReferenceRefresh(fileRefRefreshes) {
 						return fmt.Errorf("file_reference 已连续刷新 %d 次仍无法取流，停止任务：%w", fileRefRefreshes-1, err)
 					}
-					refreshed, refreshErr := a.refreshNativeFileLocation(ctx, metadataAPI, task.ID)
+					refreshed, refreshErr := a.refreshNativeFileLocation(ctx, metadataAPI, task.ID, account)
 					if refreshErr != nil {
 						return fmt.Errorf("file_reference 失效：自动刷新消息元数据失败：%w", refreshErr)
 					}
@@ -1334,20 +1352,19 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 	return os.Rename(task.PartPath, task.FilePath)
 }
 
-func (a *App) refreshNativeFileLocation(ctx context.Context, api *tg.Client, taskID string) (NativeFileLocation, error) {
+func (a *App) refreshNativeFileLocation(ctx context.Context, api *tg.Client, taskID string, account NativeAccount) (NativeFileLocation, error) {
 	task := a.taskSnapshot(taskID)
 	if task == nil {
 		return NativeFileLocation{}, errors.New("task not found")
 	}
-	if refreshed, err := a.refreshNativeFileLocationFromTelegram(ctx, api, *task); err == nil {
-		return refreshed, nil
-	} else {
-		log.Printf("task %s Go metadata refetch failed, fallback to Node metadata bridge: %v", taskID, err)
-	}
-	return a.refreshNativeFileLocationFromMetadataURL(taskID)
+	// R4.27：删除「回退 Node 元数据桥」分支。M4.1 后 Node 自身已无 MTProto 客户端，
+	// 它的元数据接口内部仍然是调 Go 的原生 API——Go→Node→Go 纯自环（R4.22 同类问题），
+	// 只会把真实失败原因包装成「metadata refresh url is empty」。现在直接透传
+	// Go 侧刷新的真实错误（含自愈后的结论），配合瞬态表自动续传。
+	return a.refreshNativeFileLocationFromTelegram(ctx, api, *task, account)
 }
 
-func (a *App) refreshNativeFileLocationFromTelegram(ctx context.Context, api *tg.Client, task Task) (NativeFileLocation, error) {
+func (a *App) refreshNativeFileLocationFromTelegram(ctx context.Context, api *tg.Client, task Task, account NativeAccount) (NativeFileLocation, error) {
 	if api == nil {
 		return NativeFileLocation{}, errors.New("native api is nil")
 	}
@@ -1355,18 +1372,38 @@ func (a *App) refreshNativeFileLocationFromTelegram(ctx context.Context, api *tg
 	if messageID <= 0 {
 		return NativeFileLocation{}, errors.New("native task missing message id")
 	}
+	peer := task.NativePeer
+	// R4.27：channel 的 accessHash 只能从 dialogs/peer 索引获得。旧任务或
+	// 「消息发送者」贫信息缓存会把它丢成空串——此前刷新直接失败，最终以
+	// 「metadata refresh url is empty」终态收场。现在先经 resolveNativePeer
+	// （本地 peer 索引 + 必要时回拉一次会话列表）自愈补全，再刷新消息元数据。
+	if strings.TrimSpace(peer.Type) == "" ||
+		(strings.EqualFold(strings.TrimSpace(peer.Type), "channel") && strings.TrimSpace(peer.AccessHash) == "") {
+		healCtx, healCancel := context.WithTimeout(ctx, 45*time.Second)
+		healed, healErr := a.resolveNativePeer(healCtx, api, account, task.PeerID)
+		healCancel()
+		if healErr != nil {
+			return NativeFileLocation{}, fmt.Errorf("native peer 元数据缺失（type=%q id=%q accessHash=%q）且自动解析失败：%w", peer.Type, peer.ID, peer.AccessHash, healErr)
+		}
+		peer = NativePeerLocation{Type: healed.Type, ID: healed.ID, AccessHash: healed.AccessHash}
+		a.updateTask(task.ID, func(t *Task) {
+			t.NativePeer = peer
+			t.UpdatedAt = now()
+		})
+		log.Printf("task %s healed native peer metadata via peer index: type=%s id=%s", task.ID, peer.Type, peer.ID)
+	}
 	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var result tg.MessagesMessagesClass
 	var err error
-	peerType := strings.ToLower(strings.TrimSpace(task.NativePeer.Type))
+	peerType := strings.ToLower(strings.TrimSpace(peer.Type))
 	switch peerType {
 	case "channel":
-		channelID, parseErr := strconv.ParseInt(task.NativePeer.ID, 10, 64)
+		channelID, parseErr := strconv.ParseInt(peer.ID, 10, 64)
 		if parseErr != nil || channelID == 0 {
 			return NativeFileLocation{}, fmt.Errorf("invalid native channel id: %w", parseErr)
 		}
-		accessHash, parseErr := strconv.ParseInt(task.NativePeer.AccessHash, 10, 64)
+		accessHash, parseErr := strconv.ParseInt(peer.AccessHash, 10, 64)
 		if parseErr != nil {
 			return NativeFileLocation{}, fmt.Errorf("invalid native channel access hash: %w", parseErr)
 		}
@@ -1377,17 +1414,17 @@ func (a *App) refreshNativeFileLocationFromTelegram(ctx context.Context, api *tg
 	case "user", "chat":
 		result, err = api.MessagesGetMessages(reqCtx, []tg.InputMessageClass{&tg.InputMessageID{ID: messageID}})
 	default:
-		return NativeFileLocation{}, errors.New("native peer metadata missing; old task requires Node metadata fallback")
+		return NativeFileLocation{}, fmt.Errorf("unsupported native peer type %q", peer.Type)
 	}
 	if err != nil {
 		return NativeFileLocation{}, classifyNativeReadError(err)
 	}
 	doc, err := nativeDocumentFromMessages(result, messageID)
 	if err != nil && (peerType == "user" || peerType == "chat") {
-		peer, peerErr := nativeInputPeer(task.NativePeer)
+		historyPeer, peerErr := nativeInputPeer(peer)
 		if peerErr == nil {
 			history, historyErr := api.MessagesGetHistory(reqCtx, &tg.MessagesGetHistoryRequest{
-				Peer:     peer,
+				Peer:     historyPeer,
 				OffsetID: messageID + 1,
 				Limit:    3,
 			})
@@ -1468,50 +1505,9 @@ func nativeDocumentFromMessages(result tg.MessagesMessagesClass, messageID int) 
 	return nil, errors.New("你要访问的内容已被删除，或当前账号没有权限读取这条消息")
 }
 
-func (a *App) refreshNativeFileLocationFromMetadataURL(taskID string) (NativeFileLocation, error) {
-	task := a.taskSnapshot(taskID)
-	if task == nil {
-		return NativeFileLocation{}, errors.New("task not found")
-	}
-	if task.MetadataURL == "" {
-		return NativeFileLocation{}, errors.New("metadata refresh url is empty")
-	}
-	req, err := http.NewRequest(http.MethodGet, task.MetadataURL, nil)
-	if err != nil {
-		return NativeFileLocation{}, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer cancel()
-	resp, err := a.client.Do(req.WithContext(ctx))
-	if err != nil {
-		return NativeFileLocation{}, err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
-	if resp.StatusCode != http.StatusOK {
-		return NativeFileLocation{}, fmt.Errorf("metadata refresh returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
-	}
-	var payload struct {
-		NativeFile NativeFileLocation `json:"nativeFile"`
-		NativePeer NativePeerLocation `json:"nativePeer"`
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return NativeFileLocation{}, err
-	}
-	if payload.NativeFile.FileID == "" || payload.NativeFile.AccessHash == "" || payload.NativeFile.FileReference == "" {
-		return NativeFileLocation{}, errors.New("refreshed metadata missing native file location")
-	}
-	a.updateTask(taskID, func(t *Task) {
-		t.NativeFile = payload.NativeFile
-		if payload.NativePeer.Type != "" || payload.NativePeer.ID != "" {
-			t.NativePeer = payload.NativePeer
-		}
-		t.NativeFile.UpdatedAt = coalesce(t.NativeFile.UpdatedAt, now())
-		t.Error = ""
-		t.UpdatedAt = now()
-	})
-	return payload.NativeFile, nil
-}
+// R4.27：refreshNativeFileLocationFromMetadataURL 已删除——它是 Go→Node→Go 的
+// 自环回退（Node 的元数据接口内部仍调 Go 原生 API），只负责把真实错误包装成
+// 「metadata refresh url is empty」。刷新失败现在直接透传 Go 侧真实原因。
 
 // isGoBlobSourceURL 判断 SourceURL 是否指向 Go 自己的 blob 端点。
 // M4.1 删除 Node 侧媒体桥后，goBlobSourceUrl（server/src/telegramService.js）把
@@ -2076,9 +2072,6 @@ func (a *App) upsertTaskLocked(input Task) Task {
 	existing.AutoCache = existing.AutoCache || input.AutoCache
 	if input.SourceURL != "" {
 		existing.SourceURL = input.SourceURL
-	}
-	if input.MetadataURL != "" {
-		existing.MetadataURL = input.MetadataURL
 	}
 	if input.NativePeer.Type != "" || input.NativePeer.ID != "" {
 		existing.NativePeer = input.NativePeer
@@ -3373,12 +3366,55 @@ func sentCodeHash(sent tg.AuthSentCodeClass) (string, error) {
 	return "", fmt.Errorf("Telegram 未返回 phone code hash：%T", sent)
 }
 
+// R4.27：FLOOD_WAIT 是 Telegram 的显式限流指令（420 + 等待秒数）。此前它只被
+// 当成普通瞬态错误按指数退避处理（起步 5 秒、封顶 5 分钟），而真实限流常见
+// 1400+ 秒——任务在限流窗口内反复撞墙，既刷日志又加深限流。现在解析秒数，
+// 按 Telegram 的要求精确等待（封顶 floodWaitBackoffCap）。
+type floodWaitError struct {
+	Seconds int
+	Err     error
+}
+
+func (e *floodWaitError) Error() string {
+	return fmt.Sprintf("FLOOD_WAIT: Telegram 要求等待 %d 秒后重试", e.Seconds)
+}
+
+func (e *floodWaitError) Unwrap() error { return e.Err }
+
+var floodWaitRe = regexp.MustCompile(`(?i)FLOOD_WAIT[_ (]*(\d+)`)
+
+// floodWaitFromError 从错误链中解析 FLOOD_WAIT 的等待秒数；非限流错误返回 0。
+func floodWaitFromError(err error) int {
+	if err == nil {
+		return 0
+	}
+	var typed *floodWaitError
+	if errors.As(err, &typed) && typed.Seconds > 0 {
+		return typed.Seconds
+	}
+	if match := floodWaitRe.FindStringSubmatch(err.Error()); match != nil {
+		if seconds, convErr := strconv.Atoi(match[1]); convErr == nil && seconds > 0 {
+			return seconds
+		}
+	}
+	return 0
+}
+
+// floodWaitBackoffCap 限流等待的封顶值：Telegram 实际限流多为几分钟到 1 小时，
+// 封顶 4 小时只为防极端值把任务冻结数天；期间任务留在 queued，等待原因可见。
+const floodWaitBackoffCap = 4 * time.Hour
+
 func classifyNativeReadError(err error) error {
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "FILE_REFERENCE_EXPIRED"):
 		return fmt.Errorf("FILE_REFERENCE_EXPIRED: 原生 fileReference 已过期，需要刷新消息元数据后自动续传")
 	case strings.Contains(msg, "FLOOD_WAIT"):
+		if match := floodWaitRe.FindStringSubmatch(msg); match != nil {
+			if seconds, convErr := strconv.Atoi(match[1]); convErr == nil && seconds > 0 {
+				return &floodWaitError{Seconds: seconds, Err: err}
+			}
+		}
 		return fmt.Errorf("FLOOD_WAIT: Telegram 要求等待后重试：%w", err)
 	case strings.Contains(msg, "_MIGRATE_"):
 		return fmt.Errorf("DC_MIGRATE: Telegram 要求切换 DC 后重试：%w", err)
