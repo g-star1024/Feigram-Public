@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/gotd/td/telegram"
@@ -214,7 +215,11 @@ func (a *App) readLocationSample(ctx context.Context, client *telegram.Client, a
 	started := time.Now()
 	api := client.API()
 	var invoker telegram.CloseInvoker
-	if dc > 0 && dc != a.nativePrimaryDC(account.UserID, account.AccountID) {
+	if dc > 0 && dc == a.nativePrimaryDC(account.UserID, account.AccountID) {
+		// R4.18：抽样媒体恰在账号主 DC 上——此时建媒体池会让 gotd 对「导出授权给
+		// 自己」触发 Telegram 的 DC_ID_INVALID，直接复用主连接读取即可。
+		log.Printf("auto sample media DC %d is primary, using primary connection for upload.getFile", dc)
+	} else if dc > 0 {
 		var err error
 		invoker, err = client.MediaOnly(ctx, dc, 1)
 		if err != nil {

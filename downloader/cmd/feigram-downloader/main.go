@@ -2106,6 +2106,11 @@ func (a *App) nativeAccountSnapshotLocked(userID, accountID string) (NativeAccou
 // R4.18：gotd 的 MediaOnly/DC 池会无条件 exportAuthorization(dc)，而 Telegram
 // 对「导出到当前主 DC」直接返回 DC_ID_INVALID——媒体恰在主 DC 上时（2.5.2 实测
 // 账号主 DC 5、抽样媒体也在 DC 5）必须复用主连接，不建池、不导出。
+//
+// 判据为何可靠：落库 session 由 nativeSessionStorage（gotd 的会话回写回调）维护，
+// 登录迁移/网络迁移后 gotd 会把当前 DC 回写进来；而媒体池的连接用
+// pool.NewSyncSession 另建会话，且 client.opts（mtproto.Options）不含 SessionStorage，
+// 不会回写本存储——故此处读到的 DC 恒等于主连接的 DC，不会因建媒体池而漂移。
 func (a *App) nativePrimaryDC(userID, accountID string) int {
 	a.mu.Lock()
 	account := a.native[nativeAccountKey(userID, accountID)]
@@ -2299,9 +2304,11 @@ func (a *App) readNativeSample(ctx context.Context, client *telegram.Client, tas
 	}
 	fileAPI := metadataAPI
 	var mediaInvoker telegram.CloseInvoker
-	// R4.18：媒体 DC 就是账号主 DC 时复用主连接，避免 gotd 对「导出到自己」
-	// 触发 Telegram 的 DC_ID_INVALID。
-	if file.DCID > 0 && file.DCID != a.nativePrimaryDC(task.UserID, task.AccountID) {
+	if file.DCID > 0 && file.DCID == a.nativePrimaryDC(task.UserID, task.AccountID) {
+		// R4.18：缓存任务抽样媒体恰在账号主 DC 上——建媒体池会让 gotd 对
+		// 「导出授权给自己」触发 Telegram 的 DC_ID_INVALID，直接复用主连接读取。
+		log.Printf("sample task %s media DC %d is primary, using primary connection for upload.getFile", task.ID, file.DCID)
+	} else if file.DCID > 0 {
 		mediaInvoker, err = client.MediaOnly(ctx, file.DCID, 1)
 		if err != nil {
 			return 0, file.DCID, time.Since(started), fmt.Errorf("connect Telegram media DC %d: %w", file.DCID, err)
