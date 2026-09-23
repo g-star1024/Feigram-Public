@@ -42,6 +42,11 @@ const (
 	// 120 秒零字节意味着媒体路径已挂死（DC 路由异常/代理不放行媒体段/对端无响应），
 	// 必须转为可诊断的瞬态错误，而不是 goroutine 永久悬挂（2.6.2 实测队列冻死的根因）。
 	nativeNoProgressTimeout = 120 * time.Second
+
+	// R4.28：首字节超时——本次尝试一个字节都没收到时，30 秒即快速失败。
+	// 媒体路径不通（代理不放行媒体 DC 段）时每次尝试都 0 字节，120s 常规窗口
+	// 会让单并发队列被一个任务白占 2 分钟；30s 档加快轮换与诊断反馈。
+	nativeFirstByteTimeout = 30 * time.Second
 )
 
 // version 是 Go 下载器对外上报的版本号。
@@ -1129,11 +1134,16 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 	// 无日志、任务卡在传输态，running 坑被占死，conservative 单并发下整个
 	// 队列静默冻结（2.6.2 实测「一直排队、点开始没反应」的根因）。
 	// 现在任何 120 秒窗口内零字节就终止任务，转为可诊断的瞬态错误自动续传。
+	// R4.28：两档阈值——本次尝试**一个字节都没收到**（progressSeen=false）时
+	// 用 30s 首字节超时快速失败：媒体路径不通时（2.6.5 实测每次 0/171MB
+	// 白等 120s），单并发下一任务就白白占死队列 2 分钟；收到过字节后仍用
+	// 120s 窗口容忍正常的网络抖动/慢速分块。
 	ctx, stop := context.WithCancelCause(context.Background())
 	defer stop(nil)
 	lastProgress := time.Now()
+	progressSeen := false
 	go func() {
-		watch := time.NewTicker(15 * time.Second)
+		watch := time.NewTicker(10 * time.Second)
 		defer watch.Stop()
 		for {
 			select {
@@ -1143,10 +1153,16 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 			case <-ctx.Done():
 				return
 			case <-watch.C:
-				if time.Since(lastProgress) > nativeNoProgressTimeout {
+				threshold := nativeNoProgressTimeout
+				reason := "媒体路径无进度"
+				if !progressSeen {
+					threshold = nativeFirstByteTimeout
+					reason = "连接媒体服务器后始终无响应"
+				}
+				if time.Since(lastProgress) > threshold {
 					// R4.26：stalled 日志走限频。看门狗本身每个 goroutine 只打一次，
 					// 但「复活→再挂死」的循环会让这条日志反复出现，限频防刷屏。
-					a.taskEventLog(task.ID, fmt.Sprintf("stalled: no bytes for %s（媒体路径无进度，看门狗终止）", nativeNoProgressTimeout))
+					a.taskEventLog(task.ID, fmt.Sprintf("stalled: no bytes for %s（%s，看门狗终止）", threshold, reason))
 					stop(errDownloadStalled)
 					return
 				}
@@ -1304,6 +1320,7 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 			}
 			downloaded += int64(len(chunk.Bytes))
 			lastProgress = time.Now() // R4.25：喂狗——任何真实字节流动都重置无进度计时。
+			progressSeen = true       // R4.28：本次尝试已收到字节，看门狗切到 120s 常规窗口。
 			windowBytes += int64(len(chunk.Bytes))
 			if err := a.throttle(windowBytes, windowStart, cancel); err != nil {
 				return err

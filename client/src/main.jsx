@@ -1657,19 +1657,19 @@ function App() {
     playerMode: "browser"
   });
   const [activeFolder, setActiveFolder] = useState("all");
-  // R4.27：会话页侧栏（账号行 + 文件夹轨 + 会话列表）支持整体收起，
-  // 状态持久化到 localStorage，刷新后保持。
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+  // R4.28：折叠目标修正（用户实测反馈）——只收起群组文件夹图标轨（folder-rail），
+  // 账号行与会话列表保持可见；状态持久化到 localStorage，刷新后保持。
+  const [railCollapsed, setRailCollapsed] = useState(() => {
     try {
-      return localStorage.getItem("feigram:sidebarCollapsed") === "1";
+      return localStorage.getItem("feigram:folderRailCollapsed") === "1";
     } catch {
       return false;
     }
   });
-  const toggleSidebar = () => setSidebarCollapsed((value) => {
+  const toggleRail = () => setRailCollapsed((value) => {
     const next = !value;
     try {
-      localStorage.setItem("feigram:sidebarCollapsed", next ? "1" : "0");
+      localStorage.setItem("feigram:folderRailCollapsed", next ? "1" : "0");
     } catch {
       /* localStorage 不可用时仅在当前会话生效 */
     }
@@ -2464,7 +2464,7 @@ function App() {
             onSilentCacheControl={updateSilentCacheControl}
             onCancelSilentCache={cancelSilentCache}
           />}
-          {view === "chats" && <div className={cx("app-shell fn-chats", activeChat && "chat-open", sidebarCollapsed && "sidebar-collapsed")}>
+          {view === "chats" && <div className={cx("app-shell fn-chats", activeChat && "chat-open")}>
       <aside className="sidebar">
         <div className="account-row current-account-row">
           {activeAccount ? <>
@@ -2482,16 +2482,16 @@ function App() {
               {accounts.map((account) => <option key={account.id} value={account.id}>{account.displayName || account.label}</option>)}
             </select>}
           </> : <button className="secondary action-button" onClick={() => { setAdminInitialTab("accounts"); setAnnouncementOpen(false); setAdminOpen(true); }}><Plus size={18} />添加 Telegram 账号</button>}
-          {/* R4.27：整体收起侧栏（账号行 + 文件夹轨 + 会话列表），把宽度让给会话区 */}
-          <button className="icon-button sidebar-toggle" type="button" onClick={toggleSidebar} title="收起侧栏" aria-label="收起侧栏">
-            <PanelLeftClose size={18} />
-          </button>
+          {/* R4.28：只收起群组文件夹图标轨（账号行/会话列表不动），按钮随状态换图标 */}
+          {appSettings.foldersEnabled && <button className="icon-button sidebar-toggle" type="button" onClick={toggleRail} title={railCollapsed ? "展开分组栏" : "收起分组栏"} aria-label={railCollapsed ? "展开分组栏" : "收起分组栏"}>
+            {railCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+          </button>}
         </div>
         <div className="sidebar-main">
           {/* R4.24：文件夹改回「左侧竖排图标栏」（用户拍板方案 3）。此前横排胶囊行在
               文件夹多时挤压聊天列表且不好切换；竖轨只占 64px 宽、图标 + 角标、标题走
               tooltip，既保留一键切换又把空间还给会话列表。 */}
-          {appSettings.foldersEnabled && <nav className="folder-rail" aria-label="聊天文件夹">
+          {appSettings.foldersEnabled && !railCollapsed && <nav className="folder-rail" aria-label="聊天文件夹">
             <button
               className={cx("folder-rail-item", activeFolder === "all" && "active")}
               type="button"
@@ -2516,6 +2516,8 @@ function App() {
               </button>;
             })}
           </nav>}
+          {/* R4.28：图标轨收起后留一条窄展开条，账号行/会话列表不受影响 */}
+          {appSettings.foldersEnabled && railCollapsed && <button className="rail-expand-strip" type="button" onClick={toggleRail} title="展开分组栏" aria-label="展开分组栏"><PanelLeftOpen size={18} /></button>}
           <div className="chat-pane">
             <form className="search" onSubmit={(event) => { event.preventDefault(); loadChats(query); }}>
               <Search size={17} />
@@ -2546,7 +2548,6 @@ function App() {
         {activeChat ? <>
           <header className="conversation-head">
             <button className={cx("icon-button", chatStack.length ? "nav-back-button" : "back-button")} onClick={chatStack.length ? returnToPreviousChat : () => setActiveChat(null)} title={chatStack.length ? "返回上层位置" : "返回会话列表"}><ArrowLeft size={18} /></button>
-            {sidebarCollapsed && <button className="icon-button" type="button" onClick={toggleSidebar} title="展开侧栏" aria-label="展开侧栏"><PanelLeftOpen size={18} /></button>}
             <button className="conversation-title-button" type="button" onClick={openChatInfo} title="查看群组信息">
               <Avatar accountId={accountId} peerId={activeChat.id} label={activeChat.title} size={42} />
               <span><h2>{activeChat.title}</h2><p>{activeChat.type} {activeChat.username ? `@${activeChat.username}` : ""}</p></span>
@@ -2590,7 +2591,6 @@ function App() {
         </> : <div className="blank-state">
           <MessageSquare size={40} />
           <h2>选择或添加一个 Telegram 账号</h2>
-          {sidebarCollapsed && <button className="secondary action-button" type="button" onClick={toggleSidebar}><PanelLeftOpen size={16} />展开侧栏</button>}
           {error && <p className="error inline">{error}</p>}
           {error && <button className="secondary action-button" type="button" onClick={() => {
             refreshAccounts(true);

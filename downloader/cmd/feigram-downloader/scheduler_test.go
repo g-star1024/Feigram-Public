@@ -582,3 +582,11 @@ func TestLoadRevivesMetadataURLFailures(t *testing.T) {
 		t.Fatalf("用户主动取消的任务不得被复活，got %q", got)
 	}
 }
+
+// R4.28：首字节超时必须存在且严格小于常规无进度窗口——
+// 0 字节尝试走快速失败档，收到字节后才切 120s 常规窗口。
+func TestNativeFirstByteTimeoutSane(t *testing.T) {
+	if nativeFirstByteTimeout < 10*time.Second || nativeFirstByteTimeout >= nativeNoProgressTimeout {
+		t.Fatalf("首字节超时应为 10s~120s 之间且小于常规窗口: %v", nativeFirstByteTimeout)
+	}
+}

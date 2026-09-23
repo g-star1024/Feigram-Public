@@ -256,13 +256,22 @@ textarea {
   overflow: hidden;
 }
 
-/* R4.27：侧栏收起——第一列归零并隐藏 aside，会话区占满全宽；
-   展开入口在会话头（有会话时）与空白态（无会话时）。 */
-.app-shell.sidebar-collapsed {
-  grid-template-columns: 0 minmax(0, 1fr) auto;
+/* R4.28：折叠目标修正——只收起群组文件夹图标轨（folder-rail），
+   账号行与会话列表保持可见；收起后在原位留一条窄展开条。 */
+.rail-expand-strip {
+  align-self: center;
+  border: 1px solid var(--fn-border);
+  border-radius: 12px;
+  color: var(--fn-text-secondary);
+  display: grid;
+  height: 36px;
+  margin: 8px auto 0;
+  place-items: center;
+  width: 28px;
 }
-.app-shell.sidebar-collapsed .sidebar {
-  display: none;
+.rail-expand-strip:hover {
+  background: var(--fn-surface-hover, rgba(127, 127, 127, 0.12));
+  color: var(--fn-text);
 }
 
 .sidebar {

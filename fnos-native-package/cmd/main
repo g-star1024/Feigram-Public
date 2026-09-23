@@ -27,7 +27,7 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.5"
+export APP_VERSION="2.6.6"
 export APP_CHANGELOG="架构简化：健康检查收敛为授权即健康（删除媒体抽样层）、下载错误直出真实原因"
 export NODE_ENV="production"
 
