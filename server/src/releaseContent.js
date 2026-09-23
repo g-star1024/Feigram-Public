@@ -14,6 +14,19 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.5.5",
+    title: "Feigram 2.5.5 更新",
+    version: "2.5.5",
+    level: "success",
+    createdAt: "2026-09-23T05:08:38.000Z",
+    body: [
+"- 健康检查新增分级探测：先用与 MTProto 相同的代理出口对账号主 DC 做裸 TCP 拨号（10s），把「代理/出口链路不通」与「MTProto 握手/授权卡死」拆开",
+      "- 探测失败 → 明确提示「问题在代理出口链路（未放行该 DC 直通/节点故障/端口配错）」；探测成功但超时 → 明确提示「TCP 层已通，多为节点转发质量差，建议更换节点」",
+      "- 探测结果同时写入服务端日志（health probe 行）与账号错误详情，替代笼统的 context deadline exceeded",
+      "- 新增 primaryDCAddr（gotd 生产 DC 表，静态 IPv4 优先）与 6 组单测；Go 全量测试通过"
+    ].join("\n")
+  },
+  {
     id: "release-2.5.4",
     title: "Feigram 2.5.4 更新",
     version: "2.5.4",
@@ -56,18 +69,6 @@ const announcements = [
     createdAt: "2026-09-23T02:53:44.000Z",
     body: [
 "修复：「尚未就绪（failed）」错误现在会附带健康检查的真实失败原因（如代理连不通/DC 超时），不再只有状态词"
-    ].join("\n")
-  },
-  {
-    id: "release-2.5.0",
-    title: "Feigram 2.5.0 更新",
-    version: "2.5.0",
-    level: "success",
-    createdAt: "2026-09-23T02:25:37.000Z",
-    body: [
-"下载中心整合：原管理后台「缓存信息」整块迁入下载中心，成为「下载任务 / 后台缓存」两个子标签",
-      "后台缓存的设置项（开关·最大速率·缓存模式·并发）、运行统计（运行中/传输层/任务数）、任务列表、批量取消与拖拽排序全部保留",
-      "首页统计卡可点击直达：进行中/已完成下载 → 下载任务分区，缓存任务 → 后台缓存分区"
     ].join("\n")
   },
 ];
