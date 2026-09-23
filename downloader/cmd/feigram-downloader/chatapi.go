@@ -291,12 +291,25 @@ func (a *App) resolveChatAccount(userID, accountID string) (NativeAccount, error
 	return account, err
 }
 
+// notReadyAccountError 构造「账号未就绪」错误。failed 状态时必须附带健康检查
+// 落库的真实原因（account.Error），否则用户只看到状态词，无从判断是代理不通、
+// DC 超时还是 session 失效——R4.16：这是 2.5.0 实测「会话列表不恢复却看不到为什么」的根因。
+func notReadyAccountError(accountID string, account *NativeAccount) error {
+	message := fmt.Sprintf("Go 原生账号 %s 尚未就绪（%s），请先完成登录或健康检查", accountID, coalesce(account.Status, "unknown"))
+	if strings.TrimSpace(account.Status) == "failed" {
+		if reason := strings.TrimSpace(account.Error); reason != "" {
+			message += "：" + reason
+		}
+	}
+	return errors.New(message)
+}
+
 func (a *App) resolveChatAccountLocked(userID, accountID string) (NativeAccount, error) {
 	if userID != "" {
 		account := a.native[nativeAccountKey(userID, accountID)]
 		if account != nil {
 			if account.Session == "" || !account.Ready {
-				return NativeAccount{}, fmt.Errorf("Go 原生账号 %s 尚未就绪（%s），请先完成登录或健康检查", accountID, coalesce(account.Status, "unknown"))
+				return NativeAccount{}, notReadyAccountError(accountID, account)
 			}
 			return *account, nil
 		}
@@ -314,7 +327,7 @@ func (a *App) resolveChatAccountLocked(userID, accountID string) (NativeAccount,
 		return NativeAccount{}, fmt.Errorf("Go 原生账号 %s 未注册，请先登录或迁移", accountID)
 	}
 	if fallback.Session == "" || !fallback.Ready {
-		return NativeAccount{}, fmt.Errorf("Go 原生账号 %s 尚未就绪（%s），请先完成登录或健康检查", accountID, coalesce(fallback.Status, "unknown"))
+		return NativeAccount{}, notReadyAccountError(accountID, fallback)
 	}
 	return *fallback, nil
 }
