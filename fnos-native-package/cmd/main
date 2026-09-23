@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.9"
-export APP_CHANGELOG="诚实探测升级：MTProto 真握手区分「代理本地接受」与「真实转发」（终结 TCP 假阳性诊断）；DC_ID_INVALID 陈旧终态自动复活；诊断页逐 DC 显示握手结果"
+export APP_VERSION="2.6.10"
+export APP_CHANGELOG="下载换轨：媒体连接改走主 DC static 地址（与探测同源，代理黑洞终结）；探测去抖（握手超时 10s+重试一次）；首字节看门狗按节点延迟自适应放宽"
 export NODE_ENV="production"
 
 is_running() {

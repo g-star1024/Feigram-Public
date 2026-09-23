@@ -48,6 +48,11 @@ const (
 	// 会让单并发队列被一个任务白占 2 分钟；30s 档加快轮换与诊断反馈。
 	nativeFirstByteTimeout = 30 * time.Second
 
+	// R4.32：首字节阈值自适应上限。高延迟代理节点（实测 MTProto 握手 4~5s）下
+	// 「连接建立+授权导入+首个 getFile」的链路总时长可能超过固定 30s，被看门狗
+	// 误判挂死；按该 DC 最近探测握手耗时 ×4 放宽，封顶 90s。
+	nativeFirstByteAdaptiveCap = 90 * time.Second
+
 	// R4.29：后台缓存任务两次调度之间的最小间隔（错峰），避免缓存批量入队时
 	// 短时间内连续建连/exportAuth 加深账号限流。
 	autoSpawnMinInterval = 2 * time.Second
@@ -890,7 +895,8 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 						t.SpeedBps = 0
 						t.RetryCount = nextCount
 						t.RetryAfter = 0
-						t.Error = fmt.Sprintf("媒体源长时间不可用，已自动重试 %d 次后停止；请稍后手动重试", nextCount-1)
+						// R4.32：终态文案给出明确恢复路径——代理/网络修复后点重试即从断点续传。
+						t.Error = fmt.Sprintf("媒体源长时间不可用，已自动重试 %d 次后停止；请在代理放行 Telegram 全部网段或更换节点后点「重试」，将从断点续传", nextCount-1)
 						t.UpdatedAt = now()
 					})
 					log.Printf("task %s failed after %d transient retries: %v", id, nextCount-1, err)
@@ -1229,6 +1235,22 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 	defer stop(nil)
 	lastProgress := time.Now()
 	progressSeen := false
+	// R4.32：诊断目标 DC 与首字节阈值在本尝试开始时定格——该 DC 最近探测的
+	// 握手耗时 ×4 可放宽首字节窗口（高延迟节点连接+授权+首块常超固定 30s），
+	// 封顶 90s；无探测数据时保持 30s 快速失败档。
+	diagDC := task.NativeFile.DCID
+	if diagDC <= 0 {
+		diagDC = primaryDC
+	}
+	firstByteThreshold := nativeFirstByteTimeout
+	if ms := a.latestMediaHandshakeMs(task.UserID, task.AccountID, diagDC); ms > 0 {
+		if scaled := time.Duration(4*ms) * time.Millisecond; scaled > firstByteThreshold {
+			firstByteThreshold = scaled
+		}
+		if firstByteThreshold > nativeFirstByteAdaptiveCap {
+			firstByteThreshold = nativeFirstByteAdaptiveCap
+		}
+	}
 	go func() {
 		watch := time.NewTicker(10 * time.Second)
 		defer watch.Stop()
@@ -1243,16 +1265,12 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 				threshold := nativeNoProgressTimeout
 				reason := "媒体路径无进度"
 				if !progressSeen {
-					threshold = nativeFirstByteTimeout
+					threshold = firstByteThreshold
 					reason = "连接媒体服务器后始终无响应"
 				}
 				if time.Since(lastProgress) > threshold {
 					// R4.26：stalled 日志走限频。看门狗本身每个 goroutine 只打一次，
 					// 但「复活→再挂死」的循环会让这条日志反复出现，限频防刷屏。
-					diagDC := task.NativeFile.DCID
-					if diagDC <= 0 {
-						diagDC = primaryDC
-					}
 					diag := a.diagnoseMediaDC(diagDC)
 					a.taskEventLog(task.ID, fmt.Sprintf("stalled: no bytes for %s（%s，看门狗终止）%s", threshold, reason, diag))
 					stop(fmt.Errorf("%w；%s", errDownloadStalled, diag))
@@ -1285,7 +1303,7 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 			return nil
 		}
 		closeMedia()
-		// R4.18：目标 DC 就是账号主 DC 时不能走 MediaOnly 池——
+		// R4.18：目标 DC 就是账号主 DC 时不能走 DC 池——
 		// gotd 会 exportAuthorization(dc) 而 Telegram 对「导出到自己」返回
 		// DC_ID_INVALID；直接复用主连接。
 		if dc == primaryDC {
@@ -1295,7 +1313,13 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 			log.Printf("task %s media DC %d is primary, using primary connection for native upload.getFile", task.ID, dc)
 			return nil
 		}
-		invoker, err := client.MediaOnly(ctx, dc, 1)
+		// R4.32：MediaOnly → DC 换轨。MediaOnly 只连 config 里标记「媒体专用」的
+		// IP（常与主 DC static IP 不同网段），2.6.9 实测代理放行了主 DC 网段但
+		// 媒体专用网段被黑洞——拨号挂死直到看门狗掐断（0 字节×120 次重试终态）。
+		// client.DC 走 resolver.Primary → config 的 static 主 DC 地址，与
+		// MTProto 分级探测同一地址类（探测已证实真实可达）；upload.getFile 在
+		// 授权连接上与 MediaOnly 完全等价，授权导出/导入由 gotd 连接池自动完成。
+		invoker, err := client.DC(ctx, dc, 1)
 		if err != nil {
 			fileAPI = metadataAPI
 			fileDC = 0

@@ -71,7 +71,9 @@ func (a *App) probeTelegramTCP(addr string, timeout time.Duration) error {
 }
 
 // mediaMTPProbeTimeout 单个媒体 DC 的 MTProto 握手探测超时。
-const mediaMTPProbeTimeout = 6 * time.Second
+// R4.32：6s→10s——2.6.9 实测高延迟节点握手就要 4~5s，6s 上限导致随机抖动
+// （每轮 4/5、挂的 DC 各不相同），无法区分「节点波动」与「网段黑洞」。
+const mediaMTPProbeTimeout = 10 * time.Second
 
 // probeTelegramMTProto 对 dc 做一次真实 MTProto 密钥交换探测（走与下载完全相同的
 // 代理拨号器与生产 DC 地址表）。
@@ -107,6 +109,38 @@ func (a *App) probeTelegramMTProto(dc int, timeout time.Duration) error {
 		return nil
 	}
 	return errors.New("MTProto 握手未完成（超时或被对端断开）")
+}
+
+// probeTelegramMTProtoSteady 带一次重试的稳态握手探测。
+// R4.32：高延迟节点单次握手常贴着超时上限（实测 4~5s），失败重试一次，
+// 消除「每轮随机挂掉一个不同 DC」的抖动误报。
+func (a *App) probeTelegramMTProtoSteady(dc int, timeout time.Duration) error {
+	if err := a.probeTelegramMTProto(dc, timeout); err == nil {
+		return nil
+	}
+	return a.probeTelegramMTProto(dc, timeout)
+}
+
+// latestMediaHandshakeMs 返回该账号最近一次媒体探测中指定 DC 的 MTProto 握手
+// 耗时（毫秒）；无快照、该 DC 未测过或握手未成功时返回 0（调用方按默认阈值处理）。
+// R4.32：供首字节看门狗做自适应放宽（握手都只要 4~5s 的节点，连接+授权+首块
+// 的总时长不该按 30s 掐）。
+func (a *App) latestMediaHandshakeMs(userID, accountID string, dc int) int64 {
+	if dc <= 0 {
+		return 0
+	}
+	a.mu.Lock()
+	snap, ok := a.mediaProbes[nativeAccountKey(userID, accountID)]
+	a.mu.Unlock()
+	if !ok {
+		return 0
+	}
+	for _, r := range snap.Results {
+		if r.DC == dc && r.MTPOK && r.MTPDuration > 0 {
+			return r.MTPDuration
+		}
+	}
+	return 0
 }
 
 // healthStageDiagnosis 依据分级探测结果解释 client.Run 的失败，返回更精确的错误描述。
@@ -205,9 +239,9 @@ func (a *App) probeMediaDCs(account NativeAccount) mediaProbeSnapshot {
 			}
 			p.OK = true
 			// R4.31：TCP 可连通不代表转发正常（代理本地接受假阳性），
-			// 追加真实 MTProto 握手探测一锤定音。
+			// 追加真实 MTProto 握手探测一锤定音。R4.32：带一次重试去抖。
 			mtpStart := time.Now()
-			if mtpErr := a.probeTelegramMTProto(dc, mediaMTPProbeTimeout); mtpErr != nil {
+			if mtpErr := a.probeTelegramMTProtoSteady(dc, mediaMTPProbeTimeout); mtpErr != nil {
 				p.MTPError = mtpErr.Error()
 			} else {
 				p.MTPOK = true
@@ -266,7 +300,8 @@ func mediaProbeSummary(results []mediaDCProbe, layer string) string {
 	case mtpOK == 0:
 		return fmt.Sprintf("%d/%d 个 DC TCP 可连通但 MTProto 握手全部无响应（%s）——代理只是本地接受了连接，并未真正转发 Telegram 网段（规则未覆盖或节点黑洞）：请放行 Telegram 全部网段、改全局模式或更换节点", tcpOK, total, layer)
 	default:
-		return fmt.Sprintf("%d/%d 个 DC 的 MTProto 握手正常（%s）；TCP 可连通但握手无响应：DC %s——这些网段未被真正转发，下载会持续失败，请补全代理规则或更换节点", mtpOK, total, layer, strings.Join(mtpBad, "/"))
+		// R4.32：措辞区分「节点波动」（偶发、每轮 DC 不同）与「网段黑洞」（同 DC 持续失败）。
+		return fmt.Sprintf("%d/%d 个 DC 的 MTProto 握手正常（%s）；握手无响应：DC %s——单个 DC 偶发超时多为节点波动（本轮探测重试后仍失败），若同一 DC 每轮都失败则该网段未被真正转发、下载会持续失败：请补全代理规则或更换节点", mtpOK, total, layer, strings.Join(mtpBad, "/"))
 	}
 }
 
@@ -292,7 +327,7 @@ func (a *App) diagnoseMediaDC(dc int) string {
 		return mediaDCDiagnosis(dc, addr, false, false, tcpMs, 0, tcpErr.Error(), layer)
 	}
 	mtpStart := time.Now()
-	mtpErr := a.probeTelegramMTProto(dc, mediaMTPProbeTimeout)
+	mtpErr := a.probeTelegramMTProtoSteady(dc, mediaMTPProbeTimeout)
 	mtpMs := time.Since(mtpStart).Milliseconds()
 	mtpErrMsg := ""
 	if mtpErr != nil {

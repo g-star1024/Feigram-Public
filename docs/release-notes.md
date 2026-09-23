@@ -1,5 +1,22 @@
 # Feigram Public 发布说明
 
+## 版本 2.6.10
+
+- ### R4.32 下载换轨：MediaOnly → 主 DC static 地址（用户 2.6.9 实测反馈）
+- - **媒体连接换轨（核心）**：2.6.9 实测确认探测（主 DC IP）握手正常但下载仍 0 字节，
+  根因是两者拨的不是同一类 IP——gotd `MediaOnly` 只连 config 里标记「媒体专用」的
+  IP（常与主 DC static IP 不同网段），代理未转发该网段时拨号挂死到被看门狗掐断
+  （0 字节 × 120 次重试终态）。现改走 `client.DC`（resolver.Primary → config 的
+  static 主 DC 地址），与 MTProto 分级探测同一地址类；upload.getFile 在授权连接上
+  与 MediaOnly 完全等价，授权导出/导入由连接池自动完成。
+- - **探测去抖**：握手超时 6s→10s + 失败重试一次（`probeTelegramMTProtoSteady`），
+  消除「每轮随机挂掉一个不同 DC」的抖动误报；部分转发结论措辞区分「节点波动」
+  （偶发、重试后仍失败的单 DC）与「网段黑洞」（同 DC 持续失败）。
+- - **首字节看门狗自适应**：按该 DC 最近探测的 MTProto 握手耗时 ×4 放宽首字节窗口
+  （`latestMediaHandshakeMs`，封顶 90s）；无探测数据时保持 30s 快速失败档。
+- - **终态指引**：重试上限后的失败文案改为「请在代理放行 Telegram 全部网段或更换
+  节点后点『重试』，将从断点续传」。
+
 ## 版本 2.6.9
 
 - ### R4.31 诚实探测升级：MTProto 真握手 + DC_ID_INVALID 复活（用户 2.6.8 实测反馈）

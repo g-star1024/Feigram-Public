@@ -625,8 +625,9 @@ func TestMediaProbeSummaryCategories(t *testing.T) {
 			p.MTPOK = false
 		}
 	}), "经代理")
-	if !strings.Contains(partial, "3/5") || !strings.Contains(partial, "DC 4/5") || !strings.Contains(partial, "补全代理规则") {
-		t.Fatalf("部分转发结论应列出握手失败 DC: %q", partial)
+	// R4.32：部分转发结论要区分「节点波动」（偶发）与「网段黑洞」（持续）两种可能。
+	if !strings.Contains(partial, "3/5") || !strings.Contains(partial, "DC 4/5") || !strings.Contains(partial, "节点波动") || !strings.Contains(partial, "补全代理规则") {
+		t.Fatalf("部分转发结论应列出握手失败 DC 并区分波动/黑洞: %q", partial)
 	}
 
 	tcpFail := mediaProbeSummary(results(func(p *mediaDCProbe) { p.OK = false; p.Err = "dial error" }), "经代理")
@@ -636,6 +637,33 @@ func TestMediaProbeSummaryCategories(t *testing.T) {
 
 	if empty := mediaProbeSummary(nil, "直连"); !strings.Contains(empty, "无法分级探测") {
 		t.Fatalf("空结果也必须给出结论: %q", empty)
+	}
+}
+
+// R4.32：latestMediaHandshakeMs 从最近探测快照取指定 DC 的握手耗时；
+// 无快照/未测过/握手未成功一律返回 0，调用方回落固定 30s 首字节阈值。
+func TestLatestMediaHandshakeMs(t *testing.T) {
+	app := &App{mediaProbes: map[string]mediaProbeSnapshot{}}
+	if got := app.latestMediaHandshakeMs("u", "none", 1); got != 0 {
+		t.Fatalf("无快照应返回 0，got %d", got)
+	}
+	app.mediaProbes[nativeAccountKey("u", "a")] = mediaProbeSnapshot{
+		Results: []mediaDCProbe{
+			{DC: 1, MTPOK: true, MTPDuration: 4500},
+			{DC: 2, MTPOK: false, MTPDuration: 0},
+		},
+	}
+	if got := app.latestMediaHandshakeMs("u", "a", 1); got != 4500 {
+		t.Fatalf("应取 DC1 握手耗时 4500，got %d", got)
+	}
+	if got := app.latestMediaHandshakeMs("u", "a", 2); got != 0 {
+		t.Fatalf("握手未成功的 DC 应返回 0，got %d", got)
+	}
+	if got := app.latestMediaHandshakeMs("u", "a", 3); got != 0 {
+		t.Fatalf("未探测过的 DC 应返回 0，got %d", got)
+	}
+	if got := app.latestMediaHandshakeMs("u", "a", 0); got != 0 {
+		t.Fatalf("非法 DC 应直接返回 0，got %d", got)
 	}
 }
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${VERSION:-2.6.9}"
+VERSION="${VERSION:-2.6.10}"
 # R4.25：导出给 prepare-go-downloader.sh，用于 -X main.version 注入 Go 二进制版本。
 export VERSION
 PKG_NAME="feigrampub-${VERSION}"
