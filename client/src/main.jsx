@@ -1686,16 +1686,18 @@ function App() {
   const newestAnnouncementId = announcements[0]?.id || "";
   const unreadAnnouncement = newestAnnouncementId && localStorage.getItem("feigrame.lastAnnouncement") !== newestAnnouncementId;
   const messageItems = useMemo(() => buildMessageItems(messages), [messages]);
-  const visibleChats = useMemo(() => {
-    const folder = folders.find((item) => String(item.id) === String(activeFolder));
-    if (!folder) return chats;
+  // R4.19：文件夹过滤抽成纯函数。loadChats 自动选第一个会话时需要对**刚拉到的 list**
+  // 过滤（setChats 的 state 尚未生效，visibleChats memo 是旧闭包），复用同一套规则。
+  function filterChatsByFolder(list, folderId) {
+    const folder = folders.find((item) => String(item.id) === String(folderId));
+    if (!folder) return list;
     if (folder.chatIds?.length) {
       const ids = new Set(folder.chatIds);
-      return chats.filter((chat) => ids.has(chat.id));
+      return list.filter((chat) => ids.has(chat.id));
     }
     const include = new Set([...(folder.includePeerIds || []), ...(folder.pinnedPeerIds || [])]);
     const exclude = new Set(folder.excludePeerIds || []);
-    return chats.filter((chat) => {
+    return list.filter((chat) => {
       if (exclude.has(chat.id)) return false;
       if ((chat.folderIds || []).some((id) => String(id) === String(folder.id))) return true;
       if (include.has(chat.id)) return true;
@@ -1705,7 +1707,12 @@ function App() {
       if (chat.type === "private" && (flags.contacts || flags.nonContacts || flags.bots)) return true;
       return include.size === 0 && !flags.groups && !flags.broadcasts && !flags.contacts && !flags.nonContacts && !flags.bots;
     });
-  }, [chats, folders, activeFolder]);
+  }
+
+  const visibleChats = useMemo(
+    () => filterChatsByFolder(chats, activeFolder),
+    [chats, folders, activeFolder],
+  );
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -1898,7 +1905,14 @@ function App() {
       const includeArchived = appSettings.foldersShowArchived ? 1 : 0;
       const list = await api(`/api/chats?account=${encodeURIComponent(accountId)}&query=${encodeURIComponent(nextQuery)}&includeArchived=${includeArchived}`);
       setChats(list);
-      if (appSettings.foldersAutoSelectFirst && !activeChat && visible[0]) selectChat(visible[0]);
+      if (appSettings.foldersAutoSelectFirst && !activeChat) {
+        // R4.19 修复「visible is not defined」：R4.0a 重构归档过滤时删掉了局部变量
+        // visible，却留下 visible[0] 引用——开启「自动选第一个会话」的账号一进会话页
+        // 就抛 ReferenceError，被 catch 顶成「加载失败」错误卡（会话实际已拉到）。
+        // 现按当前文件夹对新 list 过滤后取第一个（state 闭包未更新，不能用 visibleChats）。
+        const firstVisible = filterChatsByFolder(list, activeFolder)[0];
+        if (firstVisible) selectChat(firstVisible);
+      }
     } catch (err) {
       const message = String(err.message || "");
       // 当前账号未就绪（failed/needs-relogin）时不要把整个会话页顶成报错卡：

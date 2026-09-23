@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"log/slog"
 	"net/http"
@@ -653,9 +654,22 @@ func (a *App) download(task *Task, cancel <-chan struct{}) error {
 	}
 }
 
+// storageErrorHint 把下载目录权限错误翻译成可操作的提示（R4.19，2.5.3 实测反馈）：
+// 飞牛上应用以独立用户运行，下载目录被改到用户自选位置（如 /vol2/1000/movie/feigrampub）
+// 时常因目录未对应用用户开放写权限而 EACCES——裸报 "permission denied" 用户无从下手。
+func storageErrorHint(err error, dir string) error {
+	if err == nil || !errors.Is(err, fs.ErrPermission) {
+		return err
+	}
+	return fmt.Errorf(
+		"%w —— 下载目录权限不足：应用运行用户对 %s 没有写权限。请在飞牛文件管理中给该目录开放写权限（或把目录归属改为应用运行用户），或在「设置 → 下载目录」改用应用可写目录（默认 data/downloads）",
+		err, dir,
+	)
+}
+
 func (a *App) downloadHTTPBridge(task *Task, cancel <-chan struct{}) error {
 	if err := os.MkdirAll(filepath.Dir(task.FilePath), 0o755); err != nil {
-		return err
+		return storageErrorHint(err, filepath.Dir(task.FilePath))
 	}
 	if task.SourceURL == "" {
 		return errors.New("HTTP 桥接媒体源为空，无法开始下载")
@@ -700,7 +714,7 @@ func (a *App) downloadHTTPBridge(task *Task, cancel <-chan struct{}) error {
 	}
 	file, err := os.OpenFile(task.PartPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return err
+		return storageErrorHint(err, filepath.Dir(task.FilePath))
 	}
 	defer file.Close()
 
@@ -798,7 +812,7 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 		return fmt.Errorf("Go 原生 MTProto 缺少 API ID/Hash，请重新同步服务端设置")
 	}
 	if err := os.MkdirAll(filepath.Dir(task.FilePath), 0o755); err != nil {
-		return err
+		return storageErrorHint(err, filepath.Dir(task.FilePath))
 	}
 	if stat, err := os.Stat(task.FilePath); err == nil && complete(stat.Size(), task.Size) {
 		return nil
@@ -813,7 +827,7 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 	}
 	file, err := os.OpenFile(task.PartPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return err
+		return storageErrorHint(err, filepath.Dir(task.FilePath))
 	}
 	defer file.Close()
 
