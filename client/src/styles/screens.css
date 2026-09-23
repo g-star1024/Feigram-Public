@@ -366,6 +366,40 @@
   min-height: 30px;
 }
 
+/* R4.15 · 下载中心内子标签（下载任务 / 后台缓存）：复用资源库胶囊 Tabs 视觉 */
+.download-tabs {
+  padding: 0 4px 12px;
+}
+
+/* 缓存分区迁入整页视图后：列表不再限高滚动，行卡片化对齐 .download-item */
+.fn-content .silent-cache-list {
+  max-height: none;
+  overflow: visible;
+}
+
+.fn-content .silent-cache-list > * {
+  background: var(--fn-surface);
+  border: 1px solid var(--fn-border);
+  border-radius: var(--fn-radius);
+  box-shadow: var(--fn-shadow-sm);
+  padding: 12px 14px;
+}
+
+.fn-content .silent-cache-controls {
+  gap: 12px;
+}
+
+/* 首页统计卡可点击态（进行中/已完成下载、缓存任务 → 跳下载中心对应分区） */
+.fn-stat-card--link {
+  cursor: pointer;
+  transition: border-color var(--fn-dur) var(--fn-ease), box-shadow var(--fn-dur) var(--fn-ease);
+}
+
+.fn-stat-card--link:hover {
+  border-color: var(--fn-primary);
+  box-shadow: var(--fn-shadow-md);
+}
+
 /* ============ 4. 资源库筛选 Tabs ============ */
 
 .fn-tabs {

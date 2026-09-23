@@ -480,7 +480,7 @@ function proxySourceLabel(source) {
   return "未启用（直连）";
 }
 
-function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountLogout, onAccountsChanged, onSettingsChanged, open, onClose, initialTab = "accounts", socket, silentCacheState, silentCaches = [], onRefreshSilentCaches, onSilentCacheControl, onCancelSilentCache, notificationPermission, onRequestNotificationPermission }) {
+function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountLogout, onAccountsChanged, onSettingsChanged, open, onClose, initialTab = "accounts", socket, notificationPermission, onRequestNotificationPermission }) {
   const [tab, setTab] = useState(initialTab);
   const [users, setUsers] = useState([]);
   const [settings, setSettings] = useState({
@@ -516,12 +516,9 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
   const [cacheSpeedTesting, setCacheSpeedTesting] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
   const [newUser, setNewUser] = useState({ username: "", password: "", displayName: "", role: "user" });
-  const [dragSilentId, setDragSilentId] = useState("");
-  const [selectedSilentIds, setSelectedSilentIds] = useState([]);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState("");
   const [clearingLog, setClearingLog] = useState(null);
-  const selectedSilentSet = useMemo(() => new Set(selectedSilentIds), [selectedSilentIds]);
 
   useEffect(() => {
     if (!open) return;
@@ -532,15 +529,10 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
       player: "server",
       folders: "privacy",
       notifications: "privacy",
-      "silent-cache": "cache-info"
     };
     setTab(aliases[initialTab] || initialTab);
     refresh();
   }, [open, initialTab]);
-
-  useEffect(() => {
-    setSelectedSilentIds((ids) => ids.filter((id) => silentCaches.some((task) => task.id === id)));
-  }, [silentCaches]);
 
   async function refresh() {
     setError("");
@@ -802,30 +794,6 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
     setCacheSpeedTesting(false);
   }
 
-  function toggleSilentSelection(id, checked) {
-    setSelectedSilentIds((ids) => {
-      const set = new Set(ids);
-      if (checked) set.add(id);
-      else set.delete(id);
-      return [...set];
-    });
-  }
-
-  async function cancelSelectedSilentCaches() {
-    if (!selectedSilentIds.length) return;
-    setError("");
-    try {
-      await api("/api/silent-cache/cancel", {
-        method: "POST",
-        body: JSON.stringify({ ids: selectedSilentIds })
-      });
-      setSelectedSilentIds([]);
-      onRefreshSilentCaches?.();
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
   if (!open) return null;
 
   return (
@@ -836,7 +804,6 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
         <div className="tabs">
           <button className={cx(tab === "accounts" && "active")} onClick={() => setTab("accounts")}>账号管理</button>
           {canAdmin && <button className={cx(tab === "server" && "active")} onClick={() => setTab("server")}>服务端设置</button>}
-          {canAdmin && <button className={cx(tab === "cache-info" && "active")} onClick={() => { setTab("cache-info"); onRefreshSilentCaches?.(); }}>缓存信息</button>}
           {canAdmin && <button className={cx(tab === "privacy" && "active")} onClick={() => setTab("privacy")}>隐私设置</button>}
           {canAdmin && <button className={cx(tab === "diagnostics" && "active")} onClick={() => { setTab("diagnostics"); loadDiagnostics(); }}>运行诊断</button>}
         </div>
@@ -955,76 +922,6 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
             <button className="primary"><Settings size={18} />保存服务端设置</button>
           </section>
         </form>}
-        {canAdmin && tab === "cache-info" && <div className="silent-cache-panel">
-          <div className="silent-cache-head">
-            <strong>缓存信息</strong>
-            <button className="icon-button" type="button" onClick={onRefreshSilentCaches}><RefreshCw size={14} />刷新</button>
-          </div>
-          <div className="silent-cache-controls">
-            <label className="check-row"><input type="checkbox" checked={silentCacheState.enabled !== false} onChange={(e) => onSilentCacheControl?.({ enabled: e.target.checked })} /><span>{silentCacheState.enabled !== false ? "已开启后台缓存" : "已暂停后台缓存"}</span></label>
-            <label><span>最大缓存速率</span><select value={String(silentCacheState.rateLimitBps || 0)} onChange={(e) => onSilentCacheControl?.({ rateLimitBps: Number(e.target.value) })}>
-              <option value="0">不限速</option>
-              <option value={String(512 * 1024)}>512 KB/s</option>
-              <option value={String(1024 * 1024)}>1 MB/s</option>
-              <option value={String(2 * 1024 * 1024)}>2 MB/s</option>
-              <option value={String(5 * 1024 * 1024)}>5 MB/s</option>
-              <option value={String(10 * 1024 * 1024)}>10 MB/s</option>
-            </select></label>
-            <label><span>缓存模式</span><select value={silentCacheState.mode || "conservative"} onChange={(e) => onSilentCacheControl?.({ mode: e.target.value })}>
-              <option value="conservative">保守模式（同账号单任务）</option>
-              <option value="fast">跨账号高速模式</option>
-            </select></label>
-            <label><span>并发数量</span><select value={String(silentCacheState.concurrency || 1)} onChange={(e) => onSilentCacheControl?.({ concurrency: Number(e.target.value) })}>
-              {[1, 2, 3, 4, 5, 10].map((value) => <option value={String(value)} key={value}>{value}</option>)}
-            </select></label>
-          </div>
-          <div className="cache-runtime-summary">
-            <span><b>运行中</b>{silentCacheState.running || 0} / {silentCacheState.effectiveConcurrency || silentCacheState.concurrency || 1}</span>
-            <span><b>传输层</b>{silentCacheState.transport === "native-mtproto" ? "Go 原生 MTProto" : "HTTP 回退"}</span>
-            <span><b>任务数</b>{silentCaches.length}</span>
-          </div>
-          {silentCaches.length > 0 && <div className="silent-cache-bulk">
-            <button type="button" className="icon-button" onClick={() => setSelectedSilentIds(silentCaches.filter((task) => task.status !== "completed").map((task) => task.id))}>全选当前</button>
-            <button type="button" className="icon-button" onClick={() => setSelectedSilentIds([])} disabled={!selectedSilentIds.length}>清空选择</button>
-            <button type="button" className="icon-button danger-button" onClick={cancelSelectedSilentCaches} disabled={!selectedSilentIds.length}>取消选中{selectedSilentIds.length ? ` (${selectedSilentIds.length})` : ""}</button>
-          </div>}
-          <div className="silent-cache-list">
-            {silentCaches.map((task) => {
-              const progress = task.size ? Math.min(100, Math.round((Number(task.downloaded || 0) / Number(task.size)) * 100)) : 0;
-              const statusText = task.status === "running" || task.status === "downloading" ? "下载中" : task.status === "queued" ? "排队中" : task.status === "paused" ? "已暂停" : task.status === "completed" ? "已完成" : task.status === "cancelled" ? "已取消" : "失败";
-              return (
-                <div
-                  className="silent-cache-row"
-                  key={task.id}
-                  draggable
-                  onDragStart={() => setDragSilentId(task.id)}
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    if (dragSilentId && dragSilentId !== task.id) onSilentCacheControl?.({ reorder: { fromId: dragSilentId, toId: task.id } });
-                    setDragSilentId("");
-                  }}
-                  onDragEnd={() => setDragSilentId("")}
-                >
-                  <div className="silent-cache-title">
-                    <input className="silent-cache-check" type="checkbox" checked={selectedSilentSet.has(task.id)} onChange={(event) => toggleSilentSelection(task.id, event.target.checked)} onClick={(event) => event.stopPropagation()} />
-                    <strong title={task.fileName}>{task.fileName || "Telegram 视频"}</strong>
-                    <span>{statusText}</span>
-                    {task.status !== "completed" && task.status !== "cancelled" && <button type="button" title="取消缓存" onClick={() => onCancelSilentCache?.(task)}><X size={12} /></button>}
-                  </div>
-                  <div className="silent-cache-meta">
-                    <span>{formatBytes(task.downloaded)} / {formatBytes(task.size)}</span>
-                    <span>{task.status === "running" ? `${formatBytes(task.speedBps)}/s` : "-"}</span>
-                    <span>{formatTime(task.updatedAt)}</span>
-                  </div>
-                  <div className="mini-progress"><i style={{ width: `${progress}%` }} /></div>
-                  {task.error && <small>{task.error}</small>}
-                </div>
-              );
-            })}
-            {!silentCaches.length && <div className="empty">暂无群视频后台缓存任务</div>}
-          </div>
-        </div>}
         {canAdmin && tab === "privacy" && <form className="stack" onSubmit={saveSettings}>
           <section className="admin-card">
             <h3>通知设置</h3>
@@ -1320,9 +1217,124 @@ function InfoModal({ announcements, about, open, onClose }) {
   );
 }
 
-function DownloadCenter({ open, downloads, onStart, onCancel, onClear, onDelete, onPlay, onClose }) {
+/* 后台缓存面板（R4.15）：原管理后台「缓存信息」tab 整块迁入下载模块，
+   与下载任务并列成为下载中心的一个子标签；设置项、运行统计、任务列表、
+   批量取消与拖拽排序一并搬过来，能力不减。 */
+function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onControl, onCancel }) {
+  const [dragId, setDragId] = useState("");
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [error, setError] = useState("");
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+
+  // 任务列表变化时清掉已不存在的选择，避免批量操作指向幽灵任务。
+  useEffect(() => {
+    setSelectedIds((ids) => ids.filter((id) => silentCaches.some((task) => task.id === id)));
+  }, [silentCaches]);
+
+  function toggleSelection(id, checked) {
+    setSelectedIds((ids) => {
+      const set = new Set(ids);
+      if (checked) set.add(id);
+      else set.delete(id);
+      return [...set];
+    });
+  }
+
+  async function cancelSelected() {
+    if (!selectedIds.length) return;
+    setError("");
+    try {
+      await api("/api/silent-cache/cancel", {
+        method: "POST",
+        body: JSON.stringify({ ids: selectedIds })
+      });
+      setSelectedIds([]);
+      onRefresh?.();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  return (
+    <div className="silent-cache-panel">
+      <div className="silent-cache-head">
+        <strong>后台缓存</strong>
+        <button className="icon-button" type="button" onClick={onRefresh}><RefreshCw size={14} />刷新</button>
+      </div>
+      <div className="silent-cache-controls">
+        <label className="check-row"><input type="checkbox" checked={silentCacheState.enabled !== false} onChange={(e) => onControl?.({ enabled: e.target.checked })} /><span>{silentCacheState.enabled !== false ? "已开启后台缓存" : "已暂停后台缓存"}</span></label>
+        <label><span>最大缓存速率</span><select value={String(silentCacheState.rateLimitBps || 0)} onChange={(e) => onControl?.({ rateLimitBps: Number(e.target.value) })}>
+          <option value="0">不限速</option>
+          <option value={String(512 * 1024)}>512 KB/s</option>
+          <option value={String(1024 * 1024)}>1 MB/s</option>
+          <option value={String(2 * 1024 * 1024)}>2 MB/s</option>
+          <option value={String(5 * 1024 * 1024)}>5 MB/s</option>
+          <option value={String(10 * 1024 * 1024)}>10 MB/s</option>
+        </select></label>
+        <label><span>缓存模式</span><select value={silentCacheState.mode || "conservative"} onChange={(e) => onControl?.({ mode: e.target.value })}>
+          <option value="conservative">保守模式（同账号单任务）</option>
+          <option value="fast">跨账号高速模式</option>
+        </select></label>
+        <label><span>并发数量</span><select value={String(silentCacheState.concurrency || 1)} onChange={(e) => onControl?.({ concurrency: Number(e.target.value) })}>
+          {[1, 2, 3, 4, 5, 10].map((value) => <option value={String(value)} key={value}>{value}</option>)}
+        </select></label>
+      </div>
+      <div className="cache-runtime-summary">
+        <span><b>运行中</b>{silentCacheState.running || 0} / {silentCacheState.effectiveConcurrency || silentCacheState.concurrency || 1}</span>
+        <span><b>传输层</b>{silentCacheState.transport === "native-mtproto" ? "Go 原生 MTProto" : "HTTP 回退"}</span>
+        <span><b>任务数</b>{silentCaches.length}</span>
+      </div>
+      {error && <p className="error">{error}</p>}
+      {silentCaches.length > 0 && <div className="silent-cache-bulk">
+        <button type="button" className="icon-button" onClick={() => setSelectedIds(silentCaches.filter((task) => task.status !== "completed").map((task) => task.id))}>全选当前</button>
+        <button type="button" className="icon-button" onClick={() => setSelectedIds([])} disabled={!selectedIds.length}>清空选择</button>
+        <button type="button" className="icon-button danger-button" onClick={cancelSelected} disabled={!selectedIds.length}>取消选中{selectedIds.length ? ` (${selectedIds.length})` : ""}</button>
+      </div>}
+      <div className="silent-cache-list">
+        {silentCaches.map((task) => {
+          const progress = task.size ? Math.min(100, Math.round((Number(task.downloaded || 0) / Number(task.size)) * 100)) : 0;
+          const statusText = task.status === "running" || task.status === "downloading" ? "下载中" : task.status === "queued" ? "排队中" : task.status === "paused" ? "已暂停" : task.status === "completed" ? "已完成" : task.status === "cancelled" ? "已取消" : "失败";
+          return (
+            <div
+              className="silent-cache-row"
+              key={task.id}
+              draggable
+              onDragStart={() => setDragId(task.id)}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                if (dragId && dragId !== task.id) onControl?.({ reorder: { fromId: dragId, toId: task.id } });
+                setDragId("");
+              }}
+              onDragEnd={() => setDragId("")}
+            >
+              <div className="silent-cache-title">
+                <input className="silent-cache-check" type="checkbox" checked={selectedSet.has(task.id)} onChange={(event) => toggleSelection(task.id, event.target.checked)} onClick={(event) => event.stopPropagation()} />
+                <strong title={task.fileName}>{task.fileName || "Telegram 视频"}</strong>
+                <span>{statusText}</span>
+                {task.status !== "completed" && task.status !== "cancelled" && <button type="button" title="取消缓存" onClick={() => onCancel?.(task)}><X size={12} /></button>}
+              </div>
+              <div className="silent-cache-meta">
+                <span>{formatBytes(task.downloaded)} / {formatBytes(task.size)}</span>
+                <span>{task.status === "running" ? `${formatBytes(task.speedBps)}/s` : "-"}</span>
+                <span>{formatTime(task.updatedAt)}</span>
+              </div>
+              <div className="mini-progress"><i style={{ width: `${progress}%` }} /></div>
+              {task.error && <small>{task.error}</small>}
+            </div>
+          );
+        })}
+        {!silentCaches.length && <div className="empty">暂无群视频后台缓存任务</div>}
+      </div>
+    </div>
+  );
+}
+
+function DownloadCenter({ open, downloads, onStart, onCancel, onClear, onDelete, onPlay, onClose, tab = "tasks", onTabChange, silentCacheState, silentCaches = [], onRefreshSilentCaches, onSilentCacheControl, onCancelSilentCache }) {
   if (!open) return null;
   const active = downloads.filter((item) => ["queued", "downloading"].includes(item.status)).length;
+  const cacheActive = silentCaches.filter((item) => ["running", "downloading", "queued"].includes(item.status)).length;
+
   const statusText = {
     queued: "排队中",
     downloading: "下载中",
@@ -1337,12 +1349,24 @@ function DownloadCenter({ open, downloads, onStart, onCancel, onClear, onDelete,
       <section className="download-panel" onClick={(event) => event.stopPropagation()}>
         <header>
           <div>
-            <h2>下载</h2>
-            <p>{active ? `${active} 个任务进行中` : "暂无活动下载"}</p>
+            <h2>下载中心</h2>
+            <p>{tab === "cache"
+              ? (cacheActive ? `${cacheActive} 个缓存任务进行中` : "暂无活动缓存任务")
+              : (active ? `${active} 个任务进行中` : "暂无活动下载")}</p>
           </div>
           <button className="icon-button" onClick={onClose} title="关闭"><X size={18} /></button>
         </header>
-        <div className="download-list">
+        <div className="fn-tabs download-tabs">
+          <button className={cx("fn-tab", tab === "tasks" && "active")} onClick={() => onTabChange?.("tasks")}>下载任务{deduped.length ? ` (${deduped.length})` : ""}</button>
+          <button className={cx("fn-tab", tab === "cache" && "active")} onClick={() => { onTabChange?.("cache"); onRefreshSilentCaches?.(); }}>后台缓存{silentCaches.length ? ` (${silentCaches.length})` : ""}</button>
+        </div>
+        {tab === "cache" ? <CachePanel
+          silentCacheState={silentCacheState}
+          silentCaches={silentCaches}
+          onRefresh={onRefreshSilentCaches}
+          onControl={onSilentCacheControl}
+          onCancel={onCancelSilentCache}
+        /> : <div className="download-list">
           {deduped.map((item) => {
             const progress = progressFor(item);
             return (
@@ -1383,7 +1407,7 @@ function DownloadCenter({ open, downloads, onStart, onCancel, onClear, onDelete,
             );
           })}
           {!deduped.length && <div className="empty">点击视频右上角缓存后，任务会出现在这里。</div>}
-        </div>
+        </div>}
       </section>
     </div>
   );
@@ -1482,15 +1506,28 @@ function Dashboard({ accounts, downloads, silentCaches, silentCacheState, me, ac
   const completed = downloads.filter((item) => item.status === "completed").length;
   const stats = [
     { icon: <Users size={20} />, tone: "blue", value: accounts.length, label: `Telegram 账号${accounts.length ? ` · ${accounts.filter((item) => item.authMode === "native").length} 个原生` : ""}` },
-    { icon: <Download size={20} />, tone: "amber", value: activeDownloads, label: "进行中下载" },
-    { icon: <Library size={20} />, tone: "green", value: completed, label: "已完成下载" },
-    { icon: <Folder size={20} />, tone: "red", value: silentCaches.length, label: `缓存任务${silentCacheState?.enabled ? "" : "（已暂停）"}` }
+    { icon: <Download size={20} />, tone: "amber", value: activeDownloads, label: "进行中下载", open: () => onOpenView("downloads", "tasks") },
+    { icon: <Library size={20} />, tone: "green", value: completed, label: "已完成下载", open: () => onOpenView("downloads", "tasks") },
+    { icon: <Folder size={20} />, tone: "red", value: silentCaches.length, label: `缓存任务${silentCacheState?.enabled ? "" : "（已暂停）"}`, open: () => onOpenView("downloads", "cache") }
   ];
   const recent = downloads.slice(0, 6);
   return (
     <div className="fn-dash">
       <div className="fn-stat-grid">
-        {stats.map((stat) => <div className="fn-card fn-stat-card" key={stat.label}>
+        {stats.map((stat) => <div
+          className={cx("fn-card", "fn-stat-card", stat.open && "fn-stat-card--link")}
+          key={stat.label}
+          role={stat.open ? "button" : undefined}
+          tabIndex={stat.open ? 0 : undefined}
+          title={stat.open ? "打开下载中心" : undefined}
+          onClick={stat.open}
+          onKeyDown={stat.open ? (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              stat.open();
+            }
+          } : undefined}
+        >
           <span className={cx("fn-stat-icon", `fn-stat-icon--${stat.tone}`)}>{stat.icon}</span>
           <span className="fn-stat-copy"><strong>{stat.value}</strong><span>{stat.label}</span></span>
         </div>)}
@@ -1617,6 +1654,8 @@ function App() {
   const [adminOpen, setAdminOpen] = useState(false);
   const [adminInitialTab, setAdminInitialTab] = useState("accounts");
   const [view, setView] = useState("home");
+  // 下载中心内部子标签：tasks=下载任务 / cache=后台缓存（R4.15 合并后由外部也能定位到缓存分区）
+  const [downloadsTab, setDownloadsTab] = useState("tasks");
   const [downloadOpen, setDownloadOpen] = useState(false);
   const [notifications, setNotifications] = useState("Notification" in window && Notification.permission === "granted");
   /* 通知权限三态：unsupported / default / granted / denied——设置页据此渲染申请入口，
@@ -2143,7 +2182,7 @@ function App() {
     try {
       const result = await api(`/api/media/${accountId}/${encodeURIComponent(activeChat.id)}/${message.id}/cache`, { method: "POST" });
       setDownloads((current) => mergeDownloads([result, ...current.filter((item) => item.id !== result.id)]));
-      notify(`${result.fileName || "视频"} 已加入管理后台缓存信息`);
+      notify(`${result.fileName || "视频"} 已加入下载中心的后台缓存队列`);
       return result;
     } catch (err) {
       notify(err.message);
@@ -2352,7 +2391,10 @@ function App() {
             silentCacheState={silentCacheState}
             me={me}
             activeDownloads={activeDownloads}
-            onOpenView={setView}
+            onOpenView={(nextView, subTab) => {
+              if (subTab) setDownloadsTab(subTab);
+              setView(nextView);
+            }}
             onAddAccount={() => { setAdminInitialTab("accounts"); setAnnouncementOpen(false); setAdminOpen(true); }}
             latestAnnouncement={announcements[0] || null}
           />}
@@ -2366,6 +2408,13 @@ function App() {
             onDelete={deleteDownload}
             onPlay={playDownload}
             onClose={() => setView("home")}
+            tab={downloadsTab}
+            onTabChange={setDownloadsTab}
+            silentCacheState={silentCacheState}
+            silentCaches={silentCaches}
+            onRefreshSilentCaches={loadSilentCaches}
+            onSilentCacheControl={updateSilentCacheControl}
+            onCancelSilentCache={cancelSilentCache}
           />}
           {view === "chats" && <div className={cx("app-shell fn-chats", activeChat && "chat-open")}>
       <aside className="sidebar">
@@ -2516,11 +2565,6 @@ function App() {
         notificationPermission={notificationPermission}
         onRequestNotificationPermission={requestNotificationPermission}
         socket={socket}
-        silentCacheState={silentCacheState}
-        silentCaches={silentCaches}
-        onRefreshSilentCaches={loadSilentCaches}
-        onSilentCacheControl={updateSilentCacheControl}
-        onCancelSilentCache={cancelSilentCache}
       />
       <InfoModal announcements={announcements} about={about} open={announcementOpen} onClose={() => setAnnouncementOpen(false)} />
       <PlaybackModal item={playback} playerMode={appSettings.playerMode} onClose={() => setPlayback(null)} />

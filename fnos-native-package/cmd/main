@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.4.6"
-export APP_CHANGELOG="重启即重检 + 代理端口配对提示"
+export APP_VERSION="2.5.0"
+export APP_CHANGELOG="缓存模块合并进下载中心：下载任务 / 后台缓存 双子标签"
 export NODE_ENV="production"
 
 is_running() {
