@@ -292,6 +292,8 @@ func main() {
 	log.Printf("%s", app.proxy.describeProxyConfig())
 	go app.pump()
 	go app.healthLoop()
+	// R4.21：启动即对未就绪账号补检，新版诊断信息不再等冷却。
+	go app.bootstrapHealthChecks()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", app.handleHealth)

@@ -93,6 +93,20 @@ func (a *App) markNativeAccountResult(userID, accountID string, ok bool) {
 	_ = a.saveNativeLocked()
 }
 
+// bootstrapHealthChecks 启动时对「有会话但未就绪」的账号立即各排一次健康检查。
+// 背景（R4.21）：升级/重启后，failed 账号原本要等 30 分钟巡检或 3 分钟访问冷却才有补检，
+// 用户装新版后短时间看到的仍是升级前落盘的旧错误（如 2.5.4 的 context deadline exceeded），
+// 新版诊断（R4.20 分级探测）要再等几分钟才可见——启动即补检，让诊断秒级可见。
+func (a *App) bootstrapHealthChecks() {
+	time.Sleep(autoHealthCheckDelay)
+	for _, account := range a.authorizedAccountSnapshots() {
+		if account.Ready && account.Status == "healthy" {
+			continue
+		}
+		a.scheduleAutoHealthCheck(account.UserID, account.AccountID, "启动补检")
+	}
+}
+
 // healthLoop 每 healthPatrolInterval 对所有已授权账号巡检一次。
 func (a *App) healthLoop() {
 	ticker := time.NewTicker(healthPatrolInterval)
