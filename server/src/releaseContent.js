@@ -14,6 +14,18 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.5.3",
+    title: "Feigram 2.5.3 更新",
+    version: "2.5.3",
+    level: "success",
+    createdAt: "2026-09-23T03:51:02.000Z",
+    body: [
+"根治媒体抽样/下载的 DC_ID_INVALID：目标媒体 DC 与账号主 DC 相同时改用主连接直读，不再经 gotd 媒体池「导出授权给自己」",
+      "健康检查自动抽样、缓存任务抽样、下载 worker 三条路径统一接入主 DC 短路，避免无意义的跨 DC 建池与授权往返",
+      "新增主 DC 解析（从加密落库 session 读取），解析失败自动回落原有行为，不影响老账号"
+    ].join("\n")
+  },
+  {
     id: "release-2.5.2",
     title: "Feigram 2.5.2 更新",
     version: "2.5.2",
@@ -56,19 +68,6 @@ const announcements = [
     body: [
 "修复：应用重启后 failed 账号不再干等 30 分钟——每次配置同步（含启动回推）都会立即全量重检",
       "优化：代理设置提示明确 v2rayA 端口配对（HTTP=20171、SOCKS5=20170），避免协议错位连不上"
-    ].join("\n")
-  },
-  {
-    id: "release-2.4.5",
-    title: "Feigram 2.4.5 更新",
-    version: "2.4.5",
-    level: "success",
-    createdAt: "2026-09-23T01:17:55.000Z",
-    body: [
-"修复：账号因网络不通被判 failed 后，代理一改立即自动重检，不再等 30 分钟",
-      "修复：访问未就绪账号时自动安排健康检查（3 分钟冷却），聊天页可更快自愈",
-      "修复：头像拉取失败改为显示占位图，日志不再刷 \"Go downloader 404\"",
-      "修复：媒体源长时间不可用的任务最多自动重试 120 次后停止，不再无限刷日志"
     ].join("\n")
   },
 ];
