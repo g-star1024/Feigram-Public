@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.5.1"
-export APP_CHANGELOG="会话列表错误透出健康检查真实原因"
+export APP_VERSION="2.5.2"
+export APP_CHANGELOG="健康检查分级：授权成功即账号可用，抽样失败不堵会话"
 export NODE_ENV="production"
 
 is_running() {

@@ -2142,7 +2142,9 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	liteCheck := false
+	// R4.17：健康检查分级——Auth().Status（真实授权 RPC）成功即账号可用；
+	// 媒体抽样失败（如 DC_ID_INVALID / 媒体 DC 连不上）只降级记录原因，
+	// 不再把整个账号打成 failed 堵死会话列表（2.5.1 实测案例）。
 	err = client.Run(ctx, func(ctx context.Context) error {
 		status, err := client.Auth().Status(ctx)
 		if err != nil {
@@ -2151,32 +2153,39 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 		if !status.Authorized {
 			return errors.New("gotd session 未授权，请重新登录")
 		}
+		sampleFailed := ""
 		sample := a.nativeSampleTask(account.UserID, account.AccountID)
 		if sample != nil {
 			bytesRead, dc, duration, err := a.readNativeSample(ctx, client, *sample)
 			if err != nil {
-				return fmt.Errorf("Go 原生文件抽样读取失败：%w", classifyNativeReadError(err))
+				sampleFailed = fmt.Sprintf("媒体抽样暂失败：%s", classifyNativeReadError(err))
+			} else {
+				account.LastHealthBytes = bytesRead
+				account.LastHealthDC = dc
+				account.LastHealthDurationMS = duration.Milliseconds()
+				account.Error = fmt.Sprintf("健康检查已从 Telegram DC %d 读取 %d 字节，耗时 %d ms", dc, bytesRead, duration.Milliseconds())
 			}
-			account.LastHealthBytes = bytesRead
-			account.LastHealthDC = dc
-			account.LastHealthDurationMS = duration.Milliseconds()
-			account.Error = fmt.Sprintf("健康检查已从 Telegram DC %d 读取 %d 字节，耗时 %d ms", dc, bytesRead, duration.Milliseconds())
 		} else if location, sampleDC, found := a.findAutoSampleLocation(ctx, client); found {
 			// R4.1：没有缓存任务时自动找一个低体积媒体（缩略图）抽样，
 			// 让账号在登录后无需「先手动缓存视频」就能完成文件池验证。
 			bytesRead, dc, duration, err := a.readLocationSample(ctx, client, location, sampleDC)
 			if err != nil {
-				return fmt.Errorf("Go 原生文件抽样读取失败：%w", classifyNativeReadError(err))
+				sampleFailed = fmt.Sprintf("媒体抽样暂失败：%s", classifyNativeReadError(err))
+			} else {
+				account.LastHealthBytes = bytesRead
+				account.LastHealthDC = dc
+				account.LastHealthDurationMS = duration.Milliseconds()
+				account.Error = fmt.Sprintf("健康检查已自动抽样 Telegram DC %d 媒体，读取 %d 字节，耗时 %d ms", dc, bytesRead, duration.Milliseconds())
 			}
-			account.LastHealthBytes = bytesRead
-			account.LastHealthDC = dc
-			account.LastHealthDurationMS = duration.Milliseconds()
-			account.Error = fmt.Sprintf("健康检查已自动抽样 Telegram DC %d 媒体，读取 %d 字节，耗时 %d ms", dc, bytesRead, duration.Milliseconds())
 		} else {
 			// 最近会话里完全没有可抽样媒体：Auth().Status 已完成真实授权 RPC，
 			// 判基础检查通过，不标记失败；下次巡检时再尝试补抽样。
-			liteCheck = true
 			account.Error = "session 已授权（基础检查通过）；暂无可抽样媒体，文件池抽样将在后续巡检时自动补做"
+		}
+		if sampleFailed != "" {
+			// 授权 RPC 已成功，抽样/媒体 DC 层失败不影响会话与下载调度；
+			// 记下具体原因供诊断，后续巡检自动重试抽样。
+			account.Error = "session 已授权（基础检查通过）；" + sampleFailed + "。不影响会话列表与下载，将在后续巡检自动重试"
 		}
 		return nil
 	})
@@ -2198,14 +2207,11 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 		account.ConsecutiveFailures++
 		return a.saveNativeAccount(account)
 	}
-	// R4.11：健康检查通过（含 lite）即视为账号真实可用，清零连续失败并记录最近成功时间。
+	// R4.11/R4.17：基础检查通过（含 lite 与抽样失败降级）即视为账号真实可用：
+	// 清零连续失败、记录最近成功时间，并推进 HealthPasses —— 此前 lite 保持 Ready 原样，
+	// 会让「无媒体可抽」或「抽样失败」的账号永远恢复不了 Ready（2.5.1 实测缺口）。
 	account.LastSuccessAt = now()
 	account.ConsecutiveFailures = 0
-	if liteCheck {
-		// 基础检查通过：保持 Ready / HealthPasses / Status 原样，只落检查时间与说明，
-		// 等有缓存文件任务时再做真正的文件池抽样。
-		return a.saveNativeAccount(account)
-	}
 	if account.Ready && account.HealthPasses == 0 {
 		account.HealthPasses = 2
 	} else {
@@ -3039,6 +3045,8 @@ func classifyNativeReadError(err error) error {
 		return fmt.Errorf("FLOOD_WAIT: Telegram 要求等待后重试：%w", err)
 	case strings.Contains(msg, "_MIGRATE_"):
 		return fmt.Errorf("DC_MIGRATE: Telegram 要求切换 DC 后重试：%w", err)
+	case strings.Contains(msg, "DC_ID_INVALID"):
+		return fmt.Errorf("DC_ID_INVALID: 媒体 DC 授权导出被拒（session 与 DC 状态可能不同步；账号本身可用，若持续出现请退出后重新登录）：%w", err)
 	default:
 		return err
 	}

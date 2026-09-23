@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -50,5 +51,19 @@ func TestResolveChatAccountLockedSurfacesReason(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "context deadline exceeded") {
 		t.Fatalf("错误应透出健康检查真实原因，got %q", err.Error())
+	}
+}
+
+// R4.17：DC_ID_INVALID 属媒体 DC 层错误，应映射为「账号可用但抽样失败」的可读文案，
+// 而不是裸 RPC 错误让用户误判为账号失效。
+func TestClassifyNativeReadErrorDCIDInvalid(t *testing.T) {
+	classified := classifyNativeReadError(errors.New("rpc error code 400: DC_ID_INVALID"))
+	msg := classified.Error()
+	if !strings.Contains(msg, "DC_ID_INVALID") || !strings.Contains(msg, "账号本身可用") {
+		t.Fatalf("DC_ID_INVALID 应映射为可读提示，got %q", msg)
+	}
+	// 其他错误不受影响。
+	if got := classifyNativeReadError(errors.New("connection refused")).Error(); strings.Contains(got, "账号本身可用") {
+		t.Fatalf("普通网络错误不应命中 DC_ID_INVALID 提示，got %q", got)
 	}
 }
