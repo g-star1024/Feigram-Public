@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -36,13 +37,15 @@ func newTestApp(t *testing.T, cfg Config) *App {
 		config: cfg,
 		// saveLocked 写的是 a.storePath（不是 dataDir），两者都要指向临时目录，
 		// 否则 rename 失败被误判成产品缺陷。
-		dataDir:    dir,
-		storePath:  filepath.Join(dir, "tasks.json"),
-		tasks:      map[string]*Task{},
-		native:     map[string]*NativeAccount{},
-		running:    map[string]chan struct{}{},
-		taskSpawns: map[string]*spawnStat{},
-		taskLogs:   map[string]*taskLogState{},
+		dataDir:     dir,
+		storePath:   filepath.Join(dir, "tasks.json"),
+		tasks:       map[string]*Task{},
+		native:      map[string]*NativeAccount{},
+		running:     map[string]chan struct{}{},
+		taskSpawns:  map[string]*spawnStat{},
+		taskLogs:    map[string]*taskLogState{},
+		mediaConns:  map[string]*mediaConn{},
+		mediaProbes: map[string]mediaProbeSnapshot{},
 		// http-bridge 用例需要非 nil 的 a.client（downloadHTTPBridge 直接使用）。
 		client: &http.Client{},
 		proxy:  &proxyRuntime{},
@@ -588,5 +591,89 @@ func TestLoadRevivesMetadataURLFailures(t *testing.T) {
 func TestNativeFirstByteTimeoutSane(t *testing.T) {
 	if nativeFirstByteTimeout < 10*time.Second || nativeFirstByteTimeout >= nativeNoProgressTimeout {
 		t.Fatalf("首字节超时应为 10s~120s 之间且小于常规窗口: %v", nativeFirstByteTimeout)
+	}
+}
+
+// --- R4.29：媒体 DC 探测结论 / 手动优先调度 ---
+
+// 探测结论三分类：全通 / 全不通 / 部分放行，措辞必须可区分（不留空返回路径）。
+func TestMediaProbeSummaryCategories(t *testing.T) {
+	allOK := mediaProbeSummary(5, 5, nil, "经代理")
+	if !strings.Contains(allOK, "全部 5 个 DC") || !strings.Contains(allOK, "链路层正常") {
+		t.Fatalf("全通结论不符预期: %q", allOK)
+	}
+	noneOK := mediaProbeSummary(0, 5, []string{"1", "2", "3", "4", "5"}, "经代理")
+	if !strings.Contains(noneOK, "均不可达") || !strings.Contains(noneOK, "放行 Telegram 全部网段") {
+		t.Fatalf("全不通结论应指向代理放行问题: %q", noneOK)
+	}
+	partial := mediaProbeSummary(2, 5, []string{"4", "5"}, "经代理")
+	if !strings.Contains(partial, "2/5") || !strings.Contains(partial, "DC 4/5") || !strings.Contains(partial, "部分 Telegram 网段") {
+		t.Fatalf("部分放行结论应列出不可达 DC: %q", partial)
+	}
+	empty := mediaProbeSummary(0, 0, nil, "直连")
+	if !strings.Contains(empty, "无法分级探测") {
+		t.Fatalf("空结果也必须给出结论: %q", empty)
+	}
+}
+
+// 手动优先：auto（后台缓存）任务即便排在队首，只要存在等待中的手动任务就必须让路；
+// 手动任务全部进入传输态后，auto 恢复调度。
+func TestPumpOnceManualPrioritizesOverAuto(t *testing.T) {
+	app := newTestApp(t, Config{Enabled: true, Concurrency: 1, Mode: "conservative", Transport: "http-bridge"})
+	defer drainRunTasks(t, app)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	doRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+	}))
+	defer source.Close()
+	defer doRelease()
+
+	mk := func(id string, source2 string) *Task {
+		return &Task{
+			ID: id, UserID: "u1", AccountID: "a1", Status: "queued",
+			Transport: "http-bridge", Source: source2,
+			SourceURL: source.URL,
+			FilePath:  filepath.Join(t.TempDir(), id+".bin"), Size: 10,
+		}
+	}
+	// auto 排在队首（按 ID 排序 < manual 的前缀保证其在 listTasksLocked 前面）
+	app.tasks["a-auto"] = mk("a-auto", "auto")
+	app.tasks["z-manual"] = mk("z-manual", "manual")
+
+	// 第一轮：auto 在前，但手动在等 → 只能启动手动任务
+	if !app.pumpOnce() {
+		t.Fatal("pumpOnce 应启动手动任务")
+	}
+	app.mu.Lock()
+	started := app.tasks["z-manual"].Status
+	autoStatus := app.tasks["a-auto"].Status
+	autoReason := app.tasks["a-auto"].Error
+	app.mu.Unlock()
+	if started != "downloading" {
+		t.Fatalf("手动任务应被调度，got %q", started)
+	}
+	if autoStatus != "queued" {
+		t.Fatalf("auto 任务必须让路留在 queued，got %q", autoStatus)
+	}
+	if !strings.Contains(autoReason, "手动优先") {
+		t.Fatalf("auto 让路原因应可见化，got %q", autoReason)
+	}
+
+	// 手动任务占坑期间：auto 依旧不能启动（并发满）。
+	if app.pumpOnce() {
+		t.Fatal("并发已满时不应再启动任何任务")
+	}
+
+	// 释放手动任务并等 goroutine 收尾 → auto 恢复调度。
+	doRelease()
+	drainRunTasks(t, app)
+	// 手动任务可能已终态（挂起被释放后快速完成）；无论终态如何，auto 此刻应可被调度。
+	if !app.pumpOnce() {
+		// 若手动任务已完成且无其他等待任务，auto 必须能启动；再给一次机会排除时序
+		if app.tasks["a-auto"].Status == "queued" && !app.pumpOnce() {
+			t.Fatalf("手动任务结束后 auto 任务应恢复调度，status=%q err=%q", app.tasks["a-auto"].Status, app.tasks["a-auto"].Error)
+		}
 	}
 }

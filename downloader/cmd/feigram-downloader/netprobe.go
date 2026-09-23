@@ -15,8 +15,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	dcs "github.com/gotd/td/telegram/dcs"
@@ -86,4 +89,124 @@ func healthStageDiagnosis(probeDC int, probeAddr string, probeOK bool, probeDur 
 			probeDC, probeAddr, probeDur.Milliseconds())
 	}
 	return ""
+}
+
+// --- R4.29 · 媒体 DC 分级探测 ---
+//
+// 背景（2.6.4~2.6.6 实测）：登录/会话走主 DC 单连接小 RPC，下载/缓存要走媒体 DC
+// 网段 + exportAuth + 大流量长连接。代理只放行主 DC 时「登录正常、下载 0 字节」，
+// 而错误里只有笼统的超时/空响应，用户无法区分「代理没放行媒体段」还是「代码坏了」。
+// 本节把登录侧已有的分级探测思路推广到媒体 DC：对 DC1–DC5 全量 TCP 探测并给出
+// 「放行了哪些、没放行哪些」的可读结论，写进健康检查、诊断页（/api/state）与下载错误。
+
+// mediaProbeTimeout 单个媒体 DC 的 TCP 探测超时。
+const mediaProbeTimeout = 5 * time.Second
+
+// mediaProbeMaxDC 覆盖 Telegram 生产环境全部 5 个 DC。
+const mediaProbeMaxDC = 5
+
+// mediaDCProbe 单个 DC 的探测结果。
+type mediaDCProbe struct {
+	DC         int    `json:"dc"`
+	Addr       string `json:"addr"`
+	OK         bool   `json:"ok"`
+	DurationMs int64  `json:"durationMs"`
+	Err        string `json:"error,omitempty"`
+}
+
+// mediaProbeSnapshot 一次全量媒体 DC 探测的快照（进 /api/state 诊断页）。
+type mediaProbeSnapshot struct {
+	At      time.Time      `json:"at"`
+	Proxy   bool           `json:"proxy"`
+	Results []mediaDCProbe `json:"results"`
+	Summary string         `json:"summary"`
+}
+
+// probeMediaDCs 并发探测 DC1–DC5 的 TCP 可达性，落快照 + 留日志。
+// 结论必须可区分（R4.22 铁律）：全通 / 全不通 / 部分放行三种措辞各不相同。
+func (a *App) probeMediaDCs(account NativeAccount) mediaProbeSnapshot {
+	key := nativeAccountKey(account.UserID, account.AccountID)
+	snap := mediaProbeSnapshot{At: time.Now(), Proxy: a.proxy.dialer() != nil}
+	type job struct {
+		dc   int
+		addr string
+	}
+	jobs := make([]job, 0, mediaProbeMaxDC)
+	for dc := 1; dc <= mediaProbeMaxDC; dc++ {
+		if addr := primaryDCAddr(dc); addr != "" {
+			jobs = append(jobs, job{dc: dc, addr: addr})
+		}
+	}
+	results := make([]mediaDCProbe, len(jobs))
+	var wg sync.WaitGroup
+	for i, j := range jobs {
+		wg.Add(1)
+		go func(i int, dc int, addr string) {
+			defer wg.Done()
+			start := time.Now()
+			err := a.probeTelegramTCP(addr, mediaProbeTimeout)
+			p := mediaDCProbe{DC: dc, Addr: addr, DurationMs: time.Since(start).Milliseconds()}
+			if err != nil {
+				p.Err = err.Error()
+			} else {
+				p.OK = true
+			}
+			results[i] = p
+		}(i, j.dc, j.addr)
+	}
+	wg.Wait()
+	snap.Results = results
+	okCount := 0
+	bad := make([]string, 0)
+	for _, r := range results {
+		if r.OK {
+			okCount++
+		} else {
+			bad = append(bad, strconv.Itoa(r.DC))
+		}
+	}
+	layer := "直连"
+	if snap.Proxy {
+		layer = "经代理"
+	}
+	snap.Summary = mediaProbeSummary(okCount, len(results), bad, layer)
+	a.mu.Lock()
+	a.mediaProbes[key] = snap
+	a.mu.Unlock()
+	log.Printf("media probe: account %s %s", key, snap.Summary)
+	return snap
+}
+
+// mediaProbeSummary 依据探测结果生成可区分的三类结论（R4.22 铁律：不留「空返回」路径）。
+// 纯函数便于单测。
+func mediaProbeSummary(okCount, total int, bad []string, layer string) string {
+	switch {
+	case total == 0:
+		return "未能查到任何 DC 的生产地址，无法分级探测"
+	case okCount == total:
+		return fmt.Sprintf("全部 %d 个 DC 的 TCP 均可连通（%s）——链路层正常", okCount, layer)
+	case okCount == 0:
+		return fmt.Sprintf("全部 %d 个 DC 的 TCP 均不可达（%s）——代理/出口链路故障：请在代理规则放行 Telegram 全部网段", total, layer)
+	default:
+		return fmt.Sprintf("%d/%d 个 DC 可达（%s），不可达：DC %s——代理仅放行了部分 Telegram 网段，下载会持续失败，请放行全部媒体 DC",
+			okCount, total, layer, strings.Join(bad, "/"))
+	}
+}
+
+// diagnoseMediaDC 对单个媒体 DC 快速探测并给出一句话结论（拼进下载错误文案）。
+func (a *App) diagnoseMediaDC(dc int) string {
+	if dc <= 0 {
+		return "未能确定媒体 DC，无法分级探测"
+	}
+	addr := primaryDCAddr(dc)
+	if addr == "" {
+		return fmt.Sprintf("未能查到媒体 DC %d 的生产地址，无法分级探测", dc)
+	}
+	start := time.Now()
+	err := a.probeTelegramTCP(addr, mediaProbeTimeout)
+	dur := time.Since(start).Milliseconds()
+	if err != nil {
+		return fmt.Sprintf("分级探测：TCP 拨号媒体 DC %d（%s）即失败（%d ms）——问题在出口链路（代理未放行媒体网段或节点故障），MTProto 层尚未开始", dc, addr, dur)
+	}
+	return fmt.Sprintf("分级探测：媒体 DC %d（%s）TCP 可连通（%d ms）——链路层正常，问题多在节点转发质量（丢包/限速），建议更换节点", dc, addr, dur)
 }

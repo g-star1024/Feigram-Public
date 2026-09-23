@@ -47,6 +47,10 @@ const (
 	// 媒体路径不通（代理不放行媒体 DC 段）时每次尝试都 0 字节，120s 常规窗口
 	// 会让单并发队列被一个任务白占 2 分钟；30s 档加快轮换与诊断反馈。
 	nativeFirstByteTimeout = 30 * time.Second
+
+	// R4.29：后台缓存任务两次调度之间的最小间隔（错峰），避免缓存批量入队时
+	// 短时间内连续建连/exportAuth 加深账号限流。
+	autoSpawnMinInterval = 2 * time.Second
 )
 
 // version 是 Go 下载器对外上报的版本号。
@@ -278,7 +282,18 @@ type App struct {
 	// taskLogs 记录每任务各类日志的最近输出时间（R4.26 日志限频），防止异常
 	// 场景下同一条错误刷爆日志。
 	taskLogs map[string]*taskLogState
-	client   *http.Client
+	// mediaConns 是账号级常驻 MTProto 连接池（R4.29）：每账号一条连接、
+	// 每媒体 DC 只 exportAuth 一次，根治反复 export 触发的 FLOOD_WAIT。
+	// 独立锁 mediaMu，与 a.mu 无环（见 mediapool.go 锁纪律）。
+	mediaMu    sync.Mutex
+	mediaConns map[string]*mediaConn
+	// mediaProbes 是各账号最近一次媒体 DC 分级探测快照（R4.29），随 /api/state
+	// 进诊断页；读写在 a.mu 下进行（探测的网络 IO 在锁外完成）。
+	mediaProbes map[string]mediaProbeSnapshot
+	// lastAutoSpawn 记录上次调度后台缓存（auto）任务的时间（R4.29 错峰），
+	// 与手动下载之间保持 autoSpawnMinInterval 的最小间隔。
+	lastAutoSpawn time.Time
+	client        *http.Client
 	// proxy 是当前生效的网络代理（MTProto dialer + 媒体 transport 共用），
 	// 用独立锁保护，避免与 App.mu 相互等待。详见 proxy.go。
 	proxy *proxyRuntime
@@ -308,13 +323,15 @@ func main() {
 			ProxyURL:  "",
 			UpdatedAt: now(),
 		},
-		tasks:      map[string]*Task{},
-		native:     map[string]*NativeAccount{},
-		logins:     map[string]*NativeLogin{},
-		qrLogins:   map[string]*NativeQRLogin{},
-		running:    map[string]chan struct{}{},
-		taskSpawns: map[string]*spawnStat{},
-		taskLogs:   map[string]*taskLogState{},
+		tasks:       map[string]*Task{},
+		native:      map[string]*NativeAccount{},
+		logins:      map[string]*NativeLogin{},
+		qrLogins:    map[string]*NativeQRLogin{},
+		running:     map[string]chan struct{}{},
+		taskSpawns:  map[string]*spawnStat{},
+		taskLogs:    map[string]*taskLogState{},
+		mediaConns:  map[string]*mediaConn{},
+		mediaProbes: map[string]mediaProbeSnapshot{},
 		client: &http.Client{
 			Timeout:   0,
 			Transport: newMediaTransport(proxy),
@@ -676,7 +693,25 @@ func (a *App) pumpOnce() bool {
 		log.Printf("task %s: 清理幻影 running 占坑（当前状态=%s，旧 goroutine 将被取消）", id, status)
 	}
 	nowUnix := time.Now().Unix()
-	for _, task := range a.listTasksLocked() {
+	// R4.29：后台缓存让路。手动任务（用户点下载/续传）优先占满并发；
+	// 后台缓存（source=auto / autoCache）只在没有任何手动任务等待时启动，
+	// 且两次 auto 调度至少间隔 autoSpawnMinInterval——避免 46 个缓存任务与
+	// 手动下载抢同一账号的 exportAuth 配额触发 FLOOD_WAIT（2.6.4 实测）。
+	tasksSnapshot := a.listTasksLocked()
+	isAutoCache := func(t Task) bool { return t.AutoCache || t.Source == "auto" }
+	manualWaiting := false
+	autoRunning := 0
+	for _, t := range tasksSnapshot {
+		if t.Status == "queued" && !isAutoCache(t) && t.FilePath != "" && t.RetryAfter <= nowUnix {
+			manualWaiting = true
+		}
+	}
+	for id := range a.running {
+		if stored := a.tasks[id]; stored != nil && isAutoCache(*stored) {
+			autoRunning++
+		}
+	}
+	for _, task := range tasksSnapshot {
 		if len(a.running) >= limit {
 			break
 		}
@@ -714,6 +749,28 @@ func (a *App) pumpOnce() bool {
 		}
 		if task.RetryAfter > nowUnix {
 			continue
+		}
+		// R4.29：auto（后台缓存）让路判定——手动等待时不启动 auto；auto 同时最多
+		// 一个在跑；两次 auto 调度至少间隔 autoSpawnMinInterval。被让路的任务留
+		// 在 queued，把原因可见化（仅在原因变化时写盘，避免 800ms 调度循环刷库）。
+		if isAutoCache(task) {
+			if manualWaiting {
+				if stored := a.tasks[task.ID]; stored != nil {
+					reason := "后台缓存等待手动下载完成（手动优先，R4.29）"
+					if stored.Error != reason {
+						stored.Error = reason
+						stored.UpdatedAt = now()
+						saveNeeded = true
+					}
+				}
+				continue
+			}
+			if autoRunning >= 1 {
+				continue
+			}
+			if time.Since(a.lastAutoSpawn) < autoSpawnMinInterval {
+				continue
+			}
 		}
 		if _, ok := a.running[task.ID]; ok {
 			continue
@@ -753,6 +810,10 @@ func (a *App) pumpOnce() bool {
 		// R4.25：任务启动必须留日志。此前启动无日志、失败才有日志，
 		// 「任务到底有没有被调度」在用户日志里无从判断（2.6.2 排障盲区）。
 		log.Printf("task %s start: transport=%s offset=%d/%d file=%s", task.ID, transport, task.Downloaded, task.Size, task.FilePath)
+		if isAutoCache(task) {
+			a.lastAutoSpawn = time.Now()
+			autoRunning++
+		}
 		go a.runTask(task.ID, cancel)
 	}
 	if started || saveNeeded {
@@ -1125,10 +1186,17 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 		account.Status = "healthy"
 	}
 
-	client, err := a.newTelegramClient(account, apiHash)
+	// R4.29：改用账号级常驻连接池（mediapool.go）。此前每任务 newTelegramClient
+	// 新建客户端，媒体 DC 的 exportAuth 随任务反复发起，同一账号短时间几十次
+	// export 后被 Telegram FLOOD_WAIT 1400+ 秒（2.6.4/2.6.5 实测）。常驻连接的
+	// DC 池随连接保活——每个媒体 DC 只 exportAuth 一次，后续任务直接复用。
+	primaryDC := a.nativePrimaryDC(task.UserID, task.AccountID)
+	conn, err := a.acquireMediaConn(account, apiHash)
 	if err != nil {
-		return err
+		return errors.New(a.withNetworkHint(err))
 	}
+	client := conn.client
+
 	// R4.25：无进度看门狗。此前这里只有 WithCancel——媒体路径一旦挂死
 	//（DC 路由异常/代理不放行媒体段/对端无响应），goroutine 永久悬挂：
 	// 无日志、任务卡在传输态，running 坑被占死，conservative 单并发下整个
@@ -1138,6 +1206,8 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 	// 用 30s 首字节超时快速失败：媒体路径不通时（2.6.5 实测每次 0/171MB
 	// 白等 120s），单并发下一任务就白白占死队列 2 分钟；收到过字节后仍用
 	// 120s 窗口容忍正常的网络抖动/慢速分块。
+	// R4.29：0 字节终止前先对该任务的媒体 DC 做一次分级探测，把「代理未放行
+	// 媒体网段」vs「节点转发质量」的结论直接写进任务错误，终结盲猜。
 	ctx, stop := context.WithCancelCause(context.Background())
 	defer stop(nil)
 	lastProgress := time.Now()
@@ -1162,66 +1232,70 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 				if time.Since(lastProgress) > threshold {
 					// R4.26：stalled 日志走限频。看门狗本身每个 goroutine 只打一次，
 					// 但「复活→再挂死」的循环会让这条日志反复出现，限频防刷屏。
-					a.taskEventLog(task.ID, fmt.Sprintf("stalled: no bytes for %s（%s，看门狗终止）", threshold, reason))
-					stop(errDownloadStalled)
+					diagDC := task.NativeFile.DCID
+					if diagDC <= 0 {
+						diagDC = primaryDC
+					}
+					diag := a.diagnoseMediaDC(diagDC)
+					a.taskEventLog(task.ID, fmt.Sprintf("stalled: no bytes for %s（%s，看门狗终止）%s", threshold, reason, diag))
+					stop(fmt.Errorf("%w；%s", errDownloadStalled, diag))
 					return
 				}
 			}
 		}
 	}()
-	runErr := client.Run(ctx, func(ctx context.Context) error {
-		metadataAPI := client.API()
-		fileAPI := metadataAPI
-		fileDC := task.NativeFile.DCID
-		primaryDC := a.nativePrimaryDC(task.UserID, task.AccountID)
-		var mediaInvoker telegram.CloseInvoker
-		closeMedia := func() {
-			if mediaInvoker != nil {
-				if err := mediaInvoker.Close(); err != nil {
-					log.Printf("task %s close media DC %d invoker: %v", task.ID, fileDC, err)
-				}
-				mediaInvoker = nil
+	metadataAPI := client.API()
+	fileAPI := metadataAPI
+	fileDC := task.NativeFile.DCID
+	var mediaInvoker telegram.CloseInvoker
+	closeMedia := func() {
+		if mediaInvoker != nil {
+			if err := mediaInvoker.Close(); err != nil {
+				log.Printf("task %s close media DC %d invoker: %v", task.ID, fileDC, err)
 			}
+			mediaInvoker = nil
 		}
-		defer closeMedia()
-		switchToMediaDC := func(dc int) error {
-			if dc <= 0 {
-				fileAPI = metadataAPI
-				closeMedia()
-				fileDC = 0
-				return nil
-			}
-			if mediaInvoker != nil && fileDC == dc {
-				return nil
-			}
+	}
+	defer closeMedia()
+	switchToMediaDC := func(dc int) error {
+		if dc <= 0 {
+			fileAPI = metadataAPI
 			closeMedia()
-			// R4.18：目标 DC 就是账号主 DC 时不能走 MediaOnly 池——
-			// gotd 会 exportAuthorization(dc) 而 Telegram 对「导出到自己」返回
-			// DC_ID_INVALID；直接复用主连接。
-			if dc == primaryDC {
-				mediaInvoker = nil
-				fileAPI = metadataAPI
-				fileDC = dc
-				log.Printf("task %s media DC %d is primary, using primary connection for native upload.getFile", task.ID, dc)
-				return nil
-			}
-			invoker, err := client.MediaOnly(ctx, dc, 1)
-			if err != nil {
-				fileAPI = metadataAPI
-				fileDC = 0
-				return fmt.Errorf("connect Telegram media DC %d: %w", dc, err)
-			}
-			mediaInvoker = invoker
-			fileAPI = tg.NewClient(invoker)
-			fileDC = dc
-			log.Printf("task %s using Telegram media DC %d for native upload.getFile", task.ID, dc)
+			fileDC = 0
 			return nil
 		}
-		if fileDC > 0 {
-			if err := switchToMediaDC(fileDC); err != nil {
-				log.Printf("task %s media DC %d unavailable, fallback current DC: %v", task.ID, fileDC, err)
-			}
+		if mediaInvoker != nil && fileDC == dc {
+			return nil
 		}
+		closeMedia()
+		// R4.18：目标 DC 就是账号主 DC 时不能走 MediaOnly 池——
+		// gotd 会 exportAuthorization(dc) 而 Telegram 对「导出到自己」返回
+		// DC_ID_INVALID；直接复用主连接。
+		if dc == primaryDC {
+			mediaInvoker = nil
+			fileAPI = metadataAPI
+			fileDC = dc
+			log.Printf("task %s media DC %d is primary, using primary connection for native upload.getFile", task.ID, dc)
+			return nil
+		}
+		invoker, err := client.MediaOnly(ctx, dc, 1)
+		if err != nil {
+			fileAPI = metadataAPI
+			fileDC = 0
+			return fmt.Errorf("connect Telegram media DC %d: %w", dc, err)
+		}
+		mediaInvoker = invoker
+		fileAPI = tg.NewClient(invoker)
+		fileDC = dc
+		log.Printf("task %s using Telegram media DC %d for native upload.getFile", task.ID, dc)
+		return nil
+	}
+	if fileDC > 0 {
+		if err := switchToMediaDC(fileDC); err != nil {
+			log.Printf("task %s media DC %d unavailable, fallback current DC: %v", task.ID, fileDC, err)
+		}
+	}
+	download := func() error {
 		lastBytes := downloaded
 		lastTick := time.Now()
 		windowStart := time.Now()
@@ -1343,7 +1417,8 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 			}
 		}
 		return nil
-	})
+	}
+	runErr := download()
 	if runErr != nil {
 		return runErr
 	}
@@ -1766,6 +1841,9 @@ func (a *App) handleNativeAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.mu.Unlock()
+		// R4.29：账号记录已删（登出/清理），常驻媒体连接一并回收，
+		// 避免旧 session 的连接继续占用或在 relogin 后撞 AUTH_KEY 冲突。
+		a.dropMediaConn(nativeAccountKey(userID, accountID))
 		log.Printf("已删除 Go 原生账号记录 %s/%s", userID, accountID)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": publicNativeAccount(removed)})
 	case r.Method == http.MethodPost && action == "health":
@@ -1990,8 +2068,11 @@ func (a *App) stateLocked() map[string]any {
 		"transport":      transport,
 		"nativeMTProto":  native,
 		"accounts":       a.accountsSummaryLocked(),
-		"strategy":       strategy,
-		"proxy":          a.proxy.status(),
+		// R4.29：媒体 DC 分级探测快照（账号 key → 快照），诊断页直接展示
+		// 「代理放行了哪些 DC、没放行哪些」。
+		"mediaProbes": a.mediaProbes,
+		"strategy":    strategy,
+		"proxy":       a.proxy.status(),
 	}
 }
 
@@ -2631,6 +2712,9 @@ func (a *App) nativeHealthCheck(account NativeAccount) (result NativeAccount, er
 		}
 		// R4.11：健康检查失败计入连续失败（观测口径，供 /health 退化预警与账号卡展示）。
 		account.ConsecutiveFailures++
+		// R4.29：健康检查无论成败都异步补一轮媒体 DC 全量探测——「登录正常、下载 0 字节」
+		// 时，这里能直接看到代理放行了哪些 DC、没放行哪些（结果进 /api/state 诊断页）。
+		go a.probeMediaDCs(account)
 		return a.saveNativeAccount(account)
 	}
 	// R4.22：授权 RPC 通过即账号健康——不再要求「连续 2 次通过」。
@@ -2643,6 +2727,7 @@ func (a *App) nativeHealthCheck(account NativeAccount) (result NativeAccount, er
 	account.Ready = true
 	account.Status = "healthy"
 	account.Error = "session 已授权（Telegram 授权 RPC 通过）"
+	go a.probeMediaDCs(account)
 	return a.saveNativeAccount(account)
 }
 

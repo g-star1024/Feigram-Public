@@ -1028,6 +1028,21 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
                   旧入口还会把任务建到已自环的 http-bridge 上（2.6.0 后台缓存全挂的帮凶）。 */}
             </div>
             {downloaderState.nativeMTProto && <p className="hint">{downloaderState.nativeMTProto.note}</p>}
+            {/* R4.29：媒体 DC 分级探测结果——一眼看出代理放行了哪些 DC、没放行哪些。 */}
+            {Object.entries(downloaderState.mediaProbes || {}).map(([key, probe]) => (
+              <div className="diagnostics-paths" key={`probe-${key}`}>
+                <p><strong>媒体 DC 探测（{key}）</strong>{probe.summary || "-"}</p>
+                <p>
+                  {Array.isArray(probe.results) && probe.results.length
+                    ? probe.results.map((r) => (
+                      <span key={r.dc} style={{ marginRight: 12 }}>
+                        {`DC${r.dc} ${r.ok ? "✓" : "✗"}${r.durationMs != null ? ` ${r.durationMs}ms` : ""}`}
+                      </span>
+                    ))
+                    : "暂无明细"}
+                </p>
+              </div>
+            ))}
             <p className="hint">{downloaderState.strategy || "Go sidecar 已就绪，等待 Telegram 下载桥接。"}</p>
             {downloaderState.error && <p className="error">{downloaderState.error}</p>}
           </div>}
