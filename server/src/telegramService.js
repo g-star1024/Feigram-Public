@@ -1085,7 +1085,7 @@ async function goSilentCacheSpeedDiagnostics(userId) {
     },
     task: primary ? normalizeGoSilentTask(primary) : null,
     activeTasks: tasks.slice(0, 20).map(normalizeGoSilentTask),
-    note: "Go 下载服务已接管队列与文件写入；诊断显示 Go 任务聚合速度。媒体源传输层会在运行诊断中显示。"
+    note: "Go 下载服务已接管队列与文件写入；诊断显示 Go 任务聚合速度。"
   };
 }
 

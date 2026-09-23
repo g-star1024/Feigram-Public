@@ -36,9 +36,30 @@ import (
 )
 
 const (
-	version         = "0.8.2"
 	defaultPartSize = 1024 * 1024
+
+	// R4.25：原生下载无进度看门狗窗口。健康下载每秒都有字节流动；
+	// 120 秒零字节意味着媒体路径已挂死（DC 路由异常/代理不放行媒体段/对端无响应），
+	// 必须转为可诊断的瞬态错误，而不是 goroutine 永久悬挂（2.6.2 实测队列冻死的根因）。
+	nativeNoProgressTimeout = 120 * time.Second
 )
+
+// version 是 Go 下载器对外上报的版本号。
+// R4.25：改为可变并由构建注入 —— 打包脚本用
+// `-ldflags "-X main.version=${VERSION}"` 写入 FPK 包版本，使日志首行
+// 「Feigram Downloader <版本> listening」与安装包版本一致。此前它是写死的
+// 独立常量（0.8.x），用户日志里恒为旧值，无法证明 NAS 上跑的是哪个二进制，
+// 2.6.2 排障时因此浪费过一轮假设。未注入时（本地 go run / go test）回落到 dev。
+var version = "dev"
+
+// errDownloadStalled 表示下载长时间零进度。它是瞬态错误：按退避自动续传，
+// 且错误文案必须直指「媒体路径无进度」这一事实，让用户能区分「慢」与「挂死」。
+var errDownloadStalled = errors.New("下载超过 120 秒没有任何进度（媒体路径疑似挂死：请检查代理是否放行 Telegram 媒体 DC 网段），将自动重试")
+
+// errMissingFilePathReason 是任务缺少落盘路径时的等待原因文案。
+// R4.25：此前 FilePath 为空直接在调度循环里 continue（零日志零提示），
+// 用户在下载中心只能看到永久「排队中」——补上可读原因，避免二次排障盲区。
+const errMissingFilePathReason = "任务缺少落盘路径，等待重新创建下载任务"
 
 var migrateRe = regexp.MustCompile(`(?:FILE|PHONE|NETWORK|USER)?_?MIGRATE_([0-9]+)`)
 
@@ -509,6 +530,23 @@ func (a *App) pumpOnce() bool {
 	}
 	started := false
 	saveNeeded := false
+	// R4.25：清理「幻影 running 占坑」。running 表与任务状态是两份真相：
+	// 若任务状态已被外部改回 queued/error/cancelled（用户点「开始」或重新入队），
+	// 而旧 goroutine 因媒体路径挂死迟迟不退出，坑位就会永久占用——conservative
+	// 并发为 1 时整条队列被一个僵尸条目冻死，且全程零日志零提示（2.6.2 实测症状）。
+	for id, cancel := range a.running {
+		stored := a.tasks[id]
+		if stored != nil && (stored.Status == "downloading" || stored.Status == "running") {
+			continue
+		}
+		status := "<已删除>"
+		if stored != nil {
+			status = stored.Status
+		}
+		delete(a.running, id)
+		close(cancel)
+		log.Printf("task %s: 清理幻影 running 占坑（当前状态=%s，旧 goroutine 将被取消）", id, status)
+	}
 	nowUnix := time.Now().Unix()
 	for _, task := range a.listTasksLocked() {
 		if len(a.running) >= limit {
@@ -518,6 +556,15 @@ func (a *App) pumpOnce() bool {
 			continue
 		}
 		if task.FilePath == "" {
+			// R4.25：缺失落盘路径不再是静默跳过——补写等待原因，与 R4.11 的
+			// 「等待原因可见化」一致。此前这里零日志零提示，是排障盲区之一。
+			if task.Error != errMissingFilePathReason {
+				if stored := a.tasks[task.ID]; stored != nil {
+					stored.Error = errMissingFilePathReason
+					stored.UpdatedAt = now()
+					saveNeeded = true
+				}
+			}
 			continue
 		}
 		transport := a.taskTransport(task)
@@ -549,6 +596,9 @@ func (a *App) pumpOnce() bool {
 		task.Error = ""
 		task.UpdatedAt = now()
 		started = true
+		// R4.25：任务启动必须留日志。此前启动无日志、失败才有日志，
+		// 「任务到底有没有被调度」在用户日志里无从判断（2.6.2 排障盲区）。
+		log.Printf("task %s start: transport=%s offset=%d/%d file=%s", task.ID, transport, task.Downloaded, task.Size, task.FilePath)
 		go a.runTask(task.ID, cancel)
 	}
 	if started || saveNeeded {
@@ -570,9 +620,19 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 		if task == nil {
 			return
 		}
+		// R4.25：本 goroutine 是否仍是任务的「现任」执行者。queue 强制重启、
+		// 幻影坑清理都会在保留旧 goroutine 的情况下重置任务状态；旧 goroutine
+		// 醒来后不得覆盖新状态（否则会把刚排队的任务改回 cancelled/error，
+		// 用户看到的仍是「点开始没反应」）。
+		stillCurrent := func(t *Task) bool {
+			return t.Status == "downloading" || t.Status == "running"
+		}
 		if err := a.download(task, cancel); err != nil {
 			if errors.Is(err, errCancelled) {
 				a.updateTask(id, func(t *Task) {
+					if !stillCurrent(t) {
+						return
+					}
 					t.Status = "cancelled"
 					t.SpeedBps = 0
 					t.Error = ""
@@ -585,6 +645,9 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 				nextCount := task.RetryCount + 1
 				if nextCount > maxTransientRetries {
 					a.updateTask(id, func(t *Task) {
+						if !stillCurrent(t) {
+							return
+						}
 						t.Status = "error"
 						t.SpeedBps = 0
 						t.RetryCount = nextCount
@@ -597,6 +660,9 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 				}
 				delay := retryDelay(nextCount)
 				a.updateTask(id, func(t *Task) {
+					if !stillCurrent(t) {
+						return
+					}
 					t.Status = "queued"
 					t.SpeedBps = 0
 					t.RetryCount = nextCount
@@ -608,6 +674,9 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 				return
 			}
 			a.updateTask(id, func(t *Task) {
+				if !stillCurrent(t) {
+					return
+				}
 				t.Status = "error"
 				t.SpeedBps = 0
 				t.Error = err.Error()
@@ -623,6 +692,9 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 			return
 		}
 		a.updateTask(id, func(t *Task) {
+			if !stillCurrent(t) {
+				return
+			}
 			t.Status = "completed"
 			if stat, err := os.Stat(t.FilePath); err == nil {
 				t.Downloaded = stat.Size()
@@ -886,13 +958,31 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := context.WithCancel(context.Background())
-	defer stop()
+	// R4.25：无进度看门狗。此前这里只有 WithCancel——媒体路径一旦挂死
+	//（DC 路由异常/代理不放行媒体段/对端无响应），goroutine 永久悬挂：
+	// 无日志、任务卡在传输态，running 坑被占死，conservative 单并发下整个
+	// 队列静默冻结（2.6.2 实测「一直排队、点开始没反应」的根因）。
+	// 现在任何 120 秒窗口内零字节就终止任务，转为可诊断的瞬态错误自动续传。
+	ctx, stop := context.WithCancelCause(context.Background())
+	defer stop(nil)
+	lastProgress := time.Now()
 	go func() {
-		select {
-		case <-cancel:
-			stop()
-		case <-ctx.Done():
+		watch := time.NewTicker(15 * time.Second)
+		defer watch.Stop()
+		for {
+			select {
+			case <-cancel:
+				stop(errCancelled)
+				return
+			case <-ctx.Done():
+				return
+			case <-watch.C:
+				if time.Since(lastProgress) > nativeNoProgressTimeout {
+					log.Printf("task %s stalled: no bytes for %s（媒体路径无进度，看门狗终止）", task.ID, nativeNoProgressTimeout)
+					stop(errDownloadStalled)
+					return
+				}
+			}
 		}
 	}()
 	runErr := client.Run(ctx, func(ctx context.Context) error {
@@ -962,7 +1052,9 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 		for {
 			select {
 			case <-ctx.Done():
-				return errCancelled
+				// R4.25：取消必须区分「用户取消」与「看门狗判定挂死」——
+				// 直接取 context cause，两者各自带正确语义向上传递。
+				return context.Cause(ctx)
 			default:
 			}
 			if task.Size > 0 && downloaded >= task.Size {
@@ -1043,6 +1135,7 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 				return err
 			}
 			downloaded += int64(len(chunk.Bytes))
+			lastProgress = time.Now() // R4.25：喂狗——任何真实字节流动都重置无进度计时。
 			windowBytes += int64(len(chunk.Bytes))
 			if err := a.throttle(windowBytes, windowStart, cancel); err != nil {
 				return err
@@ -1627,6 +1720,14 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 		task.RetryAfter = 0
 		task.UpdatedAt = now()
 	case r.Method == http.MethodPost && action == "queue":
+		// R4.25：「开始」语义 = 强制重启。若该任务仍有活着的下载 goroutine
+		//（例如媒体路径挂死），必须先取消并清掉 running 坑，否则 pumpOnce
+		// 会因 running[id] 已存在而静默跳过——用户看到的就是「点开始没反应」。
+		if cancel := a.running[id]; cancel != nil {
+			close(cancel)
+			delete(a.running, id)
+			log.Printf("task %s queued: previous live goroutine cancelled (force restart)", id)
+		}
 		task.Status = "queued"
 		task.SpeedBps = 0
 		task.Error = ""
@@ -1666,7 +1767,7 @@ func (a *App) stateLocked() map[string]any {
 		}
 	}
 	transport := normalizeTransport(a.config.Transport)
-	strategy := "Go 下载服务已接管队列、断点、限速和落盘；可在保守模式与 Go 原生 MTProto 模式之间切换，HTTP 桥接仍作为回退。"
+	strategy := "Go 下载服务已接管队列、断点、限速和落盘；媒体源统一走 Go 原生 MTProto。"
 	nativeReady := a.nativeReadyLocked()
 	readyAccountKeys := make([]string, 0)
 	for _, account := range a.native {
@@ -1687,25 +1788,39 @@ func (a *App) stateLocked() map[string]any {
 		native["note"] = "已有健康 Go 原生 MTProto session，可以灰度启用 native-mtproto。"
 	}
 	if transport == "native-mtproto" {
-		strategy = "Go 原生 MTProto 传输层已选择；文件读取会直接使用 Go session，FILE_REFERENCE_EXPIRED 会尝试刷新元数据后续传。"
+		strategy = "媒体源已统一走 Go 原生 MTProto；文件读取直接使用 Go session，FILE_REFERENCE_EXPIRED 会尝试刷新元数据后续传。"
 	}
+	// R4.25：调度诊断可见化。running 表可能含「幻影占坑」（任务状态已非下载中，
+	// 但旧 goroutine 尚未退出），这正是 2.6.2 里「运行中 1/1 却全部排队中」的矛盾来源。
+	// 因此分别上报：有效在跑数、坑位总数、坑位明细，前端可据此直接定位。
+	runningActive := 0
+	runningTaskIDs := make([]string, 0, len(a.running))
+	for id := range a.running {
+		runningTaskIDs = append(runningTaskIDs, id)
+		if stored := a.tasks[id]; stored != nil && (stored.Status == "downloading" || stored.Status == "running") {
+			runningActive++
+		}
+	}
+	sort.Strings(runningTaskIDs)
 	return map[string]any{
-		"ok":            true,
-		"version":       version,
-		"schemaVersion": storeSchemaVersion,
-		"pid":           os.Getpid(),
-		"uptime":        int(time.Since(a.startedAt).Seconds()),
-		"dataDir":       a.dataDir,
-		"config":        a.config,
-		"counts":        counts,
-		"running":       len(a.running),
-		"speedBps":      speed,
-		"tasks":         tasks,
-		"transport":     transport,
-		"nativeMTProto": native,
-		"accounts":      a.accountsSummaryLocked(),
-		"strategy":      strategy,
-		"proxy":         a.proxy.status(),
+		"ok":             true,
+		"version":        version,
+		"schemaVersion":  storeSchemaVersion,
+		"pid":            os.Getpid(),
+		"uptime":         int(time.Since(a.startedAt).Seconds()),
+		"dataDir":        a.dataDir,
+		"config":         a.config,
+		"counts":         counts,
+		"running":        runningActive,
+		"runningSlots":   len(a.running),
+		"runningTaskIds": runningTaskIDs,
+		"speedBps":       speed,
+		"tasks":          tasks,
+		"transport":      transport,
+		"nativeMTProto":  native,
+		"accounts":       a.accountsSummaryLocked(),
+		"strategy":       strategy,
+		"proxy":          a.proxy.status(),
 	}
 }
 
@@ -2018,11 +2133,17 @@ func publicNativeAccount(account NativeAccount) map[string]any {
 }
 
 func normalizeNativeStatus(status string, ready bool) string {
+	// R4.25：ready=false 时不得保留 "healthy"——「显示健康却不可调度」的
+	// 自相矛盾中间态正是 R4.22 要消灭的东西，这里曾漏堵：2.5.x 落盘的
+	// healthy+ready=false 记录会一路原样通过校验进入内存。
+	if !ready && strings.TrimSpace(status) == "healthy" {
+		return "needs-relogin"
+	}
 	if ready {
 		return "healthy"
 	}
 	switch strings.TrimSpace(status) {
-	case "healthy", "session-imported", "needs-relogin", "code-sent", "password-needed", "qr-waiting", "checking", "failed":
+	case "session-imported", "needs-relogin", "code-sent", "password-needed", "qr-waiting", "checking", "failed":
 		return status
 	default:
 		return "needs-relogin"
@@ -3245,6 +3366,10 @@ func transientSourceError(err error) bool {
 	// R4.22：账号未就绪不是「媒体源故障」，但同样要按瞬态处理——账号恢复后
 	// 任务必须能自动续传，而不是被记为终态错误、等用户手动重试。
 	if errors.Is(err, errAccountNotReady) {
+		return true
+	}
+	// R4.25：无进度挂死也是瞬态——按退避自动重试，网络/DC 路径恢复后自动续传。
+	if errors.Is(err, errDownloadStalled) {
 		return true
 	}
 	text := strings.ToLower(err.Error())

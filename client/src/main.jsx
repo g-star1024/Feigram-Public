@@ -999,8 +999,14 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
               <span><b>并发</b>{downloaderState.config?.concurrency || "-"}</span>
               <span><b>限速</b>{downloaderState.config?.rateLimitBps ? `${formatBytes(downloaderState.config.rateLimitBps)}/s` : "不限速"}</span>
               <span><b>模式</b>{downloaderState.config?.mode === "fast" ? "高速" : "保守"}</span>
+              {/* R4.25：调度可见化。坑位数与有效在跑数不一致时说明存在僵尸占位
+                  （2.6.2 「运行中 1/1 却全部排队中」的矛盾正是这样出现的）。 */}
+              <span><b>调度</b>{`${downloaderState.running ?? 0} 在跑 / ${downloaderState.runningSlots ?? 0} 坑位`}</span>
               {/* R4.23：移除「媒体源」条目——单一 Go 原生 MTProto 后恒定不变，不再展示。 */}
             </div>
+            {typeof downloaderState.runningSlots === "number" && downloaderState.runningSlots > Number(downloaderState.running || 0) && (
+              <p className="error">{`检测到 ${downloaderState.runningSlots - Number(downloaderState.running || 0)} 个僵尸调度坑位（任务状态已非下载中，但旧执行协程未退出）。调度循环会自动清理；若持续出现请查看 Go 下载日志中的「清理幻影 running 占坑」。`}</p>
+            )}
             <div className="silent-cache-controls downloader-config-controls">
               <label className="check-row"><input type="checkbox" checked={downloaderState.config?.enabled !== false} onChange={(e) => saveDownloaderConfig({ enabled: e.target.checked })} /><span>{downloaderState.config?.enabled !== false ? "Go 队列已启用" : "Go 队列已暂停"}</span></label>
               <label><span>Go 并发</span><select value={String(downloaderState.config?.concurrency || 1)} onChange={(e) => saveDownloaderConfig({ concurrency: Number(e.target.value) })}>
