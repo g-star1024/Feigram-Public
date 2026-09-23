@@ -598,21 +598,61 @@ func TestNativeFirstByteTimeoutSane(t *testing.T) {
 
 // 探测结论三分类：全通 / 全不通 / 部分放行，措辞必须可区分（不留空返回路径）。
 func TestMediaProbeSummaryCategories(t *testing.T) {
-	allOK := mediaProbeSummary(5, 5, nil, "经代理")
-	if !strings.Contains(allOK, "全部 5 个 DC") || !strings.Contains(allOK, "链路层正常") {
-		t.Fatalf("全通结论不符预期: %q", allOK)
+	// R4.31：结论以 MTProto 真握手为准。TCP 全绿但握手全挂 =
+	// 代理只本地接受连接（2.6.8 实测：五个 DC 1ms 全绿、下载 0 字节）。
+	results := func(build func(p *mediaDCProbe)) []mediaDCProbe {
+		out := make([]mediaDCProbe, 0, 5)
+		for dc := 1; dc <= 5; dc++ {
+			p := mediaDCProbe{DC: dc, Addr: "1.2.3.4:443", OK: true, DurationMs: 1, MTPOK: true}
+			build(&p)
+			out = append(out, p)
+		}
+		return out
 	}
-	noneOK := mediaProbeSummary(0, 5, []string{"1", "2", "3", "4", "5"}, "经代理")
-	if !strings.Contains(noneOK, "均不可达") || !strings.Contains(noneOK, "放行 Telegram 全部网段") {
-		t.Fatalf("全不通结论应指向代理放行问题: %q", noneOK)
+
+	allReal := mediaProbeSummary(results(func(p *mediaDCProbe) {}), "经代理")
+	if !strings.Contains(allReal, "全部 5 个 DC") || !strings.Contains(allReal, "真实可用") {
+		t.Fatalf("TCP+MTProto 全通结论不符预期: %q", allReal)
 	}
-	partial := mediaProbeSummary(2, 5, []string{"4", "5"}, "经代理")
-	if !strings.Contains(partial, "2/5") || !strings.Contains(partial, "DC 4/5") || !strings.Contains(partial, "部分 Telegram 网段") {
-		t.Fatalf("部分放行结论应列出不可达 DC: %q", partial)
+
+	localAccept := mediaProbeSummary(results(func(p *mediaDCProbe) { p.MTPOK = false; p.MTPError = "MTProto 握手未完成" }), "经代理")
+	if !strings.Contains(localAccept, "TCP 可连通但 MTProto 握手全部无响应") || !strings.Contains(localAccept, "本地接受") || !strings.Contains(localAccept, "全局模式") {
+		t.Fatalf("本地接受假阳性必须给出最强诊断与修法: %q", localAccept)
 	}
-	empty := mediaProbeSummary(0, 0, nil, "直连")
-	if !strings.Contains(empty, "无法分级探测") {
+
+	partial := mediaProbeSummary(results(func(p *mediaDCProbe) {
+		if p.DC >= 4 {
+			p.MTPOK = false
+		}
+	}), "经代理")
+	if !strings.Contains(partial, "3/5") || !strings.Contains(partial, "DC 4/5") || !strings.Contains(partial, "补全代理规则") {
+		t.Fatalf("部分转发结论应列出握手失败 DC: %q", partial)
+	}
+
+	tcpFail := mediaProbeSummary(results(func(p *mediaDCProbe) { p.OK = false; p.Err = "dial error" }), "经代理")
+	if !strings.Contains(tcpFail, "均不可达") || !strings.Contains(tcpFail, "放行 Telegram 全部网段") {
+		t.Fatalf("TCP 全挂结论应指向代理放行问题: %q", tcpFail)
+	}
+
+	if empty := mediaProbeSummary(nil, "直连"); !strings.Contains(empty, "无法分级探测") {
 		t.Fatalf("空结果也必须给出结论: %q", empty)
+	}
+}
+
+// R4.31：mediaDCDiagnosis 纯函数四分类——下载错误里的诊断文案必须区分
+// 「TCP 即失败」「本地接受未转发」「TCP+握手均正常」三种世界。
+func TestMediaDCDiagnosisCategories(t *testing.T) {
+	fail := mediaDCDiagnosis(1, "149.154.175.53:443", false, false, 120, 0, "connect refused", "经代理")
+	if !strings.Contains(fail, "即失败") || !strings.Contains(fail, "MTProto 层尚未开始") {
+		t.Fatalf("TCP 即失败结论不符预期: %q", fail)
+	}
+	localAccept := mediaDCDiagnosis(1, "149.154.175.53:443", true, false, 1, 6000, "MTProto 握手未完成（超时或被对端断开）", "经代理")
+	if !strings.Contains(localAccept, "本地接受") || !strings.Contains(localAccept, "全局模式") {
+		t.Fatalf("本地接受结论必须直接给出修法: %q", localAccept)
+	}
+	realOK := mediaDCDiagnosis(5, "91.108.56.173:443", true, true, 2, 350, "", "经代理")
+	if !strings.Contains(realOK, "真实可用") || !strings.Contains(realOK, "转发质量") {
+		t.Fatalf("真握手正常结论不符预期: %q", realOK)
 	}
 }
 

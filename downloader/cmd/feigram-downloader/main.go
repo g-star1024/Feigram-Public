@@ -428,6 +428,15 @@ func (a *App) load() error {
 			task.RetryAfter = 0
 			task.Error = "2.6.5 修复刷新链路后自动复活，等待续传"
 		}
+		if task.Status == "error" && strings.Contains(task.Error, "DC_ID_INVALID") {
+			// R4.31：2.6.8 之前「export 授权导到账号主 DC」的 bug 会把媒体恰在
+			// 主 DC 的任务打成 DC_ID_INVALID 终态（2.6.8 实测截图：21:02 的
+			// 批量失败）；R4.30 主 DC 短路修复后这类错误不该再发生，落盘的
+			// 陈旧终态升级时自动复活续传。
+			task.Status = "queued"
+			task.RetryAfter = 0
+			task.Error = "2.6.9 修复媒体 DC 授权导出后自动复活，等待续传"
+		}
 		if task.Status != "downloading" && task.Status != "running" {
 			task.SpeedBps = 0
 		}
@@ -1299,8 +1308,12 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 		return nil
 	}
 	if fileDC > 0 {
+		// R4.31：先捕获目标 DC——switchToMediaDC 失败路径会把 fileDC 重置为 0，
+		// 之前直接打印 fileDC 恒为 0（2.6.8 实测「media DC 0 unavailable」的来源），
+		// 日志失去定位价值。
+		targetDC := fileDC
 		if err := switchToMediaDC(fileDC); err != nil {
-			log.Printf("task %s media DC %d unavailable, fallback current DC: %v", task.ID, fileDC, err)
+			log.Printf("task %s media DC %d unavailable, fallback current DC: %v", task.ID, targetDC, err)
 		}
 	}
 	download := func() error {
@@ -3767,6 +3780,9 @@ func transientSourceError(err error) bool {
 		// R4.30：peer 解析失败（找不到会话）不再一票终态——索引落盘 + 深翻分页后
 		// 大多数场景下一轮自愈就能命中；真退群/删频道的任务由重试上限兜底转终态。
 		"找不到会话",
+		// R4.31：DC_ID_INVALID 是 session 与 DC 状态不同步的授权层错误——
+		// 换个连接/重试常能自愈，不该一票终态（真实持续出现由重试上限兜底）。
+		"dc_id_invalid",
 	}
 	for _, marker := range markers {
 		if strings.Contains(text, marker) {

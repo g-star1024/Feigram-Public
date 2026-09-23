@@ -14,14 +14,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/gotd/td/telegram"
 	dcs "github.com/gotd/td/telegram/dcs"
 )
 
@@ -46,6 +49,11 @@ func primaryDCAddr(dcID int) string {
 
 // probeTelegramTCP 用当前出口（代理拨号器；未配置代理则直连）对 addr 做一次裸 TCP
 // 拨号，验证「代理 → Telegram DC」这一层是否可达。探测成功即关连接，不做任何握手。
+//
+// R4.31 警示：这个「成功」经代理时是假阳性——本地代理（127.0.0.1）接受
+// TCP 连接只需 1ms 级，并不代表它真的把流量转发到了 Telegram。2.6.8 实测
+// 五个 DC 全部「1ms 可连通」但下载 0 字节，就是代理只放行了主 DC 网段。
+// 因此 TCP 探测只能作为第一层，关键判定必须用 probeTelegramMTProto。
 func (a *App) probeTelegramTCP(addr string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -60,6 +68,45 @@ func (a *App) probeTelegramTCP(addr string, timeout time.Duration) error {
 	}
 	_ = conn.Close()
 	return nil
+}
+
+// mediaMTPProbeTimeout 单个媒体 DC 的 MTProto 握手探测超时。
+const mediaMTPProbeTimeout = 6 * time.Second
+
+// probeTelegramMTProto 对 dc 做一次真实 MTProto 密钥交换探测（走与下载完全相同的
+// 代理拨号器与生产 DC 地址表）。
+//
+// 为什么必须这一层：MTProto 握手是真实的 DH 密钥交换，需要 Telegram 服务端逐包
+// 应答——代理「本地接受」糊弄不过去。握手完成 = 该网段被真正转发。
+// 探测是匿名的：不携带任何账号会话、不做授权 RPC、不落会话存储，不会触发限流
+// （Telegram 对未授权握手不计数）。
+func (a *App) probeTelegramMTProto(dc int, timeout time.Duration) error {
+	if dc <= 0 {
+		return errors.New("MTProto 探测需要有效 DC 编号")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	opts := telegram.Options{
+		DC: dc,
+		Resolver: dcs.Plain(dcs.PlainOptions{
+			// dialer 为 nil 时 Plain 回落 net 直连，与 TCP 探测行为一致。
+			Dial: a.proxy.dialer(),
+		}),
+		NoUpdates: true,
+	}
+	// api id/hash 不参与 MTProto 握手，匿名探测无需真实凭据。
+	client := telegram.NewClient(1, "", opts)
+	var reached atomic.Bool
+	_ = client.Run(ctx, func(ctx context.Context) error {
+		// 回调进入即代表 TCP + MTProto 密钥交换全部完成；立即收工，不发起任何 RPC。
+		reached.Store(true)
+		cancel()
+		return nil
+	})
+	if reached.Load() {
+		return nil
+	}
+	return errors.New("MTProto 握手未完成（超时或被对端断开）")
 }
 
 // healthStageDiagnosis 依据分级探测结果解释 client.Run 的失败，返回更精确的错误描述。
@@ -106,12 +153,17 @@ const mediaProbeTimeout = 5 * time.Second
 const mediaProbeMaxDC = 5
 
 // mediaDCProbe 单个 DC 的探测结果。
+// R4.31：TCP 之外追加 MTProto 真握手——TCP 经代理可连通可能只是本地接受。
 type mediaDCProbe struct {
 	DC         int    `json:"dc"`
 	Addr       string `json:"addr"`
 	OK         bool   `json:"ok"`
 	DurationMs int64  `json:"durationMs"`
 	Err        string `json:"error,omitempty"`
+	// MTProto 真握手结果：仅在 TCP 可连通时探测（TCP 都不通的 DC 必然不可达）。
+	MTPOK       bool   `json:"mtpOk"`
+	MTPDuration int64  `json:"mtpMs"`
+	MTPError    string `json:"mtpError,omitempty"`
 }
 
 // mediaProbeSnapshot 一次全量媒体 DC 探测的快照（进 /api/state 诊断页）。
@@ -148,28 +200,29 @@ func (a *App) probeMediaDCs(account NativeAccount) mediaProbeSnapshot {
 			p := mediaDCProbe{DC: dc, Addr: addr, DurationMs: time.Since(start).Milliseconds()}
 			if err != nil {
 				p.Err = err.Error()
-			} else {
-				p.OK = true
+				results[i] = p
+				return
 			}
+			p.OK = true
+			// R4.31：TCP 可连通不代表转发正常（代理本地接受假阳性），
+			// 追加真实 MTProto 握手探测一锤定音。
+			mtpStart := time.Now()
+			if mtpErr := a.probeTelegramMTProto(dc, mediaMTPProbeTimeout); mtpErr != nil {
+				p.MTPError = mtpErr.Error()
+			} else {
+				p.MTPOK = true
+			}
+			p.MTPDuration = time.Since(mtpStart).Milliseconds()
 			results[i] = p
 		}(i, j.dc, j.addr)
 	}
 	wg.Wait()
 	snap.Results = results
-	okCount := 0
-	bad := make([]string, 0)
-	for _, r := range results {
-		if r.OK {
-			okCount++
-		} else {
-			bad = append(bad, strconv.Itoa(r.DC))
-		}
-	}
 	layer := "直连"
 	if snap.Proxy {
 		layer = "经代理"
 	}
-	snap.Summary = mediaProbeSummary(okCount, len(results), bad, layer)
+	snap.Summary = mediaProbeSummary(results, layer)
 	a.mu.Lock()
 	a.mediaProbes[key] = snap
 	a.mu.Unlock()
@@ -177,23 +230,49 @@ func (a *App) probeMediaDCs(account NativeAccount) mediaProbeSnapshot {
 	return snap
 }
 
-// mediaProbeSummary 依据探测结果生成可区分的三类结论（R4.22 铁律：不留「空返回」路径）。
-// 纯函数便于单测。
-func mediaProbeSummary(okCount, total int, bad []string, layer string) string {
-	switch {
-	case total == 0:
+// mediaProbeSummary 依据 TCP+MTProto 两层探测结果生成可区分结论（R4.22 铁律：
+// 不留「空返回」路径）。纯函数便于单测。
+//
+// R4.31 重构：入参改为完整结果切片——TCP「可连通」经代理是假阳性（本地接受），
+// 结论必须以 MTProto 真握手为准，四类措辞互斥可区分：
+//  1. TCP 全挂 → 出口链路故障（代理没放行）；
+//  2. TCP 通且 MTProto 全过 → 链路层真实可用；
+//  3. TCP 通但 MTProto 全挂 → 代理只本地接受、未真正转发（最强诊断，直接给修法）；
+//  4. 部分过 → 列出未转发网段。
+func mediaProbeSummary(results []mediaDCProbe, layer string) string {
+	total := len(results)
+	if total == 0 {
 		return "未能查到任何 DC 的生产地址，无法分级探测"
-	case okCount == total:
-		return fmt.Sprintf("全部 %d 个 DC 的 TCP 均可连通（%s）——链路层正常", okCount, layer)
-	case okCount == 0:
+	}
+	tcpOK, mtpOK := 0, 0
+	tcpBad, mtpBad := make([]string, 0), make([]string, 0)
+	for _, r := range results {
+		if !r.OK {
+			tcpBad = append(tcpBad, strconv.Itoa(r.DC))
+			continue
+		}
+		tcpOK++
+		if !r.MTPOK {
+			mtpBad = append(mtpBad, strconv.Itoa(r.DC))
+			continue
+		}
+		mtpOK++
+	}
+	switch {
+	case tcpOK == 0:
 		return fmt.Sprintf("全部 %d 个 DC 的 TCP 均不可达（%s）——代理/出口链路故障：请在代理规则放行 Telegram 全部网段", total, layer)
+	case mtpOK == tcpOK:
+		return fmt.Sprintf("全部 %d 个 DC 的 TCP 与 MTProto 真握手均正常（%s）——链路层真实可用", total, layer)
+	case mtpOK == 0:
+		return fmt.Sprintf("%d/%d 个 DC TCP 可连通但 MTProto 握手全部无响应（%s）——代理只是本地接受了连接，并未真正转发 Telegram 网段（规则未覆盖或节点黑洞）：请放行 Telegram 全部网段、改全局模式或更换节点", tcpOK, total, layer)
 	default:
-		return fmt.Sprintf("%d/%d 个 DC 可达（%s），不可达：DC %s——代理仅放行了部分 Telegram 网段，下载会持续失败，请放行全部媒体 DC",
-			okCount, total, layer, strings.Join(bad, "/"))
+		return fmt.Sprintf("%d/%d 个 DC 的 MTProto 握手正常（%s）；TCP 可连通但握手无响应：DC %s——这些网段未被真正转发，下载会持续失败，请补全代理规则或更换节点", mtpOK, total, layer, strings.Join(mtpBad, "/"))
 	}
 }
 
-// diagnoseMediaDC 对单个媒体 DC 快速探测并给出一句话结论（拼进下载错误文案）。
+// diagnoseMediaDC 对单个媒体 DC 做两层探测（TCP + MTProto 真握手）并给出一句
+// 结论（拼进下载错误文案）。R4.31：TCP 可连通不再直接判「链路层正常」——
+// 经代理时可能只是本地接受，必须以真实握手为准。
 func (a *App) diagnoseMediaDC(dc int) string {
 	if dc <= 0 {
 		return "未能确定媒体 DC，无法分级探测"
@@ -202,11 +281,42 @@ func (a *App) diagnoseMediaDC(dc int) string {
 	if addr == "" {
 		return fmt.Sprintf("未能查到媒体 DC %d 的生产地址，无法分级探测", dc)
 	}
-	start := time.Now()
-	err := a.probeTelegramTCP(addr, mediaProbeTimeout)
-	dur := time.Since(start).Milliseconds()
-	if err != nil {
-		return fmt.Sprintf("分级探测：TCP 拨号媒体 DC %d（%s）即失败（%d ms）——问题在出口链路（代理未放行媒体网段或节点故障），MTProto 层尚未开始", dc, addr, dur)
+	layer := "直连"
+	if a.proxy.dialer() != nil {
+		layer = "经代理"
 	}
-	return fmt.Sprintf("分级探测：媒体 DC %d（%s）TCP 可连通（%d ms）——链路层正常，问题多在节点转发质量（丢包/限速），建议更换节点", dc, addr, dur)
+	start := time.Now()
+	tcpErr := a.probeTelegramTCP(addr, mediaProbeTimeout)
+	tcpMs := time.Since(start).Milliseconds()
+	if tcpErr != nil {
+		return mediaDCDiagnosis(dc, addr, false, false, tcpMs, 0, tcpErr.Error(), layer)
+	}
+	mtpStart := time.Now()
+	mtpErr := a.probeTelegramMTProto(dc, mediaMTPProbeTimeout)
+	mtpMs := time.Since(mtpStart).Milliseconds()
+	mtpErrMsg := ""
+	if mtpErr != nil {
+		mtpErrMsg = mtpErr.Error()
+	}
+	return mediaDCDiagnosis(dc, addr, true, mtpErr == nil, tcpMs, mtpMs, mtpErrMsg, layer)
+}
+
+// mediaDCDiagnosis 依据两层探测结果生成下载错误里的诊断文案。纯函数便于单测。
+func mediaDCDiagnosis(dc int, addr string, tcpOK, mtpOK bool, tcpMs, mtpMs int64, errText, layer string) string {
+	if addr == "" {
+		return fmt.Sprintf("未能查到媒体 DC %d 的生产地址，无法分级探测", dc)
+	}
+	if !tcpOK {
+		return fmt.Sprintf(
+			"分级探测：TCP 拨号媒体 DC %d（%s）即失败（%s，%d ms）——问题在%s出口链路（代理未放行媒体网段或节点故障），MTProto 层尚未开始",
+			dc, addr, errText, tcpMs, layer)
+	}
+	if !mtpOK {
+		return fmt.Sprintf(
+			"分级探测：媒体 DC %d（%s）TCP 可连通（%d ms）但 MTProto 握手无响应（%s，%d ms）——经代理时 TCP 连通可能只是代理本地接受连接，实际并未转发到 Telegram（规则未覆盖或节点黑洞）：请在代理放行 Telegram 全部网段、改全局模式或更换节点",
+			dc, addr, tcpMs, errText, mtpMs)
+	}
+	return fmt.Sprintf(
+		"分级探测：媒体 DC %d（%s）TCP + MTProto 真握手均正常（TCP %d ms / 握手 %d ms，%s）——链路层真实可用，问题多在节点转发质量（丢包/限速），建议更换节点",
+		dc, addr, tcpMs, mtpMs, layer)
 }

@@ -1036,7 +1036,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
                   {Array.isArray(probe.results) && probe.results.length
                     ? probe.results.map((r) => (
                       <span key={r.dc} style={{ marginRight: 12 }}>
-                        {`DC${r.dc} ${r.ok ? "✓" : "✗"}${r.durationMs != null ? ` ${r.durationMs}ms` : ""}`}
+                        {`DC${r.dc} ${r.ok ? "✓" : "✗"}${r.durationMs != null ? ` ${r.durationMs}ms` : ""}${r.ok && r.mtpOk === true ? " · MT握手✓" : r.ok && r.mtpOk === false ? " · MT握手✗(未真正转发)" : ""}`}
                       </span>
                     ))
                     : "暂无明细"}

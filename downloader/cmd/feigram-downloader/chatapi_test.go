@@ -306,6 +306,10 @@ func TestTransientSourceErrorPeerResolution(t *testing.T) {
 	if !transientSourceError(err) {
 		t.Fatal("peer 解析失败应按瞬态处理，自动续传")
 	}
+	// R4.31：DC_ID_INVALID 是授权层不同步，重试常能自愈，不得一票终态。
+	if !transientSourceError(errors.New("DC_ID_INVALID: 媒体 DC 授权导出被拒：connect Telegram media DC 5: export auth to 5: rpc error code 400: DC_ID_INVALID")) {
+		t.Fatal("DC_ID_INVALID 应按瞬态处理，自动续传")
+	}
 	if transientSourceError(errors.New("invalid native channel id: parsing \"\"")) {
 		t.Fatal("非瞬态错误不应被误判")
 	}
