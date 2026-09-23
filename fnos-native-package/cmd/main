@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.5.5"
-export APP_CHANGELOG="健康检查分级探测：区分代理链路不通与 MTProto 层卡死"
+export APP_VERSION="2.5.6"
+export APP_CHANGELOG="启动即补检：升级后诊断结论秒级可见"
 export NODE_ENV="production"
 
 is_running() {

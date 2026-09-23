@@ -14,6 +14,17 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.5.6",
+    title: "Feigram 2.5.6 更新",
+    version: "2.5.6",
+    level: "success",
+    createdAt: "2026-09-23T05:57:22.000Z",
+    body: [
+"- 启动即对「有会话但未就绪」的账号自动补跑健康检查（原先要等 30 分钟巡检或 3 分钟访问冷却）",
+      "- 升级/重启后新版诊断（分级探测结论）秒级可见，不再先看到旧版落盘的错误信息"
+    ].join("\n")
+  },
+  {
     id: "release-2.5.5",
     title: "Feigram 2.5.5 更新",
     version: "2.5.5",
@@ -59,16 +70,6 @@ const announcements = [
 "修复：健康检查分级——session 授权成功即账号可用，媒体抽样失败（如 DC_ID_INVALID）不再把账号打成 failed 堵死会话列表",
       "优化：DC_ID_INVALID 映射为可读提示（媒体 DC 授权导出被拒，账号本身可用）",
       "修复：基础检查通过也推进 Ready 恢复计数，此前「无媒体可抽/抽样失败」的账号永远无法恢复就绪"
-    ].join("\n")
-  },
-  {
-    id: "release-2.5.1",
-    title: "Feigram 2.5.1 更新",
-    version: "2.5.1",
-    level: "success",
-    createdAt: "2026-09-23T02:53:44.000Z",
-    body: [
-"修复：「尚未就绪（failed）」错误现在会附带健康检查的真实失败原因（如代理连不通/DC 超时），不再只有状态词"
     ].join("\n")
   },
 ];
