@@ -2200,6 +2200,29 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
+	// R4.20：分级探测——先用与 MTProto 相同的代理出口对账号主 DC 做一次裸 TCP 拨号，
+	// 把「代理链路不通」与「MTProto 握手/授权卡死」拆开，避免笼统的
+	// context deadline exceeded 让用户无从下手（2.5.3/2.5.4 实测缺口）。
+	probeDC := a.nativePrimaryDC(account.UserID, account.AccountID)
+	probeAddr := primaryDCAddr(probeDC)
+	probeOK := false
+	var probeErr error
+	probeDur := time.Duration(0)
+	if probeAddr != "" {
+		probeStart := time.Now()
+		probeErr = a.probeTelegramTCP(probeAddr, healthProbeTimeout)
+		probeOK = probeErr == nil
+		probeDur = time.Since(probeStart)
+		proxyDesc := "直连"
+		if a.proxy.dialer() != nil {
+			proxyDesc = "经代理"
+		}
+		if probeOK {
+			log.Printf("health probe: TCP %s (DC %d) OK %s，耗时 %s", probeAddr, probeDC, proxyDesc, probeDur)
+		} else {
+			log.Printf("health probe: TCP %s (DC %d) FAILED %s，耗时 %s：%v", probeAddr, probeDC, proxyDesc, probeDur, probeErr)
+		}
+	}
 	// R4.17：健康检查分级——Auth().Status（真实授权 RPC）成功即账号可用；
 	// 媒体抽样失败（如 DC_ID_INVALID / 媒体 DC 连不上）只降级记录原因，
 	// 不再把整个账号打成 failed 堵死会话列表（2.5.1 实测案例）。
@@ -2257,7 +2280,10 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 			account.Status = "failed"
 		}
 		account.Error = compactError(err)
-		if hint := networkHintFor(err, a.proxy.dialer() != nil); hint != "" && !strings.Contains(account.Error, hint) {
+		// R4.20：优先给出分级探测的精确结论（哪一层不通），比通用网络提示更可操作。
+		if diag := healthStageDiagnosis(probeDC, probeAddr, probeOK, probeDur, probeErr, err, a.proxy.dialer() != nil); diag != "" {
+			account.Error = diag + "；原始错误：" + account.Error
+		} else if hint := networkHintFor(err, a.proxy.dialer() != nil); hint != "" && !strings.Contains(account.Error, hint) {
 			// 连不上 DC 时把「是不是没代理」讲清楚，避免用户只看超时无从下手。
 			account.Error = account.Error + " —— " + hint
 		}
