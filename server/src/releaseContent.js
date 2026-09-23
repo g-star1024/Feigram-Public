@@ -14,6 +14,20 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.2",
+    title: "Feigram 2.6.2 更新",
+    version: "2.6.2",
+    level: "success",
+    createdAt: "2026-09-23T07:35:00.000Z",
+    body: [
+"### R4.24 会话侧栏：文件夹竖排图标栏",
+      "- 文件夹切换改回**左侧竖排图标栏**（类 Telegram 布局）：只占 64px 宽，",
+      "图标 + 未读角标，悬停/长按显示文件夹名，一键切换。",
+      "- 文件夹再多也不挤压会话列表，横向不再滚动换行。",
+      "- 承接 2.6.1：下载/后台缓存自环修复、账号卡与设置页简化。"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.1",
     title: "Feigram 2.6.1 更新",
     version: "2.6.1",
