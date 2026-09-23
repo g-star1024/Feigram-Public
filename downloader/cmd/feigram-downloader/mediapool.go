@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -31,13 +32,49 @@ import (
 const mediaConnStartTimeout = 45 * time.Second
 
 type mediaConn struct {
-	key       string
-	client    *telegram.Client
-	cancel    context.CancelFunc
-	ready     chan struct{} // Run 回调已进入（连接 + 握手 + session 加载完成）后关闭
-	done      chan error    // 缓冲 1：Run 退出原因
-	session   string        // 创建时的 session 原文（内存内比较指纹），换 session 即重建
-	createdAt time.Time
+	key         string
+	client      *telegram.Client
+	cancel      context.CancelFunc
+	ready       chan struct{} // Run 回调已进入（连接 + 握手 + session 加载完成）后关闭
+	done        chan error    // 缓冲 1：Run 退出原因
+	session     string        // 创建时的 session 原文（内存内比较指纹），换 session 即重建
+	fingerprint string        // R4.30：AuthKeyID 认证指纹——区分「回写」与「重新登录」
+	createdAt   time.Time
+}
+
+// refreshConnIdentity 在连接就绪后用「当前落库 session」刷新连接的指纹与快照。
+// 背景（R4.30）：常驻连接与主连接/健康检查共用同一 nativeSessionStorage，连接
+// 握手成功时 gotd 会把新盐值的 session 回写进账号——若一直用创建时的快照比对，
+// 连接会被自己的回写「打失效」，下次 acquire 误判重新登录而重建
+// （2.6.7 实测：常驻连接存活 3 秒即被重建）。就绪后以最新落库值为准：
+// AuthKeyID 没变（只是盐值/心跳回写）就不重建。
+func (a *App) refreshConnIdentity(conn *mediaConn) {
+	a.mu.Lock()
+	account := a.native[conn.key]
+	latest := ""
+	if account != nil {
+		latest = account.Session
+	}
+	a.mu.Unlock()
+	if latest == "" {
+		return
+	}
+	conn.session = latest
+	if fp := a.sessionFingerprint(latest); fp != "" {
+		conn.fingerprint = fp
+	}
+}
+
+// mediaSessionChanged 判断账号 session 是否已更换到需要重建连接的程度。
+// R4.30：优先比 AuthKeyID 指纹（两侧都能解析时）；任一侧解析失败退回逐字节
+// 比较，保持旧行为不弱化安全性。
+func (a *App) mediaSessionChanged(conn *mediaConn, accountSession string) bool {
+	connFP := conn.fingerprint
+	accountFP := a.sessionFingerprint(accountSession)
+	if connFP != "" && accountFP != "" {
+		return connFP != accountFP
+	}
+	return conn.session != accountSession
 }
 
 // acquireMediaConn 取（或建立）账号的常驻 MTProto 连接。
@@ -55,14 +92,16 @@ func (a *App) acquireMediaConn(account NativeAccount, apiHash string) (*mediaCon
 		default:
 		}
 	}
-	if conn := a.mediaConns[key]; conn != nil && conn.session != account.Session {
+	if conn := a.mediaConns[key]; conn != nil && a.mediaSessionChanged(conn, account.Session) {
 		// R4.29 自愈：重新登录后 session 变化，旧连接的授权已失效，必须重建。
+		// R4.30：判定改走 AuthKeyID 指纹——盐值级回写不再触发重建。
 		log.Printf("media pool: account %s session 已更换（重新登录），重建常驻连接", key)
 		a.dropMediaConnLocked(key)
 	}
 	if conn := a.mediaConns[key]; conn != nil {
 		select {
 		case <-conn.ready:
+			a.refreshConnIdentity(conn)
 			return conn, nil
 		case err := <-conn.done:
 			delete(a.mediaConns, key)
@@ -79,13 +118,14 @@ func (a *App) acquireMediaConn(account NativeAccount, apiHash string) (*mediaCon
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	conn := &mediaConn{
-		key:       key,
-		client:    client,
-		cancel:    cancel,
-		ready:     make(chan struct{}),
-		done:      make(chan error, 1),
-		session:   account.Session,
-		createdAt: time.Now(),
+		key:         key,
+		client:      client,
+		cancel:      cancel,
+		ready:       make(chan struct{}),
+		done:        make(chan error, 1),
+		session:     account.Session,
+		fingerprint: a.sessionFingerprint(account.Session),
+		createdAt:   time.Now(),
 	}
 	a.mediaConns[key] = conn
 	go func() {
@@ -99,7 +139,8 @@ func (a *App) acquireMediaConn(account NativeAccount, apiHash string) (*mediaCon
 	}()
 	select {
 	case <-conn.ready:
-		log.Printf("media pool: account %s 常驻连接已建立（耗时 %s）", key, time.Since(conn.createdAt).Round(time.Millisecond))
+		a.refreshConnIdentity(conn)
+		log.Printf("media pool: account %s 常驻连接已建立（耗时 %s，会话指纹 %s）", key, time.Since(conn.createdAt).Round(time.Millisecond), fingerprintPreview(conn.fingerprint))
 		return conn, nil
 	case err := <-conn.done:
 		delete(a.mediaConns, key)
@@ -108,6 +149,14 @@ func (a *App) acquireMediaConn(account NativeAccount, apiHash string) (*mediaCon
 		a.dropMediaConnLocked(key)
 		return nil, errors.New("媒体连接建立超时（45 秒）：请检查代理是否放行 Telegram")
 	}
+}
+
+// fingerprintPreview 指纹日志预览：只取前 8 字节十六进制，避免整段 AuthKeyID 进日志。
+func fingerprintPreview(fp string) string {
+	if fp == "" {
+		return "(空)"
+	}
+	return hex.EncodeToString([]byte(fp))[:16]
 }
 
 // dropMediaConnLocked 回收常驻连接（调用方须持 a.mediaMu）。不等待 goroutine 退出：

@@ -340,6 +340,9 @@ func main() {
 	if err := app.load(); err != nil {
 		log.Printf("load store: %v", err)
 	}
+	// R4.30：peer 索引落盘（路径绑定 + 历史恢复）。必须在任何会话/下载活动之前，
+	// 让 file_reference 自愈在重启后直接命中上次解析过的频道。
+	initNativePeerIndexStore(dataDir)
 	if _, reason := app.proxy.apply(app.config.ProxyURL); reason != "" {
 		log.Printf("网络代理配置无效：%s", reason)
 	}
@@ -712,9 +715,10 @@ func (a *App) pumpOnce() bool {
 		}
 	}
 	for _, task := range tasksSnapshot {
-		if len(a.running) >= limit {
-			break
-		}
+		// R4.30：并发坑满不再 break——break 会跳过后续任务的「等待原因可见化」
+		//（R4.22/R4.29 的可见化契约被随机顺序偶发打破：listTasksLocked 按
+		// CreatedAt+稳定序排，同一秒创建的任务顺序取决于 map 遍历序）。改为
+		// 继续遍历：让路/冷却/缺路径等原因照常写入，仅在真正 spawn 前拦截。
 		if task.Status != "queued" {
 			continue
 		}
@@ -790,6 +794,10 @@ func (a *App) pumpOnce() bool {
 					saveNeeded = true
 				}
 			}
+			continue
+		}
+		// R4.30：并发坑满只拦 spawn，不拦等待原因写入（见循环头注释）。
+		if len(a.running) >= limit {
 			continue
 		}
 		cancel := make(chan struct{})
@@ -1469,9 +1477,11 @@ func (a *App) refreshNativeFileLocationFromTelegram(ctx context.Context, api *tg
 	// 「消息发送者」贫信息缓存会把它丢成空串——此前刷新直接失败，最终以
 	// 「metadata refresh url is empty」终态收场。现在先经 resolveNativePeer
 	// （本地 peer 索引 + 必要时回拉一次会话列表）自愈补全，再刷新消息元数据。
+	// R4.30：自愈超时 45s→90s——未命中首批会话时会深翻分页（最多 12 轮 RPC），
+	// 代理链路下 45s 可能不够走完全程。
 	if strings.TrimSpace(peer.Type) == "" ||
 		(strings.EqualFold(strings.TrimSpace(peer.Type), "channel") && strings.TrimSpace(peer.AccessHash) == "") {
-		healCtx, healCancel := context.WithTimeout(ctx, 45*time.Second)
+		healCtx, healCancel := context.WithTimeout(ctx, 90*time.Second)
 		healed, healErr := a.resolveNativePeer(healCtx, api, account, task.PeerID)
 		healCancel()
 		if healErr != nil {
@@ -2557,10 +2567,17 @@ func (a *App) nativeAccountSnapshotLocked(userID, accountID string) (NativeAccou
 // 对「导出到当前主 DC」直接返回 DC_ID_INVALID——媒体恰在主 DC 上时（2.5.2 实测
 // 账号主 DC 5、抽样媒体也在 DC 5）必须复用主连接，不建池、不导出。
 //
+// R4.30：解析格式修正。gotd 的 session.Loader 落库的是嵌套包装
+// {"Version":1,"Data":{"DC":N,...}}（见 gotd session.Loader.Save 的 jsonData），
+// 此前按顶层 {"DC":N} 解析在生产环境恒得 0——健康探测全部跳过、R4.18 的
+// 「媒体 DC == 主 DC 复用主连接」短路从未生效，2.6.7 实测复现 DC_ID_INVALID
+// （export 到自己）与无谓的媒体 DC export FLOOD_WAIT。R4.18 的单测用手工平铺
+// JSON 通过了，属于「测试夹具与生产数据形状不一致」——现已同时兼容两种形状，
+// 并把单测改成用 gotd 真实嵌套形状构造。
+//
 // 判据为何可靠：落库 session 由 nativeSessionStorage（gotd 的会话回写回调）维护，
-// 登录迁移/网络迁移后 gotd 会把当前 DC 回写进来；而媒体池的连接用
-// pool.NewSyncSession 另建会话，且 client.opts（mtproto.Options）不含 SessionStorage，
-// 不会回写本存储——故此处读到的 DC 恒等于主连接的 DC，不会因建媒体池而漂移。
+// 登录迁移/网络迁移后 gotd 会把当前 DC 回写进来；而媒体池连接的指纹比对只取
+// AuthKeyID（见 sessionFingerprint），不会因回写盐值变化而误判换会话。
 func (a *App) nativePrimaryDC(userID, accountID string) int {
 	a.mu.Lock()
 	account := a.native[nativeAccountKey(userID, accountID)]
@@ -2576,13 +2593,46 @@ func (a *App) nativePrimaryDC(userID, accountID string) int {
 	if err != nil {
 		return 0
 	}
-	var data struct {
-		DC int `json:"DC"`
+	var payload struct {
+		DC   int `json:"DC"`
+		Data struct {
+			DC int `json:"DC"`
+		} `json:"Data"`
 	}
-	if json.Unmarshal(raw, &data) != nil {
+	if json.Unmarshal(raw, &payload) != nil {
 		return 0
 	}
-	return data.DC
+	if payload.Data.DC > 0 {
+		return payload.Data.DC
+	}
+	return payload.DC
+}
+
+// sessionFingerprint 提取会话的认证指纹（AuthKeyID，同一 AUTH_KEY 恒定不变）。
+// 用途（R4.30）：媒体池常驻连接与主连接/健康检查共用同一 nativeSessionStorage，
+// 任何一方 connect 握手成功都会回写 session（盐值/Salt 每次都变）——若按整个
+// session 逐字节比对，常驻连接会在「自己回写之后」被下一次 acquire 误判成
+// 「重新登录」而重建（2.6.7 实测：常驻连接存活 3 秒即被重建）。改比 AuthKeyID：
+// 只有真正重新登录（新 AUTH_KEY）指纹才会变化。
+// 解析失败返回 ""，调用方退回逐字节比较保持旧行为。
+func (a *App) sessionFingerprint(encoded string) string {
+	raw, err := a.decryptNativeSession(encoded)
+	if err != nil {
+		return ""
+	}
+	var payload struct {
+		AuthKeyID []byte `json:"AuthKeyID"`
+		Data      struct {
+			AuthKeyID []byte `json:"AuthKeyID"`
+		} `json:"Data"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return ""
+	}
+	if len(payload.Data.AuthKeyID) > 0 {
+		return string(payload.Data.AuthKeyID)
+	}
+	return string(payload.AuthKeyID)
 }
 
 func (a *App) newTelegramClient(account NativeAccount, apiHash string) (*telegram.Client, error) {
@@ -3714,6 +3764,9 @@ func transientSourceError(err error) bool {
 		"flood_wait",
 		"dc_migrate",
 		"_migrate",
+		// R4.30：peer 解析失败（找不到会话）不再一票终态——索引落盘 + 深翻分页后
+		// 大多数场景下一轮自愈就能命中；真退群/删频道的任务由重试上限兜底转终态。
+		"找不到会话",
 	}
 	for _, marker := range markers {
 		if strings.Contains(text, marker) {

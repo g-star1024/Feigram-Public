@@ -19,11 +19,14 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,7 +65,71 @@ type nativePeerInfo struct {
 var (
 	nativePeerIndexMu sync.Mutex
 	nativePeerIndex   = map[string]map[string]nativePeerInfo{}
+	// R4.30：peer 索引落盘路径。空表示未初始化（单元测试），不读写磁盘。
+	nativePeerIndexFile string
 )
+
+// initNativePeerIndexStore 绑定落盘路径并加载历史索引。
+// R4.30：peer 索引此前是纯内存结构，服务重启即清空——下载任务刷新
+// file_reference 时找不到频道 accessHash（会话深翻也未必救得回来），
+// 表现为「找不到会话 Channel:xxx」终态失败。现在索引随更新写盘、启动加载。
+func initNativePeerIndexStore(dataDir string) {
+	nativePeerIndexMu.Lock()
+	defer nativePeerIndexMu.Unlock()
+	nativePeerIndexFile = filepath.Join(dataDir, "native-peer-index.json")
+	raw, err := os.ReadFile(nativePeerIndexFile)
+	if err != nil {
+		return // 首次启动无文件属正常
+	}
+	var stored map[string]map[string]nativePeerInfo
+	if json.Unmarshal(raw, &stored) != nil {
+		log.Printf("native peer index 文件损坏，忽略重建：%s", nativePeerIndexFile)
+		return
+	}
+	for key, entries := range stored {
+		current := nativePeerIndex[key]
+		if current == nil {
+			current = map[string]nativePeerInfo{}
+			nativePeerIndex[key] = current
+		}
+		for id, info := range entries {
+			current[id] = info
+		}
+	}
+	total := 0
+	for _, entries := range nativePeerIndex {
+		total += len(entries)
+	}
+	log.Printf("native peer index 已从磁盘恢复（%d 个账号，%d 个 peer）", len(stored), total)
+}
+
+// persistNativePeerIndexLocked 把内存索引快照写盘（调用方须持 nativePeerIndexMu）。
+// 原子写：临时文件 + rename，避免写一半崩溃留下损坏 JSON。
+func persistNativePeerIndexLocked() {
+	if nativePeerIndexFile == "" || len(nativePeerIndex) == 0 {
+		return
+	}
+	snapshot := make(map[string]map[string]nativePeerInfo, len(nativePeerIndex))
+	for key, entries := range nativePeerIndex {
+		inner := make(map[string]nativePeerInfo, len(entries))
+		for id, info := range entries {
+			inner[id] = info
+		}
+		snapshot[key] = inner
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		return
+	}
+	tmp := nativePeerIndexFile + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		log.Printf("native peer index 写盘失败：%v", err)
+		return
+	}
+	if err := os.Rename(tmp, nativePeerIndexFile); err != nil {
+		log.Printf("native peer index 落盘失败：%v", err)
+	}
+}
 
 func nativePeerIndexKey(userID, accountID string) string {
 	return nativeAccountKey(userID, accountID)
@@ -86,6 +153,7 @@ func storeNativePeerIndex(userID, accountID string, index map[string]nativePeerI
 		}
 		current[id] = info
 	}
+	persistNativePeerIndexLocked()
 }
 
 func loadNativePeerIndex(userID, accountID string) map[string]nativePeerInfo {
@@ -1144,6 +1212,68 @@ func serializeNativeMedia(message *tg.Message) map[string]any {
 
 // resolveNativePeer 把 "User:123" / "Chat:123" / "Channel:123" 解析为带 accessHash 的元数据。
 // accessHash 只能从 dialogs 返回的 entity 中获得，故本地索引未命中时回拉一次会话列表。
+// nativePeerBackfillRounds 深翻分页轮数上限：每轮 500 会话，6 轮 ≈ 3000/文件夹。
+const nativePeerBackfillRounds = 6
+
+// backfillNativePeerIndex 深翻会话列表分页，为 peer 索引补齐「不在首批 500 个
+// 会话」的频道/用户。R4.30：resolveNativePeer 此前只拉一次会话列表（上限 500），
+// 会话数超过上限的账号（实测存在）解析不到目标频道，file_reference 刷新以
+// 「找不到会话」终态失败。这里按 Telegram 标准分页（offset_peer + offset_id）
+// 逐轮后翻，每轮把拿到的 peers 并入索引并落盘——即使中途失败，已翻到的部分
+// 也保留。folder 0（主列表）与 folder 1（归档）各自翻满轮数。
+func (a *App) backfillNativePeerIndex(ctx context.Context, api *tg.Client, account NativeAccount) error {
+	for _, folderID := range []int{0, 1} {
+		var offsetPeer tg.InputPeerClass = &tg.InputPeerEmpty{}
+		offsetID := 0
+		for round := 0; round < nativePeerBackfillRounds; round++ {
+			request := &tg.MessagesGetDialogsRequest{
+				OffsetPeer: offsetPeer,
+				OffsetID:   offsetID,
+				Limit:      maxChatDialogLimit,
+			}
+			if folderID > 0 {
+				request.SetFolderID(folderID)
+			}
+			result, err := api.MessagesGetDialogs(ctx, request)
+			if err != nil {
+				return fmt.Errorf("深翻会话列表（folder %d 第 %d 轮）失败：%w", folderID, round+1, err)
+			}
+			dialogs, _, chats, users, ok := flattenNativeDialogs(result)
+			if !ok {
+				break
+			}
+			index := indexNativePeers(users, chats)
+			storeNativePeerIndex(account.UserID, account.AccountID, index)
+			if len(dialogs) < maxChatDialogLimit {
+				break // 本轮不满页：已到列表末尾
+			}
+			// 以最后一个会话构造下一轮 offset。找不到（类型异常/索引缺 accessHash）
+			// 就到此为止，避免盲目空翻。
+			var last *tg.Dialog
+			for _, entry := range dialogs {
+				if dialog, isDialog := entry.(*tg.Dialog); isDialog && dialog != nil {
+					last = dialog
+				}
+			}
+			if last == nil {
+				break
+			}
+			roundIndex := index
+			info, found := roundIndex[peerIDFromPeerClass(last.Peer)]
+			if !found {
+				break
+			}
+			nextPeer, peerErr := nativeInputPeerFromInfo(info)
+			if peerErr != nil {
+				break
+			}
+			offsetPeer = nextPeer
+			offsetID = last.TopMessage
+		}
+	}
+	return nil
+}
+
 func (a *App) resolveNativePeer(ctx context.Context, api *tg.Client, account NativeAccount, peerID string) (nativePeerInfo, error) {
 	peerID = strings.TrimSpace(peerID)
 	if peerID == "" {
@@ -1156,6 +1286,16 @@ func (a *App) resolveNativePeer(ctx context.Context, api *tg.Client, account Nat
 	}
 	if _, err := a.fetchNativeDialogs(ctx, api, account, maxChatDialogLimit, "", true); err != nil {
 		return nativePeerInfo{}, err
+	}
+	if index := loadNativePeerIndex(account.UserID, account.AccountID); len(index) > 0 {
+		if info, ok := index[peerID]; ok {
+			return info, nil
+		}
+	}
+	// R4.30：首批 500 会话没有目标 peer 时深翻分页（最多 6 轮/文件夹）。
+	// 深翻失败不阻断——已翻到的部分可能已包含目标，最后再查一次索引。
+	if err := a.backfillNativePeerIndex(ctx, api, account); err != nil {
+		log.Printf("chatapi: peer %s 深翻会话列表未完成：%v", peerID, err)
 	}
 	index := loadNativePeerIndex(account.UserID, account.AccountID)
 	if info, ok := index[peerID]; ok {

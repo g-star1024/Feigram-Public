@@ -4,6 +4,7 @@ package main
 // 这些函数是纯函数，可在无 Telegram 凭据的环境下离线验证（铁律 4 的「真实验证」）。
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/gotd/td/tg"
@@ -259,5 +260,53 @@ func TestFormatGroupedID(t *testing.T) {
 	}
 	if got := formatGroupedID(1234567890123); got != "1234567890123" {
 		t.Fatalf("unexpected grouped id: %q", got)
+	}
+}
+
+// R4.30：peer 索引必须落盘并在启动时恢复。此前索引是纯内存结构，服务重启即空，
+// 下载任务刷新 file_reference 时「找不到会话 Channel:xxx」终态失败。
+// 本用例验证：写入 → 落盘 → 清空内存 → 重新绑定路径加载 → 条目仍在。
+func TestNativePeerIndexPersistsAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+
+	// 隔离全局状态，避免污染其他用例。
+	nativePeerIndexMu.Lock()
+	savedFile, savedIndex := nativePeerIndexFile, nativePeerIndex
+	nativePeerIndex = map[string]map[string]nativePeerInfo{}
+	nativePeerIndexMu.Unlock()
+	defer func() {
+		nativePeerIndexMu.Lock()
+		nativePeerIndexFile, nativePeerIndex = savedFile, savedIndex
+		nativePeerIndexMu.Unlock()
+	}()
+
+	initNativePeerIndexStore(dir)
+	storeNativePeerIndex("u", "restart", map[string]nativePeerInfo{
+		"Channel:2052039292": {PeerID: "Channel:2052039292", Type: "channel", ID: "2052039292", AccessHash: "770077", Title: "Deep"},
+	})
+	if info, ok := loadNativePeerIndex("u", "restart")["Channel:2052039292"]; !ok || info.AccessHash != "770077" {
+		t.Fatalf("写入后应能立即命中：%+v", info)
+	}
+
+	// 模拟重启：清空内存 + 重新初始化（initNativePeerIndexStore 会从磁盘恢复）。
+	nativePeerIndexMu.Lock()
+	nativePeerIndex = map[string]map[string]nativePeerInfo{}
+	nativePeerIndexMu.Unlock()
+	initNativePeerIndexStore(dir)
+	info, ok := loadNativePeerIndex("u", "restart")["Channel:2052039292"]
+	if !ok || info.AccessHash != "770077" || info.Title != "Deep" {
+		t.Fatalf("重启后应从磁盘恢复 peer 索引，got %+v (ok=%v)", info, ok)
+	}
+}
+
+// R4.30：「找不到会话」的 peer 解析失败应视为瞬态错误（自动续传），
+// 而不是一票终态——索引落盘 + 深翻分页后，下一轮自愈大概率能命中。
+func TestTransientSourceErrorPeerResolution(t *testing.T) {
+	err := errors.New("file_reference 失效：自动刷新消息元数据失败：native peer 元数据缺失且自动解析失败：找不到会话 Channel:2052039292")
+	if !transientSourceError(err) {
+		t.Fatal("peer 解析失败应按瞬态处理，自动续传")
+	}
+	if transientSourceError(errors.New("invalid native channel id: parsing \"\"")) {
+		t.Fatal("非瞬态错误不应被误判")
 	}
 }
