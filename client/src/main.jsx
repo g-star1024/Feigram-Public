@@ -857,10 +857,6 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
                   {canAdmin && <small className={cx("native-status", native?.ready && "ready")}>
                     Go：{native?.ready ? "原生 session 健康" : native?.error || native?.status || "等待扫码迁移"}
                   </small>}
-                  {canAdmin && native?.sessionSet && <small>
-                    连续检查 {native.healthPasses || 0}/2
-                    {native.lastHealthBytes ? ` · ${formatBytes(native.lastHealthBytes)} · DC ${native.lastHealthDc || "-"} · ${native.lastHealthDurationMs || 0} ms` : ""}
-                  </small>}
                   {canAdmin && native?.sessionSet && <small className={cx("native-status", native.consecutiveFailures > 0 && "native-status--warn")}>
                     {native.consecutiveFailures > 0
                       ? `连续失败 ${native.consecutiveFailures} 次${native.lastSuccessAt ? ` · 最近成功 ${formatTime(native.lastSuccessAt)}` : " · 尚无成功记录"}`
@@ -1022,9 +1018,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
                   <strong>{item.displayName || item.phone || item.accountId}</strong>
                   <p>{item.ready ? "Go MTProto session 健康" : item.error || "等待 Go 重新登录生成原生 session"}</p>
                   <small>
-                    连续检查 {item.healthPasses || 0}/2
-                    {item.lastHealthBytes ? ` · ${formatBytes(item.lastHealthBytes)} · DC ${item.lastHealthDc || "-"} · ${item.lastHealthDurationMs || 0} ms` : ""}
-                    {item.consecutiveFailures > 0 ? ` · 连续失败 ${item.consecutiveFailures} 次${item.lastSuccessAt ? `（最近成功 ${formatTime(item.lastSuccessAt)}）` : ""}` : item.lastSuccessAt ? ` · 最近成功 ${formatTime(item.lastSuccessAt)}` : ""}
+                    {item.consecutiveFailures > 0 ? `连续失败 ${item.consecutiveFailures} 次${item.lastSuccessAt ? `（最近成功 ${formatTime(item.lastSuccessAt)}）` : ""}` : item.lastSuccessAt ? `最近成功 ${formatTime(item.lastSuccessAt)}` : ""}
                     {orphan ? " · 残留记录（无对应应用内账号）" : ""}
                   </small>
                 </div>

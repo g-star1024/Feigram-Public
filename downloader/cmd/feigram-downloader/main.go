@@ -134,25 +134,22 @@ type NativePeerLocation struct {
 }
 
 type NativeAccount struct {
-	UserID               string `json:"userId"`
-	AccountID            string `json:"accountId"`
-	Phone                string `json:"phone"`
-	DisplayName          string `json:"displayName"`
-	APIID                int    `json:"apiId"`
-	APIHash              string `json:"apiHash"`
-	Status               string `json:"status"`
-	Ready                bool   `json:"ready"`
-	Session              string `json:"session"`
-	Error                string `json:"error"`
-	HealthPasses         int    `json:"healthPasses"`
-	LastHealthBytes      int    `json:"lastHealthBytes"`
-	LastHealthDC         int    `json:"lastHealthDc"`
-	LastHealthDurationMS int64  `json:"lastHealthDurationMs"`
-	LastSuccessAt        string `json:"lastSuccessAt"`
-	ConsecutiveFailures  int    `json:"consecutiveFailures"`
-	CreatedAt            string `json:"createdAt"`
-	UpdatedAt            string `json:"updatedAt"`
-	CheckedAt            string `json:"checkedAt"`
+	UserID              string `json:"userId"`
+	AccountID           string `json:"accountId"`
+	Phone               string `json:"phone"`
+	DisplayName         string `json:"displayName"`
+	APIID               int    `json:"apiId"`
+	APIHash             string `json:"apiHash"`
+	Status              string `json:"status"`
+	Ready               bool   `json:"ready"`
+	Session             string `json:"session"`
+	Error               string `json:"error"`
+	HealthPasses        int    `json:"healthPasses"`
+	LastSuccessAt       string `json:"lastSuccessAt"`
+	ConsecutiveFailures int    `json:"consecutiveFailures"`
+	CreatedAt           string `json:"createdAt"`
+	UpdatedAt           string `json:"updatedAt"`
+	CheckedAt           string `json:"checkedAt"`
 }
 
 type NativeLogin struct {
@@ -348,11 +345,14 @@ func (a *App) load() error {
 			task.SpeedBps = 0
 			task.Error = "Go 下载服务重启，已等待续传"
 		}
-		if task.Status == "error" && strings.Contains(task.Error, "session 未就绪") && task.SourceURL != "" {
+		// R4.22：此前把「session 未就绪」的失败任务强行改写成 http-bridge 续传，
+		// 而那个「回退源」只会绕回同一个坏账号。现在改回默认传输、等账号恢复：
+		// 健康检查通过后由 pump 自动拉起，用户不需要理解「传输方式」这层概念。
+		if task.Status == "error" && strings.Contains(task.Error, "未就绪") {
 			task.Status = "queued"
-			task.Transport = "http-bridge"
+			task.Transport = ""
 			task.RetryAfter = 0
-			task.Error = "升级后已自动切换 HTTP 回退并等待续传"
+			task.Error = "账号未就绪，等待健康检查通过后自动续传"
 		}
 		if task.Status != "downloading" && task.Status != "running" {
 			task.SpeedBps = 0
@@ -444,20 +444,19 @@ func (a *App) pump() {
 
 // taskCanStartLocked 判定任务此刻是否具备启动条件（调用方须持 a.mu）。
 // 语义比 download() 的运行时处理**更严格一层**（提前止损，而非起了再失败）：
-//   - http-bridge：必须有可拉取的 SourceURL；
-//   - native-mtproto：账号 eligible；或账号不健康但带 SourceURL（运行时会自动回退 HTTP）。
+//   - http-bridge：必须有可拉取的 SourceURL（显式降级开关）；
+//   - native-mtproto：账号必须 eligible —— R4.22 起这是一票否决，
+//     不再用「带 SourceURL 就放行、运行时回退 HTTP」的方式放行坏账号任务（回退已移除）。
 //
-// 注意：download() 在「账号不可用 + 无 SourceURL」时仍会尝试 native（保留原行为），
-// 而调度层在此直接跳过不启动——坏账号任务不占并发坑，等账号恢复后自然可再跑。
+// 效果：坏账号任务留在 queued 并显示可读等待原因，不占并发坑；账号恢复后由
+// 下一轮 pump 自然拉起，无需用户手动重试。
 func (a *App) taskCanStartLocked(task *Task, transport string) bool {
 	switch transport {
 	case "http-bridge":
 		return task.SourceURL != ""
 	case "native-mtproto":
-		if account, ok := a.native[nativeAccountKey(task.UserID, task.AccountID)]; ok && nativeAccountEligible(*account) {
-			return true
-		}
-		return task.SourceURL != ""
+		account, ok := a.native[nativeAccountKey(task.UserID, task.AccountID)]
+		return ok && account != nil && nativeAccountEligible(*account)
 	default:
 		return false
 	}
@@ -476,8 +475,14 @@ func (a *App) taskWaitReasonLocked(task *Task, transport string) string {
 		if !ok || account == nil {
 			return "Telegram 账号记录不存在，请在账号管理中重新登录"
 		}
-		if !nativeAccountEligible(*account) && task.SourceURL == "" {
-			return "Telegram 账号尚未就绪（需重新登录或通过健康检查），下载将在账号恢复后自动继续"
+		if !nativeAccountEligible(*account) {
+			// R4.22：把账号自身的真实原因（健康检查诊断结论）一并带出，
+			// 用户不必再去翻服务端日志才知道卡在哪。
+			reason := strings.TrimSpace(account.Error)
+			if reason == "" {
+				reason = "等待健康检查通过"
+			}
+			return "Telegram 账号尚未就绪（" + reason + "），下载将在账号恢复后自动继续"
 		}
 	}
 	return ""
@@ -634,26 +639,40 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 
 var errCancelled = errors.New("cancelled")
 
+// errAccountNotReady 表示「账号此刻不可用」。它不是终态错误：调度层会等账号恢复后
+// 自动续传（见 transientSourceError），因此必须带上账号自身的真实原因。
+var errAccountNotReady = errors.New("Telegram 账号尚未就绪")
+
 func (a *App) download(task *Task, cancel <-chan struct{}) error {
 	switch a.taskTransport(*task) {
 	case "native-mtproto":
 		account, err := a.nativeAccountSnapshot(task.UserID, task.AccountID)
 		if err != nil || !nativeAccountEligible(account) {
-			if task.SourceURL != "" {
-				a.updateTask(task.ID, func(t *Task) {
-					t.Transport = "http-bridge"
-					t.Error = "Go 原生账号检查未通过，已自动切换 HTTP 回退"
-					t.UpdatedAt = now()
-				})
-				task.Transport = "http-bridge"
-				log.Printf("task %s native account unavailable, fallback to HTTP bridge", task.ID)
-				return a.downloadHTTPBridge(task, cancel)
-			}
+			// R4.22：账号不可用就直说，不再回退 HTTP 桥。
+			// 缘由：M4.1 已删除 Node 侧内部媒体桥，下载任务的 SourceURL 现在指向
+			// Go 自己的 blob 端点（见 server/src/telegramService.js 的 goBlobSourceUrl），
+			// 所谓「回退」只是绕回同一个坏账号，把真实原因二次包装成
+			// `source returned 404: {"error":"Go 原生账号 ... 尚未就绪..."}` 这种三层转述，
+			// 正是用户反馈「为什么这么复杂」的现场（2.5.6 实测日志）。
+			return accountNotReadyError(task, account, err)
 		}
 		return a.downloadNativeMTProto(task, cancel)
 	default:
 		return a.downloadHTTPBridge(task, cancel)
 	}
+}
+
+// accountNotReadyError 构造「账号未就绪」错误：直出账号记录里的真实原因
+// （通常是健康检查的诊断结论，如「分级探测：TCP 拨号即失败…」），并带上等待语义。
+func accountNotReadyError(task *Task, account NativeAccount, lookupErr error) error {
+	if lookupErr != nil {
+		return fmt.Errorf("%w（%s/%s）：%s", errAccountNotReady, task.UserID, task.AccountID, compactError(lookupErr))
+	}
+	reason := strings.TrimSpace(account.Error)
+	if reason == "" {
+		reason = "等待健康检查通过"
+	}
+	return fmt.Errorf("%w（%s），下载将在账号恢复后自动续传：%s", errAccountNotReady, coalesce(account.Status, "unknown"), reason)
 }
 
 // storageErrorHint 把下载目录权限错误翻译成可操作的提示（R4.19，2.5.3 实测反馈）：
@@ -1629,7 +1648,7 @@ func (a *App) stateLocked() map[string]any {
 		"readyAccountKeys": readyAccountKeys,
 		"requiredPasses":   2,
 		"status":           "needs-login",
-		"note":             "Go 原生 MTProto 需要扫码登录并连续通过 2 次真实 Telegram 文件健康检查。",
+		"note":             "Go 原生 MTProto 需扫码登录；登录后自动完成一次 Telegram 授权健康检查即就绪（R4.22 起不再需要多轮抽样验证）。",
 	}
 	if nativeReady {
 		native["status"] = "healthy"
@@ -1831,9 +1850,8 @@ func (a *App) upsertNativeAccountLocked(input NativeAccount) (NativeAccount, err
 	}
 	if input.Ready {
 		existing.Ready = true
-		if existing.HealthPasses < 2 {
-			existing.HealthPasses = 2
-		}
+		// R4.22：就绪即健康，不再用「通过次数」做二次门槛。
+		existing.HealthPasses = 2
 		existing.Status = "healthy"
 		existing.Error = ""
 	}
@@ -1950,23 +1968,20 @@ func normalizeTransport(value string) string {
 
 func publicNativeAccount(account NativeAccount) map[string]any {
 	return map[string]any{
-		"userId":               account.UserID,
-		"accountId":            account.AccountID,
-		"phone":                account.Phone,
-		"displayName":          account.DisplayName,
-		"apiId":                account.APIID,
-		"apiSet":               account.APIID > 0 && account.APIHash != "",
-		"status":               normalizeNativeStatus(account.Status, account.Ready),
-		"ready":                nativeAccountEligible(account),
-		"sessionSet":           account.Session != "",
-		"error":                account.Error,
-		"healthPasses":         account.HealthPasses,
-		"lastHealthBytes":      account.LastHealthBytes,
-		"lastHealthDc":         account.LastHealthDC,
-		"lastHealthDurationMs": account.LastHealthDurationMS,
-		"createdAt":            account.CreatedAt,
-		"updatedAt":            account.UpdatedAt,
-		"checkedAt":            account.CheckedAt,
+		"userId":       account.UserID,
+		"accountId":    account.AccountID,
+		"phone":        account.Phone,
+		"displayName":  account.DisplayName,
+		"apiId":        account.APIID,
+		"apiSet":       account.APIID > 0 && account.APIHash != "",
+		"status":       normalizeNativeStatus(account.Status, account.Ready),
+		"ready":        nativeAccountEligible(account),
+		"sessionSet":   account.Session != "",
+		"error":        account.Error,
+		"healthPasses": account.HealthPasses,
+		"createdAt":    account.CreatedAt,
+		"updatedAt":    account.UpdatedAt,
+		"checkedAt":    account.CheckedAt,
 	}
 }
 
@@ -2174,7 +2189,21 @@ func (a *App) newTelegramClient(account NativeAccount, apiHash string) (*telegra
 	return telegram.NewClient(account.APIID, apiHash, options), nil
 }
 
-func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
+func (a *App) nativeHealthCheck(account NativeAccount) (result NativeAccount, err error) {
+	// R4.22：健康检查的开始与结束都留日志。此前存在「拿不到主 DC 就静默跳过探测」
+	// 这类零输出路径——服务端日志里既没有 health probe 行、错误里也没有「分级探测：」
+	// 前缀，用户无法判断诊断到底跑没跑（2.5.6 实测就卡在这里）。
+	started := time.Now()
+	proxyDesc := "直连"
+	if a.proxy.dialer() != nil {
+		proxyDesc = "经代理"
+	}
+	log.Printf("health check start: %s/%s（status=%s，出口=%s）", account.UserID, account.AccountID, coalesce(account.Status, "unknown"), proxyDesc)
+	defer func() {
+		log.Printf("health check end: %s/%s status=%s ready=%v 耗时 %s",
+			account.UserID, account.AccountID, coalesce(result.Status, "unknown"), result.Ready,
+			time.Since(started).Round(time.Millisecond))
+	}()
 	account.CheckedAt = now()
 	if account.Session == "" {
 		account.Ready = false
@@ -2210,15 +2239,16 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 	probeOK := false
 	var probeErr error
 	probeDur := time.Duration(0)
-	if probeAddr != "" {
+	// R4.22：探测无论成功、失败还是「拿不到主 DC」都必须留下日志。
+	// 此前 DC 未知时整块静默跳过，日志里既无 health probe 行、错误里也无「分级探测：」
+	// 前缀，与「诊断功能没生效」无法区分（2.5.6 实测困惑点）。
+	if probeAddr == "" {
+		log.Printf("health probe: 跳过——无法确定 %s/%s 的主 DC（session 解析结果 %d）", account.UserID, account.AccountID, probeDC)
+	} else {
 		probeStart := time.Now()
 		probeErr = a.probeTelegramTCP(probeAddr, healthProbeTimeout)
 		probeOK = probeErr == nil
 		probeDur = time.Since(probeStart)
-		proxyDesc := "直连"
-		if a.proxy.dialer() != nil {
-			proxyDesc = "经代理"
-		}
 		if probeOK {
 			log.Printf("health probe: TCP %s (DC %d) OK %s，耗时 %s", probeAddr, probeDC, proxyDesc, probeDur)
 		} else {
@@ -2228,6 +2258,12 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 	// R4.17：健康检查分级——Auth().Status（真实授权 RPC）成功即账号可用；
 	// 媒体抽样失败（如 DC_ID_INVALID / 媒体 DC 连不上）只降级记录原因，
 	// 不再把整个账号打成 failed 堵死会话列表（2.5.1 实测案例）。
+	// R4.22 简化：健康检查只做一件事——确认授权可用。
+	// Auth().Status 是一次真实的 Telegram RPC，成功即同时证明「代理链路通 +
+	// MTProto 握手通 + session 有效」，这三件事正是用户唯一关心的。
+	// 原先在此之后还有一层「媒体抽样」（找缩略图、读 64KB、验证媒体池），
+	// 它自 R4.17 起已不参与健康判定，却制造了 DC_ID_INVALID 等大量假故障，
+	// 已整层删除；媒体层真出问题时，由下载任务的真实错误直接暴露。
 	err = client.Run(ctx, func(ctx context.Context) error {
 		status, err := client.Auth().Status(ctx)
 		if err != nil {
@@ -2235,40 +2271,6 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 		}
 		if !status.Authorized {
 			return errors.New("gotd session 未授权，请重新登录")
-		}
-		sampleFailed := ""
-		sample := a.nativeSampleTask(account.UserID, account.AccountID)
-		if sample != nil {
-			bytesRead, dc, duration, err := a.readNativeSample(ctx, client, *sample)
-			if err != nil {
-				sampleFailed = fmt.Sprintf("媒体抽样暂失败：%s", classifyNativeReadError(err))
-			} else {
-				account.LastHealthBytes = bytesRead
-				account.LastHealthDC = dc
-				account.LastHealthDurationMS = duration.Milliseconds()
-				account.Error = fmt.Sprintf("健康检查已从 Telegram DC %d 读取 %d 字节，耗时 %d ms", dc, bytesRead, duration.Milliseconds())
-			}
-		} else if location, sampleDC, found := a.findAutoSampleLocation(ctx, client); found {
-			// R4.1：没有缓存任务时自动找一个低体积媒体（缩略图）抽样，
-			// 让账号在登录后无需「先手动缓存视频」就能完成文件池验证。
-			bytesRead, dc, duration, err := a.readLocationSample(ctx, client, account, location, sampleDC)
-			if err != nil {
-				sampleFailed = fmt.Sprintf("媒体抽样暂失败：%s", classifyNativeReadError(err))
-			} else {
-				account.LastHealthBytes = bytesRead
-				account.LastHealthDC = dc
-				account.LastHealthDurationMS = duration.Milliseconds()
-				account.Error = fmt.Sprintf("健康检查已自动抽样 Telegram DC %d 媒体，读取 %d 字节，耗时 %d ms", dc, bytesRead, duration.Milliseconds())
-			}
-		} else {
-			// 最近会话里完全没有可抽样媒体：Auth().Status 已完成真实授权 RPC，
-			// 判基础检查通过，不标记失败；下次巡检时再尝试补抽样。
-			account.Error = "session 已授权（基础检查通过）；暂无可抽样媒体，文件池抽样将在后续巡检时自动补做"
-		}
-		if sampleFailed != "" {
-			// 授权 RPC 已成功，抽样/媒体 DC 层失败不影响会话与下载调度；
-			// 记下具体原因供诊断，后续巡检自动重试抽样。
-			account.Error = "session 已授权（基础检查通过）；" + sampleFailed + "。不影响会话列表与下载，将在后续巡检自动重试"
 		}
 		return nil
 	})
@@ -2293,91 +2295,17 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 		account.ConsecutiveFailures++
 		return a.saveNativeAccount(account)
 	}
-	// R4.11/R4.17：基础检查通过（含 lite 与抽样失败降级）即视为账号真实可用：
-	// 清零连续失败、记录最近成功时间，并推进 HealthPasses —— 此前 lite 保持 Ready 原样，
-	// 会让「无媒体可抽」或「抽样失败」的账号永远恢复不了 Ready（2.5.1 实测缺口）。
+	// R4.22：授权 RPC 通过即账号健康——不再要求「连续 2 次通过」。
+	// 旧口径下首次通过会把 HealthPasses 记成 1、Ready 仍为 false，而 Status 已是 healthy：
+	// 前端显示「健康」、下载却报「账号尚未就绪」，还要再等一轮巡检才真正可用。
+	// 这个自相矛盾的中间态正是用户反馈「为什么这么复杂」的一部分，已删除。
 	account.LastSuccessAt = now()
 	account.ConsecutiveFailures = 0
-	if account.Ready && account.HealthPasses == 0 {
-		account.HealthPasses = 2
-	} else {
-		account.HealthPasses++
-	}
-	account.Ready = account.HealthPasses >= 2
+	account.HealthPasses = 2 // 保持 nativeAccountEligible 既有门槛语义（>= 2）
+	account.Ready = true
 	account.Status = "healthy"
-	if account.Error == "" {
-		account.Error = "Go 原生 MTProto session 健康"
-	}
+	account.Error = "session 已授权（Telegram 授权 RPC 通过）"
 	return a.saveNativeAccount(account)
-}
-
-func (a *App) nativeSampleTask(userID, accountID string) *Task {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for _, task := range a.tasks {
-		if task.UserID == userID && task.AccountID == accountID && task.NativeFile.FileID != "" && task.NativeFile.AccessHash != "" && task.NativeFile.FileReference != "" {
-			copy := *task
-			return &copy
-		}
-	}
-	return nil
-}
-
-func (a *App) readNativeSample(ctx context.Context, client *telegram.Client, task Task) (int, int, time.Duration, error) {
-	started := time.Now()
-	metadataAPI := client.API()
-	if refreshed, err := a.refreshNativeFileLocationFromTelegram(ctx, metadataAPI, task); err == nil {
-		task.NativeFile = refreshed
-	} else if strings.Contains(err.Error(), "已被删除") {
-		return 0, 0, time.Since(started), err
-	}
-	file := task.NativeFile
-	fileID, err := strconv.ParseInt(file.FileID, 10, 64)
-	if err != nil {
-		return 0, file.DCID, time.Since(started), err
-	}
-	accessHash, err := strconv.ParseInt(file.AccessHash, 10, 64)
-	if err != nil {
-		return 0, file.DCID, time.Since(started), err
-	}
-	fileReference, err := base64.StdEncoding.DecodeString(file.FileReference)
-	if err != nil {
-		return 0, file.DCID, time.Since(started), err
-	}
-	fileAPI := metadataAPI
-	var mediaInvoker telegram.CloseInvoker
-	if file.DCID > 0 && file.DCID == a.nativePrimaryDC(task.UserID, task.AccountID) {
-		// R4.18：缓存任务抽样媒体恰在账号主 DC 上——建媒体池会让 gotd 对
-		// 「导出授权给自己」触发 Telegram 的 DC_ID_INVALID，直接复用主连接读取。
-		log.Printf("sample task %s media DC %d is primary, using primary connection for upload.getFile", task.ID, file.DCID)
-	} else if file.DCID > 0 {
-		mediaInvoker, err = client.MediaOnly(ctx, file.DCID, 1)
-		if err != nil {
-			return 0, file.DCID, time.Since(started), fmt.Errorf("connect Telegram media DC %d: %w", file.DCID, err)
-		}
-		defer mediaInvoker.Close()
-		fileAPI = tg.NewClient(mediaInvoker)
-	}
-	result, err := fileAPI.UploadGetFile(ctx, &tg.UploadGetFileRequest{
-		Location: &tg.InputDocumentFileLocation{
-			ID:            fileID,
-			AccessHash:    accessHash,
-			FileReference: fileReference,
-		},
-		Offset: 0,
-		Limit:  64 * 1024,
-	})
-	if err != nil {
-		return 0, file.DCID, time.Since(started), err
-	}
-	chunk, ok := result.(*tg.UploadFile)
-	if !ok {
-		return 0, file.DCID, time.Since(started), fmt.Errorf("健康检查收到不支持的 Telegram 文件响应：%T", result)
-	}
-	if len(chunk.Bytes) == 0 {
-		return 0, file.DCID, time.Since(started), errors.New("Telegram 文件健康检查返回空分片")
-	}
-	return len(chunk.Bytes), file.DCID, time.Since(started), nil
 }
 
 func (a *App) saveNativeAccount(account NativeAccount) (NativeAccount, error) {
@@ -2402,9 +2330,6 @@ func (a *App) saveNativeAccount(account NativeAccount) (NativeAccount, error) {
 	}
 	existing.Error = account.Error
 	existing.HealthPasses = account.HealthPasses
-	existing.LastHealthBytes = account.LastHealthBytes
-	existing.LastHealthDC = account.LastHealthDC
-	existing.LastHealthDurationMS = account.LastHealthDurationMS
 	existing.CheckedAt = account.CheckedAt
 	existing.UpdatedAt = now()
 	if err := a.saveNativeLocked(); err != nil {
@@ -2420,11 +2345,8 @@ func (a *App) finalizeNativeAuthorization(userID, accountID string) (NativeAccou
 		if account != nil && account.Session != "" {
 			account.Ready = false
 			account.HealthPasses = 0
-			account.LastHealthBytes = 0
-			account.LastHealthDC = 0
-			account.LastHealthDurationMS = 0
 			account.Status = "session-imported"
-			account.Error = "Go 原生账号已授权，请连续完成 2 次真实文件健康检查"
+			account.Error = "Go 原生账号已授权，等待一次授权健康检查通过即就绪"
 			account.CheckedAt = ""
 			account.UpdatedAt = now()
 			// R4.11：同手机号去重——登录入口（/api/auth/start、QR start）每次都由 Node
@@ -2655,9 +2577,6 @@ func (a *App) startNativeQRLogin(userID, accountID string, apiID int, apiHash st
 	account.Ready = false
 	account.Session = ""
 	account.HealthPasses = 0
-	account.LastHealthBytes = 0
-	account.LastHealthDC = 0
-	account.LastHealthDurationMS = 0
 	account.Status = "qr-waiting"
 	account.Error = ""
 	account.UpdatedAt = now()
@@ -3290,6 +3209,11 @@ func maxFloat(a, b float64) float64 {
 func transientSourceError(err error) bool {
 	if err == nil {
 		return false
+	}
+	// R4.22：账号未就绪不是「媒体源故障」，但同样要按瞬态处理——账号恢复后
+	// 任务必须能自动续传，而不是被记为终态错误、等用户手动重试。
+	if errors.Is(err, errAccountNotReady) {
+		return true
 	}
 	text := strings.ToLower(err.Error())
 	markers := []string{

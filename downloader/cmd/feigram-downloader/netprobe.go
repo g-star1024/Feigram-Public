@@ -59,11 +59,17 @@ func (a *App) probeTelegramTCP(addr string, timeout time.Duration) error {
 	return nil
 }
 
-// healthStageDiagnosis 依据分级探测结果解释 client.Run 的失败，返回更精确的错误描述；
-// 返回空串表示探测信息不足以细化（调用方沿用原错误与通用提示）。纯函数便于单测。
+// healthStageDiagnosis 依据分级探测结果解释 client.Run 的失败，返回更精确的错误描述。
+// 纯函数便于单测。
+//
+// R4.22：已不存在「返回空串 = 不给结论」的路径——探测被跳过（拿不到主 DC）也必须有
+// 明确措辞。此前 probeAddr 为空即返回空串，错误里因此没有「分级探测：」前缀，
+// 与「诊断功能根本没生效」无法区分（2.5.6 实测困惑点）。
 func healthStageDiagnosis(probeDC int, probeAddr string, probeOK bool, probeDur time.Duration, probeErr, runErr error, proxyActive bool) string {
 	if probeAddr == "" {
-		return ""
+		return fmt.Sprintf(
+			"分级探测：未能确定账号主 DC（session 解析结果 %d，无法查 gotd 生产地址表），TCP 分级探测已跳过——无法据此判定问题在出口链路还是 MTProto 层，请连同原始错误与代理配置一并反馈",
+			probeDC)
 	}
 	if !probeOK {
 		layer := "直连"

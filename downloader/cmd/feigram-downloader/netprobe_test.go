@@ -58,9 +58,15 @@ func TestHealthStageDiagnosis(t *testing.T) {
 		}
 	})
 
-	t.Run("未知DC→不给诊断", func(t *testing.T) {
-		if got := healthStageDiagnosis(0, "", false, time.Second, probeFail, deadlineErr, true); got != "" {
-			t.Fatalf("未知 DC 应返回空串，got %q", got)
+	// R4.22：拿不到主 DC 时探测被跳过，但结论不能为空——否则错误里没有
+	// 「分级探测：」前缀，与「诊断功能没生效」无法区分（2.5.6 实测困惑点）。
+	t.Run("未知DC→仍给出明确结论", func(t *testing.T) {
+		got := healthStageDiagnosis(0, "", false, time.Second, probeFail, deadlineErr, true)
+		if got == "" {
+			t.Fatal("未知 DC 也必须给出结论，不得返回空串")
+		}
+		if !strings.Contains(got, "分级探测") || !strings.Contains(got, "未能确定账号主 DC") {
+			t.Fatalf("应说明探测被跳过及其原因，got %q", got)
 		}
 	})
 }

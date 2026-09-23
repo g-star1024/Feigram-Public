@@ -88,13 +88,14 @@ func TestTaskCanStartLockedFiltersByAccountHealth(t *testing.T) {
 		t.Fatal("绑定坏账号、无 HTTP 源的任务不应启动")
 	}
 
-	// 坏账号但带 SourceURL：与 download() 运行时回退一致，应可启动（运行时回 HTTP）。
+	// R4.22：坏账号即使带 SourceURL 也不得启动——HTTP 回退已移除（回退源指向
+	// Go 自身的 blob 端点，只会绕回同一个坏账号），账号可用性是一票否决。
 	badWithHTTP := &Task{
 		ID: "t-bad2", UserID: "u", AccountID: "bad",
 		Transport: "native-mtproto", SourceURL: "https://example.test/v",
 	}
-	if !app.taskCanStartLocked(badWithHTTP, "native-mtproto") {
-		t.Fatal("坏账号但带 HTTP 回退源的任务应可启动")
+	if app.taskCanStartLocked(badWithHTTP, "native-mtproto") {
+		t.Fatal("坏账号任务不应启动（回退已移除，应等账号恢复）")
 	}
 
 	// http-bridge 无源不启动、有源可启动。
