@@ -2,7 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${VERSION:-2.6.2}"
+VERSION="${VERSION:-2.6.3}"
+# R4.25：导出给 prepare-go-downloader.sh，用于 -X main.version 注入 Go 二进制版本。
+export VERSION
 PKG_NAME="feigrampub-${VERSION}"
 RELEASE_DIR="${ROOT_DIR}/release"
 # 使用时间戳 staging 目录：staging 永远不会预先存在，从而无需对其执行批量删除。
