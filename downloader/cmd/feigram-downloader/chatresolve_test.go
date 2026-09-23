@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -65,5 +67,52 @@ func TestClassifyNativeReadErrorDCIDInvalid(t *testing.T) {
 	// 其他错误不受影响。
 	if got := classifyNativeReadError(errors.New("connection refused")).Error(); strings.Contains(got, "账号本身可用") {
 		t.Fatalf("普通网络错误不应命中 DC_ID_INVALID 提示，got %q", got)
+	}
+}
+
+// R4.18：nativePrimaryDC 应从落库的加密 session 中解析主 DC；
+// 无会话/解析失败时返回 0（未知），调用方据此保持既有 MediaOnly 行为。
+func TestNativePrimaryDC(t *testing.T) {
+	secretFile := filepath.Join(t.TempDir(), "native-secret")
+	if err := os.WriteFile(secretFile, []byte(strings.Repeat("ab", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FEIGRAM_DOWNLOADER_SECRET_FILE", secretFile)
+
+	app := &App{proxy: &proxyRuntime{}, native: map[string]*NativeAccount{}}
+
+	// 无会话 → 0。
+	if got := app.nativePrimaryDC("u", "none"); got != 0 {
+		t.Fatalf("无会话应返回 0，got %d", got)
+	}
+
+	// 加密落库 {"DC":5} → 解析为 5。
+	raw := []byte(`{"DC":5,"Addr":"149.154.171.5:443","AuthKey":"aGk=","AuthKeyID":"aGk=","Salt":1}`)
+	encoded, err := app.encryptNativeSession(raw)
+	if err != nil {
+		t.Fatalf("encryptNativeSession: %v", err)
+	}
+	// 注意：nativePrimaryDC 内部自持 a.mu，调用方不得再持锁（sync.Mutex 非重入，
+	// 否则本用例直接死锁）。
+	app.native[nativeAccountKey("u", "a")] = &NativeAccount{UserID: "u", AccountID: "a", Session: encoded}
+	if got := app.nativePrimaryDC("u", "a"); got != 5 {
+		t.Fatalf("应解析出主 DC 5，got %d", got)
+	}
+
+	// 另一个账号主 DC 为 4：调用方据此判定「媒体 DC 是否等于主 DC」。
+	raw4 := []byte(`{"DC":4,"Addr":"149.154.167.51:443","AuthKey":"aGk=","AuthKeyID":"aGk=","Salt":2}`)
+	encoded4, err := app.encryptNativeSession(raw4)
+	if err != nil {
+		t.Fatalf("encryptNativeSession: %v", err)
+	}
+	app.native[nativeAccountKey("u", "b")] = &NativeAccount{UserID: "u", AccountID: "b", Session: encoded4}
+	if got := app.nativePrimaryDC("u", "b"); got != 4 {
+		t.Fatalf("应解析出主 DC 4，got %d", got)
+	}
+
+	// 会话损坏 → 0（未知），调用方据此保持既有 MediaOnly 行为。
+	app.native[nativeAccountKey("u", "c")] = &NativeAccount{UserID: "u", AccountID: "c", Session: "garbage"}
+	if got := app.nativePrimaryDC("u", "c"); got != 0 {
+		t.Fatalf("损坏 session 应返回 0，got %d", got)
 	}
 }

@@ -850,6 +850,7 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 		metadataAPI := client.API()
 		fileAPI := metadataAPI
 		fileDC := task.NativeFile.DCID
+		primaryDC := a.nativePrimaryDC(task.UserID, task.AccountID)
 		var mediaInvoker telegram.CloseInvoker
 		closeMedia := func() {
 			if mediaInvoker != nil {
@@ -871,6 +872,16 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 				return nil
 			}
 			closeMedia()
+			// R4.18：目标 DC 就是账号主 DC 时不能走 MediaOnly 池——
+			// gotd 会 exportAuthorization(dc) 而 Telegram 对「导出到自己」返回
+			// DC_ID_INVALID；直接复用主连接。
+			if dc == primaryDC {
+				mediaInvoker = nil
+				fileAPI = metadataAPI
+				fileDC = dc
+				log.Printf("task %s media DC %d is primary, using primary connection for native upload.getFile", task.ID, dc)
+				return nil
+			}
 			invoker, err := client.MediaOnly(ctx, dc, 1)
 			if err != nil {
 				fileAPI = metadataAPI
@@ -2091,6 +2102,34 @@ func (a *App) nativeAccountSnapshotLocked(userID, accountID string) (NativeAccou
 	return *account, nil
 }
 
+// nativePrimaryDC 从落库的 gotd session 解析账号主 DC；0 表示未知或解析失败。
+// R4.18：gotd 的 MediaOnly/DC 池会无条件 exportAuthorization(dc)，而 Telegram
+// 对「导出到当前主 DC」直接返回 DC_ID_INVALID——媒体恰在主 DC 上时（2.5.2 实测
+// 账号主 DC 5、抽样媒体也在 DC 5）必须复用主连接，不建池、不导出。
+func (a *App) nativePrimaryDC(userID, accountID string) int {
+	a.mu.Lock()
+	account := a.native[nativeAccountKey(userID, accountID)]
+	encoded := ""
+	if account != nil {
+		encoded = account.Session
+	}
+	a.mu.Unlock()
+	if encoded == "" {
+		return 0
+	}
+	raw, err := a.decryptNativeSession(encoded)
+	if err != nil {
+		return 0
+	}
+	var data struct {
+		DC int `json:"DC"`
+	}
+	if json.Unmarshal(raw, &data) != nil {
+		return 0
+	}
+	return data.DC
+}
+
 func (a *App) newTelegramClient(account NativeAccount, apiHash string) (*telegram.Client, error) {
 	if account.APIID <= 0 || apiHash == "" {
 		return nil, errors.New("Go 原生 MTProto 缺少 API ID/Hash")
@@ -2168,7 +2207,7 @@ func (a *App) nativeHealthCheck(account NativeAccount) (NativeAccount, error) {
 		} else if location, sampleDC, found := a.findAutoSampleLocation(ctx, client); found {
 			// R4.1：没有缓存任务时自动找一个低体积媒体（缩略图）抽样，
 			// 让账号在登录后无需「先手动缓存视频」就能完成文件池验证。
-			bytesRead, dc, duration, err := a.readLocationSample(ctx, client, location, sampleDC)
+			bytesRead, dc, duration, err := a.readLocationSample(ctx, client, account, location, sampleDC)
 			if err != nil {
 				sampleFailed = fmt.Sprintf("媒体抽样暂失败：%s", classifyNativeReadError(err))
 			} else {
@@ -2260,7 +2299,9 @@ func (a *App) readNativeSample(ctx context.Context, client *telegram.Client, tas
 	}
 	fileAPI := metadataAPI
 	var mediaInvoker telegram.CloseInvoker
-	if file.DCID > 0 {
+	// R4.18：媒体 DC 就是账号主 DC 时复用主连接，避免 gotd 对「导出到自己」
+	// 触发 Telegram 的 DC_ID_INVALID。
+	if file.DCID > 0 && file.DCID != a.nativePrimaryDC(task.UserID, task.AccountID) {
 		mediaInvoker, err = client.MediaOnly(ctx, file.DCID, 1)
 		if err != nil {
 			return 0, file.DCID, time.Since(started), fmt.Errorf("connect Telegram media DC %d: %w", file.DCID, err)

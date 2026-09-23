@@ -208,11 +208,13 @@ func pickAutoSampleMessage(messages []tg.MessageClass) *tg.Message {
 }
 
 // readLocationSample 按 location 从媒体 DC 读取至多 64KB，验证文件池可达。
-func (a *App) readLocationSample(ctx context.Context, client *telegram.Client, location tg.InputFileLocationClass, dc int) (int, int, time.Duration, error) {
+// primaryDC 为账号主 DC：目标 DC 等于主 DC 时复用主连接（R4.18，规避
+// gotd 对「导出到自己」触发 Telegram DC_ID_INVALID）。
+func (a *App) readLocationSample(ctx context.Context, client *telegram.Client, account NativeAccount, location tg.InputFileLocationClass, dc int) (int, int, time.Duration, error) {
 	started := time.Now()
 	api := client.API()
 	var invoker telegram.CloseInvoker
-	if dc > 0 {
+	if dc > 0 && dc != a.nativePrimaryDC(account.UserID, account.AccountID) {
 		var err error
 		invoker, err = client.MediaOnly(ctx, dc, 1)
 		if err != nil {
