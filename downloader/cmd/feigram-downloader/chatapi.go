@@ -281,7 +281,17 @@ func (a *App) runNativeChatQuery(ctx context.Context, client *telegram.Client, f
 // resolveChatAccount 按 userId+accountId 定位 Go 原生账号；userId 缺省时回退到唯一匹配账号。
 func (a *App) resolveChatAccount(userID, accountID string) (NativeAccount, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	account, err := a.resolveChatAccountLocked(userID, accountID)
+	a.mu.Unlock()
+	if err != nil {
+		// 业务请求撞到「有会话但未就绪」的账号时顺手补一次健康检查（带冷却去重），
+		// 避免代理恢复后账号还要等最长 30 分钟的定时巡检才能自愈。
+		a.maybeRecheckNotReadyAccount(userID, accountID)
+	}
+	return account, err
+}
+
+func (a *App) resolveChatAccountLocked(userID, accountID string) (NativeAccount, error) {
 	if userID != "" {
 		account := a.native[nativeAccountKey(userID, accountID)]
 		if account != nil {
@@ -529,7 +539,7 @@ func nativeDialogMuted(dialog *tg.Dialog) bool {
 // --- 文件夹 ---------------------------------------------------------------
 
 func (a *App) fetchNativeFolders(ctx context.Context, api *tg.Client, account NativeAccount) ([]map[string]any, error) {
-		chats, err := a.fetchNativeDialogs(ctx, api, account, maxChatDialogLimit, "", true)
+	chats, err := a.fetchNativeDialogs(ctx, api, account, maxChatDialogLimit, "", true)
 	if err != nil {
 		return nil, err
 	}

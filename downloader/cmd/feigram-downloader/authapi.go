@@ -10,11 +10,12 @@ import (
 //
 // 路由（均挂载在既有 3090 mux 的 /api/auth/ 子树下，复用 native 登录能力；
 // 端口 3091 的独立监听按重构方案 02 §4.1 在 M2.2 拆分）：
-//   POST /api/auth/start     {userID, accountID, phone, apiId, apiHash} -> 发送验证码
-//   POST /api/auth/code      {loginId, code}                            -> 提交验证码
-//   POST /api/auth/password  {loginId, password}                        -> 提交两步验证密码
-//   POST /api/auth/qr/start  {userID, accountID, apiId, apiHash}        -> 发起二维码登录
-//   POST /api/auth/qr/status {loginId}                                  -> 轮询二维码登录状态
+//
+//	POST /api/auth/start     {userID, accountID, phone, apiId, apiHash} -> 发送验证码
+//	POST /api/auth/code      {loginId, code}                            -> 提交验证码
+//	POST /api/auth/password  {loginId, password}                        -> 提交两步验证密码
+//	POST /api/auth/qr/start  {userID, accountID, apiId, apiHash}        -> 发起二维码登录
+//	POST /api/auth/qr/status {loginId}                                  -> 轮询二维码登录状态
 //
 // 直接复用既有 startNativeLogin / continueNativeLogin / startNativeQRLogin / pollNativeQRLogin，
 // 不重复实现 gotd 鉴权流程，避免引入新 bug。

@@ -14,6 +14,19 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.4.5",
+    title: "Feigram 2.4.5 更新",
+    version: "2.4.5",
+    level: "success",
+    createdAt: "2026-09-23T01:17:55.000Z",
+    body: [
+"修复：账号因网络不通被判 failed 后，代理一改立即自动重检，不再等 30 分钟",
+      "修复：访问未就绪账号时自动安排健康检查（3 分钟冷却），聊天页可更快自愈",
+      "修复：头像拉取失败改为显示占位图，日志不再刷 \"Go downloader 404\"",
+      "修复：媒体源长时间不可用的任务最多自动重试 120 次后停止，不再无限刷日志"
+    ].join("\n")
+  },
+  {
     id: "release-2.4.4",
     title: "Feigram 2.4.4 更新",
     version: "2.4.4",
@@ -58,16 +71,6 @@ const announcements = [
     createdAt: "2026-09-22T15:38:03.000Z",
     body: [
 "诊断日志分级着色/级别与关键词过滤/清空按钮 + 管理后台服务端/隐私设置 tab 视觉对齐诊断页 + 双端窄屏布局核查"
-    ].join("\n")
-  },
-  {
-    id: "release-2.4.0",
-    title: "Feigram 2.4.0 更新",
-    version: "2.4.0",
-    level: "success",
-    createdAt: "2026-09-22T15:16:03.000Z",
-    body: [
-"Feigram 2.4.0 常规更新"
     ].join("\n")
   },
 ];

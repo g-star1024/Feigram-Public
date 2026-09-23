@@ -7,6 +7,7 @@ const { dataDir, downloadTasksPath, readAccounts, removeAccount, safeId, silentC
 const { readSettings } = require("./settings");
 const { decryptText, encryptText } = require("./cryptoBox");
 const downloaderSidecar = require("./downloaderSidecar");
+const { avatarFallbackBuffer } = require("./avatarFallback");
 const { goMessageToNodeMessage, findNativeMessage } = require("./nativeMediaAdapter");
 
 const clients = new Map();
@@ -674,12 +675,24 @@ async function streamVideoMedia(userId, accountId, peerId, messageId, rangeHeade
 async function profilePhoto(userId, accountId, peerId = "__self") {
   // M4.2：native 账号的头像由 Go 原生 MTProto 下载，直接返回内存缓冲。
   if (await nativeAccountRecord(userId, accountId)) {
-    const avatar = await downloaderSidecar.accountAvatar({ userId, accountId, peer: peerId });
-    return {
-      buffer: avatar.buffer,
-      contentType: avatar.contentType || "image/jpeg",
-      fileName: `${safeId("avatar")}.jpg`
-    };
+    try {
+      const avatar = await downloaderSidecar.accountAvatar({ userId, accountId, peer: peerId });
+      return {
+        buffer: avatar.buffer,
+        contentType: avatar.contentType || "image/jpeg",
+        fileName: `${safeId("avatar")}.jpg`
+      };
+    } catch (error) {
+      // 2.4.4 实测反馈：账号未就绪（failed）或头像暂时拉不到时，
+      // 聊天列表每次渲染都会在日志里刷一行 "Error: Go downloader 404"。
+      // 改为返回内置 SVG 占位图：前端正常显示，账号恢复后自动回到真实头像。
+      const fallback = avatarFallbackBuffer(error?.message);
+      return {
+        buffer: fallback.buffer,
+        contentType: fallback.contentType,
+        fileName: `${safeId("avatar")}.svg`
+      };
+    }
   }
   throw reloginError(accountId);
 }

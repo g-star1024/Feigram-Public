@@ -57,10 +57,10 @@ func TestParseGramJSStringSessionRoundTrip(t *testing.T) {
 
 func TestParseGramJSStringSessionRejectsBadInput(t *testing.T) {
 	cases := map[string]string{
-		"空字符串":  "",
-		"版本前缀错误": "2" + base64.StdEncoding.EncodeToString(make([]byte, 300)),
+		"空字符串":     "",
+		"版本前缀错误":   "2" + base64.StdEncoding.EncodeToString(make([]byte, 300)),
 		"非 base64": "1!!!not-base64!!!",
-		"解码后过短":  "1" + base64.StdEncoding.EncodeToString([]byte{2, 0}),
+		"解码后过短":    "1" + base64.StdEncoding.EncodeToString([]byte{2, 0}),
 	}
 	for name, in := range cases {
 		if _, _, _, _, err := parseGramJSStringSession(in); err == nil {

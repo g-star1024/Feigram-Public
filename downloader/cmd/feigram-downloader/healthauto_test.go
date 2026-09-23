@@ -70,3 +70,62 @@ func TestHealthPatrolIntervalBounded(t *testing.T) {
 		t.Fatalf("巡检间隔应在 (0, 1h] 内，got=%v", healthPatrolInterval)
 	}
 }
+
+// 访问未就绪账号的补检冷却：冷却期内不重复安排，过期后允许再次补检。
+func TestShouldRecheckNotReadyCooldown(t *testing.T) {
+	nowTs := time.Now()
+	if !shouldRecheckNotReady(time.Time{}, nowTs) {
+		t.Fatal("从未补检过的账号应允许补检")
+	}
+	if shouldRecheckNotReady(nowTs.Add(-time.Minute), nowTs) {
+		t.Fatal("冷却期内不应重复补检")
+	}
+	if !shouldRecheckNotReady(nowTs.Add(-accessRecheckCooldown-time.Second), nowTs) {
+		t.Fatal("冷却过期后应允许再次补检")
+	}
+}
+
+// maybeRecheckNotReadyAccount 对「无记录 / 无会话 / 已就绪」的账号应是无害 no-op，
+// 不占用冷却名额（这些场景补检无意义或需重新登录）。
+func TestMaybeRecheckNotReadyNoopCases(t *testing.T) {
+	app := &App{
+		proxy:  &proxyRuntime{},
+		native: map[string]*NativeAccount{},
+	}
+	// 账号不存在。
+	app.maybeRecheckNotReadyAccount("u", "missing")
+	// 无会话（需要重新登录，而非健康检查）。
+	app.native["u/a"] = &NativeAccount{UserID: "u", AccountID: "a", Session: "", Ready: false}
+	app.maybeRecheckNotReadyAccount("u", "a")
+	// 已就绪。
+	app.native["u/b"] = &NativeAccount{UserID: "u", AccountID: "b", Session: "s", Ready: true}
+	app.maybeRecheckNotReadyAccount("u", "b")
+
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	if len(app.accessRecheck) != 0 {
+		t.Fatalf("no-op 场景不应占用冷却名额，got %v", app.accessRecheck)
+	}
+}
+
+// 有会话但未就绪的账号应被登记冷却并进入补检调度。
+func TestMaybeRecheckNotReadySchedules(t *testing.T) {
+	app := &App{
+		proxy:  &proxyRuntime{},
+		native: map[string]*NativeAccount{},
+	}
+	app.native["u|c"] = &NativeAccount{UserID: "u", AccountID: "c", Session: "s", Ready: false, Status: "failed"}
+	app.maybeRecheckNotReadyAccount("u", "c")
+
+	app.mu.Lock()
+	_, cooled := app.accessRecheck["u|c"]
+	_, running := app.healthRunning["u|c"]
+	app.mu.Unlock()
+	if !cooled {
+		t.Fatal("补检应登记冷却时间")
+	}
+	if !running {
+		t.Fatal("补检应进入在跑调度")
+	}
+	time.Sleep(60 * time.Millisecond)
+}

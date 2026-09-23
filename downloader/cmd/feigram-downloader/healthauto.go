@@ -27,6 +27,9 @@ const (
 	autoSampleDialogLimit = 15
 	// autoHealthCheckDelay 登录成功后延迟再查，避开登录收尾期的 session 落盘竞争。
 	autoHealthCheckDelay = 2 * time.Second
+	// accessRecheckCooldown 访问未就绪账号触发的补检冷却期：
+	// 聊天页/头像请求可能高频撞到同一个 failed 账号，靠冷却避免反复发起真实 RPC。
+	accessRecheckCooldown = 3 * time.Minute
 )
 
 // scheduleAutoHealthCheck 在登录成功后异步触发一次健康检查。
@@ -98,6 +101,46 @@ func (a *App) healthLoop() {
 			a.scheduleAutoHealthCheck(account.UserID, account.AccountID, "定时巡检")
 		}
 	}
+}
+
+// scheduleAllHealthChecks 对所有已授权账号各排一次健康检查（复用 per-account 去重）。
+// 典型场景：代理配置变更后，此前因网络不通被判 failed 的账号大概率已恢复，
+// 不应再等最长 30 分钟的定时巡检。
+func (a *App) scheduleAllHealthChecks(reason string) {
+	for _, account := range a.authorizedAccountSnapshots() {
+		a.scheduleAutoHealthCheck(account.UserID, account.AccountID, reason)
+	}
+}
+
+// shouldRecheckNotReady 判定是否允许对未就绪账号发起一次访问补检（纯函数便于单测）：
+// 冷却期内不重复安排，冷却过期后允许再次补检。
+func shouldRecheckNotReady(last time.Time, nowTs time.Time) bool {
+	return last.IsZero() || nowTs.Sub(last) >= accessRecheckCooldown
+}
+
+// maybeRecheckNotReadyAccount 在业务请求撞到「有会话但未就绪」的账号时顺手补一次健康检查。
+// 带冷却去重：同账号在 accessRecheckCooldown 内只安排一次，避免高频请求反复触发真实 RPC。
+func (a *App) maybeRecheckNotReadyAccount(userID, accountID string) {
+	a.mu.Lock()
+	if a.accessRecheck == nil {
+		a.accessRecheck = map[string]time.Time{}
+	}
+	key := nativeAccountKey(userID, accountID)
+	last, hasLast := a.accessRecheck[key]
+	if hasLast && !shouldRecheckNotReady(last, time.Now()) {
+		a.mu.Unlock()
+		return
+	}
+	account, exists := a.native[key]
+	if !exists || account == nil || account.Session == "" || account.Ready {
+		// 没会话的账号重检无意义（需要重新登录）；已就绪的账号无需补检。
+		// 两者都不占冷却名额。
+		a.mu.Unlock()
+		return
+	}
+	a.accessRecheck[key] = time.Now()
+	a.mu.Unlock()
+	a.scheduleAutoHealthCheck(userID, accountID, "访问时未就绪重检")
 }
 
 func (a *App) authorizedAccountSnapshots() []NativeAccount {

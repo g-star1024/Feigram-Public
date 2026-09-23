@@ -240,6 +240,8 @@ type App struct {
 	running    map[string]chan struct{}
 	// healthRunning 记录当前有自动健康检查在跑的账号（R4.1 去重）。
 	healthRunning map[string]bool
+	// accessRecheck 记录各账号上次「访问时未就绪补检」时间（冷却去重，见 healthauto.go）。
+	accessRecheck map[string]time.Time
 	client        *http.Client
 	// proxy 是当前生效的网络代理（MTProto dialer + 媒体 transport 共用），
 	// 用独立锁保护，避免与 App.mu 相互等待。详见 proxy.go。
@@ -566,11 +568,24 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 				return
 			}
 			if transientSourceError(err) {
-				delay := retryDelay(task.RetryCount + 1)
+				nextCount := task.RetryCount + 1
+				if nextCount > maxTransientRetries {
+					a.updateTask(id, func(t *Task) {
+						t.Status = "error"
+						t.SpeedBps = 0
+						t.RetryCount = nextCount
+						t.RetryAfter = 0
+						t.Error = fmt.Sprintf("媒体源长时间不可用，已自动重试 %d 次后停止；请稍后手动重试", nextCount-1)
+						t.UpdatedAt = now()
+					})
+					log.Printf("task %s failed after %d transient retries: %v", id, nextCount-1, err)
+					return
+				}
+				delay := retryDelay(nextCount)
 				a.updateTask(id, func(t *Task) {
 					t.Status = "queued"
 					t.SpeedBps = 0
-					t.RetryCount++
+					t.RetryCount = nextCount
 					t.RetryAfter = time.Now().Add(delay).Unix()
 					t.Error = fmt.Sprintf("媒体源暂不可用，%s 后自动续传：%s", formatDuration(delay), compactError(err))
 					t.UpdatedAt = now()
@@ -578,39 +593,39 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 				log.Printf("task %s transient failure, retry in %s: %v", id, delay, err)
 				return
 			}
+			a.updateTask(id, func(t *Task) {
+				t.Status = "error"
+				t.SpeedBps = 0
+				t.Error = err.Error()
+				t.RetryAfter = 0
+				t.UpdatedAt = now()
+			})
+			// R4.11：仅 native 传输的真实失败计入账号连续失败；HTTP 回退的失败是媒体源问题，
+			// 不该给账号健康度记黑账。
+			if task.Transport == "native-mtproto" {
+				a.markNativeAccountResult(task.UserID, task.AccountID, false)
+			}
+			log.Printf("task %s failed: %v", id, err)
+			return
+		}
 		a.updateTask(id, func(t *Task) {
-			t.Status = "error"
+			t.Status = "completed"
+			if stat, err := os.Stat(t.FilePath); err == nil {
+				t.Downloaded = stat.Size()
+				if t.Size <= 0 || stat.Size() > t.Size {
+					t.Size = stat.Size()
+				}
+			}
 			t.SpeedBps = 0
-			t.Error = err.Error()
+			t.Error = ""
+			t.RetryCount = 0
 			t.RetryAfter = 0
 			t.UpdatedAt = now()
 		})
-		// R4.11：仅 native 传输的真实失败计入账号连续失败；HTTP 回退的失败是媒体源问题，
-		// 不该给账号健康度记黑账。
 		if task.Transport == "native-mtproto" {
-			a.markNativeAccountResult(task.UserID, task.AccountID, false)
+			a.markNativeAccountResult(task.UserID, task.AccountID, true)
 		}
-		log.Printf("task %s failed: %v", id, err)
 		return
-	}
-	a.updateTask(id, func(t *Task) {
-		t.Status = "completed"
-		if stat, err := os.Stat(t.FilePath); err == nil {
-			t.Downloaded = stat.Size()
-			if t.Size <= 0 || stat.Size() > t.Size {
-				t.Size = stat.Size()
-			}
-		}
-		t.SpeedBps = 0
-		t.Error = ""
-		t.RetryCount = 0
-		t.RetryAfter = 0
-		t.UpdatedAt = now()
-	})
-	if task.Transport == "native-mtproto" {
-		a.markNativeAccountResult(task.UserID, task.AccountID, true)
-	}
-	return
 	}
 }
 
@@ -1295,6 +1310,9 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 		if cancelled > 0 {
 			log.Printf("网络代理已变更，取消 %d 个进行中的登录流程以改用新代理", cancelled)
 		}
+		// 代理变了，此前因网络不通被判 failed / degraded 的账号大概率已恢复，
+		// 立即触发全量健康检查，不再等最长 30 分钟的定时巡检。
+		go a.scheduleAllHealthChecks("代理变更重检")
 	}
 	go a.pumpOnce()
 	writeJSON(w, http.StatusOK, a.snapshot())
@@ -3202,6 +3220,12 @@ func transientSourceError(err error) bool {
 	}
 	return false
 }
+
+// maxTransientRetries 瞬态失败（媒体源不可达/网络抖动等）的自动重试上限。
+// 退避封顶 5 分钟，120 次 ≈ 最多自动续传 10 小时；超过即转 error，
+// 避免媒体源永久不可用（如账号已删除、Node 网关下线）的任务无限刷日志。
+// 用户手动重试（重新入队）会把 RetryCount 归零，上限不影响手动恢复。
+const maxTransientRetries = 120
 
 func retryDelay(count int) time.Duration {
 	if count < 1 {

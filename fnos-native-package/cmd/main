@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.4.4"
-export APP_CHANGELOG="重复账号根治、健康度可观测、排队原因可见、日志导出。"
+export APP_VERSION="2.4.5"
+export APP_CHANGELOG="账号自愈加速 + 头像占位图降级 + 无限重试收敛"
 export NODE_ENV="production"
 
 is_running() {
