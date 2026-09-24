@@ -36,6 +36,8 @@ import (
 	"context"
 	"os"
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/tg"
@@ -51,6 +53,20 @@ const nativeDownloadThreads = 4
 // （downloader.go:22-25「Must be divisible by 4KB」）。
 const officialPartSizeFloor = 4096
 
+// officialPartSizeCap 是**必须遵守**的分片上限（R4.42）。
+//
+// 原因：官方 downloader 把「本次返回的字节数 < 请求的分片大小」直接当作
+// 「已到文件末尾」——见 reader.go:18-23 的 block.last()，parallel.go:68
+// 一旦判定 last 就立刻 stop()，整个 Parallel 以**成功**返回。
+//
+// 于是分片只要超过服务端单次 upload.getFile 实际能返回的上限，第一块
+// 就会被判成末尾：go 侧看到的是「官方下载器成功返回」，实际只落了一小块。
+// 官方自己的默认值就是 512KB（downloader.go:15 defaultPartSize），
+// 这里对齐它——**不允许超过**。2.6.18 的接入漏了这条，直接把配置里的
+// 1MB 传了进去（main.go 的 defaultPartSize = 1024*1024），
+// 实测表现就是「任务秒完成 / 反复报不完整」。
+const officialPartSizeCap = 512 * 1024
+
 // mediaDownloadThreadsFor 给出某个媒体 DC 应使用的并发分片数。
 // 复用主连接时降为 1：主连接同时承载会话列表、消息、健康检查等小 RPC，
 // 大流量并发分片会把这些请求挤在队尾（这也是 Telegram 官方客户端
@@ -63,12 +79,57 @@ func mediaDownloadThreadsFor(dc, primaryDC int) int {
 }
 
 // normalizePartSize 把分片对齐到 4KB 的整数倍（官方硬要求），
-// 并保证不低于下限。纯函数便于单测。
+// 并夹在 [officialPartSizeFloor, officialPartSizeCap] 之间。
+// 上限是硬约束而非建议：超过它就会撞上官方「短读即末尾」的误判（见上）。
+// 纯函数便于单测。
 func normalizePartSize(partSize int) int {
 	if partSize < officialPartSizeFloor {
 		return officialPartSizeFloor
 	}
+	if partSize > officialPartSizeCap {
+		partSize = officialPartSizeCap
+	}
 	return partSize - partSize%officialPartSizeFloor
+}
+
+// downloadEvidence 记录官方 downloader 自己的「末尾证据」与请求统计（R4.42）。
+//
+// 官方判定末尾的唯一依据是「返回字节数 < 请求分片大小」（reader.go:20-22），
+// 这里把那次短读的绝对结束位置记下来，用于：
+//
+//	① 日志：让用户一眼看到「官方报告到达末尾于第 N 字节」；
+//	② 任务未声明大小时的独立参照（绝不拿文件与自己比较）。
+//
+// 注意：短读**既可能是真末尾，也可能是链路把这一块截断了**——后者在丢包
+// 链路上很常见。因此这个值只作为线索，最终是否算下载完成由
+// probeFileEnd 再发一次小请求独立确认（见 main.go 的 downloadFinished）。
+type downloadEvidence struct {
+	mu       sync.Mutex
+	requests int   // 已发出的 upload.getFile 次数
+	lastEnd  int64 // 绝对偏移：最近一次响应覆盖到的位置
+	eofEnd   int64 // 绝对偏移：出现「短读」时该响应覆盖到的位置（>0 表示官方报告过末尾）
+}
+
+func (e *downloadEvidence) note(absOffset int64, requested, returned int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.requests++
+	end := absOffset + int64(returned)
+	if end > e.lastEnd {
+		e.lastEnd = end
+	}
+	// 只有「短读且返回了字节」才能推算出文件末尾：返回 0 字节只说明
+	// 请求起点已经越过末尾，反过来会把末尾估大（例如续传基址正确、
+	// 首次请求即越界的情形）。
+	if returned > 0 && returned < requested && end > e.eofEnd {
+		e.eofEnd = end
+	}
+}
+
+func (e *downloadEvidence) snapshot() (requests int, eofEnd, lastEnd int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.requests, e.eofEnd, e.lastEnd
 }
 
 // offsetShiftClient 把官方 downloader「从 0 开始」的请求平移到真实文件的
@@ -76,14 +137,57 @@ func normalizePartSize(partSize int) int {
 // 只平移带 offset 的两个方法；CDN/web 相关方法本路径不会调用，
 // 直通以保证接口完整。
 // 字段类型用 downloader.Client（接口）而非 *tg.Client，便于单测注入替身。
+//
+// R4.43：FLOOD_PREMIUM_WAIT（免费账号下载带宽限流）gotd 全链路都不认识，
+// 会原样上抛。这里在适配器内做两层处置：
+//  1. 短等待（≤ premiumInlineWaitCap，默认 3 分钟 < 看门狗 5 分钟）——
+//     内联睡够 Telegram 给的秒数后重试同一请求，不打断官方 downloader
+//     的分片状态机，4 路并发各自独立等待，代价最小；
+//  2. 长等待——包装成 *floodWaitError 上抛，由任务层 classFlood 精确等待
+//     （封顶 4h），避免内联空等撞上看门狗被误杀。
 type offsetShiftClient struct {
-	base  downloader.Client
-	shift int64
+	base     downloader.Client
+	shift    int64
+	evidence *downloadEvidence // 可为 nil（单测中不需要统计时）
+	// premiumInlineWaitCap 内联等待上限；0 取默认 nativePremiumInlineWaitCap。
+	premiumInlineWaitCap time.Duration
+	// onPremiumWait 每次撞上 FLOOD_PREMIUM_WAIT 时回调（秒数），可为 nil。
+	// 用于任务层计数与日志；在等待发生前调用。
+	onPremiumWait func(secs int)
 }
 
 func (c offsetShiftClient) UploadGetFile(ctx context.Context, req *tg.UploadGetFileRequest) (tg.UploadFileClass, error) {
 	req.Offset += c.shift
-	return c.base.UploadGetFile(ctx, req)
+	for {
+		resp, err := c.base.UploadGetFile(ctx, req)
+		if err == nil {
+			if c.evidence != nil {
+				if f, ok := resp.(*tg.UploadFile); ok {
+					c.evidence.note(req.Offset, req.Limit, len(f.Bytes))
+				}
+			}
+			return resp, nil
+		}
+		// R4.43：FLOOD_PREMIUM_WAIT 按 Telegram 秒数等待后重试同一请求。
+		// 官方 master.go:36 每个分片都新建请求对象，req 里的 offset 不会被
+		// 复用污染；等待期间响应 ctx 取消（用户暂停/看门狗）立即退出。
+		if secs := premiumWaitFromError(err); secs > 0 {
+			if c.onPremiumWait != nil {
+				c.onPremiumWait(secs)
+			}
+			wait := time.Duration(secs) * time.Second
+			if cap := c.premiumInlineWaitCap; cap > 0 && wait > cap {
+				return nil, &floodWaitError{Seconds: secs, Err: err}
+			}
+			select {
+			case <-time.After(wait):
+				continue
+			case <-ctx.Done():
+				return nil, context.Cause(ctx)
+			}
+		}
+		return nil, err
+	}
 }
 
 func (c offsetShiftClient) UploadGetFileHashes(ctx context.Context, req *tg.UploadGetFileHashesRequest) ([]tg.FileHash, error) {
@@ -193,7 +297,8 @@ func (w *shiftWriterAt) WriteAt(p []byte, off int64) (int, error) {
 }
 
 // officialDownloadOnce 走官方 downloader 从 base 处下载到文件末尾。
-// 返回 nil 表示官方下载器已读到文件末尾（block.last()/空块），即本次续传完成。
+// 返回 nil 表示官方下载器遇到了「短读 / 空块」而收工——**这不等于文件完整**，
+// 是否完整由调用方用权威长度或 probeFileEnd 确认（见 main.go）。
 func officialDownloadOnce(
 	ctx context.Context,
 	api downloader.Client,
@@ -203,15 +308,86 @@ func officialDownloadOnce(
 	partSize int,
 	threads int,
 	intervals *intervalSet,
+	evidence *downloadEvidence,
+	onPremiumWait func(secs int),
 	onWrite func(off, n, sessionWritten int64),
 ) error {
 	writer := &shiftWriterAt{file: file, shift: base, intervals: intervals, onWrite: onWrite}
 	builder := downloader.NewDownloader().
 		WithPartSize(normalizePartSize(partSize)).
-		Download(offsetShiftClient{base: api, shift: base}, location)
+		Download(offsetShiftClient{
+			base:     api,
+			shift:    base,
+			evidence: evidence,
+			// R4.43：内联等待上限默认 3 分钟（< 看门狗已传输档 5 分钟），
+			// 超过的 FLOOD_PREMIUM_WAIT 上抛任务层精确等待。
+			premiumInlineWaitCap: nativePremiumInlineWaitCap,
+			onPremiumWait:        onPremiumWait,
+		}, location)
 	if threads > 0 {
 		builder = builder.WithThreads(threads)
 	}
 	_, err := builder.Parallel(ctx, writer)
 	return err
+}
+
+// probeFileEndProbeSize 是末尾探测的请求大小——一个 4KB 块，代价可忽略。
+const probeFileEndProbeSize = 4096
+
+// downloadFinished 判定「本轮官方 downloader 报成功之后」文件是否真的完整（R4.42）。
+//
+//   - 任务声明了大小：连续前缀达到声明值即完成。这是权威判据——链路短读
+//     导致的假末尾在这里会被直接挡掉（官方说成功，但前缀没到，就不算完）。
+//   - 任务未声明大小：**不能**拿文件与自己比较（那恒为真），改为向连续前缀处
+//     再请求一个 4KB 块做独立确认：真末尾返回空块；仍能取到字节说明这里不是
+//     末尾，必须继续续传。
+//
+// 这条判据存在的理由就是 2.6.18 的实测：官方「短读即末尾」被判成功 →
+// 外层把「有洞/被截断的文件」当完整文件改名交付，日志显示全部完成、
+// 实际文件不可用。
+func downloadFinished(
+	ctx context.Context,
+	api downloader.Client,
+	location tg.InputFileLocationClass,
+	declared, downloaded int64,
+) (bool, error) {
+	if declared > 0 {
+		return downloaded >= declared, nil
+	}
+	if downloaded <= 0 {
+		return false, nil
+	}
+	return probeFileEnd(ctx, api, location, downloaded)
+}
+
+// probeFileEnd 在 offset 处请求 4KB，用「服务端是否还有数据」独立判定
+// 该偏移是否就是文件末尾（R4.42）。
+//
+// 它解决的是官方 downloader「短读即末尾」判据的固有歧义：短读可能是真末尾，
+// 也可能是链路把这一块截断了。真末尾返回空块；若仍取到字节，
+// 说明文件在这里还没结束——任务就必须继续续传，而不是当作下完了交付。
+//
+// 这是「判据要运行产物本身」的一个实例：不信任上游给的结论，
+// 用一次独立的最小请求去验证它。
+func probeFileEnd(ctx context.Context, api downloader.Client, location tg.InputFileLocationClass, offset int64) (bool, error) {
+	if offset < 0 {
+		return false, nil
+	}
+	req := &tg.UploadGetFileRequest{
+		Offset:   offset,
+		Limit:    probeFileEndProbeSize,
+		Location: location,
+	}
+	req.SetPrecise(true)
+	resp, err := api.UploadGetFile(ctx, req)
+	if err != nil {
+		return false, err
+	}
+	f, ok := resp.(*tg.UploadFile)
+	if !ok {
+		// CDN redirect 等非预期形态：本路径 allowCDN=false，不应出现；
+		// 无法确认就按「未到末尾」处理，交由调用方续传/报错。
+		return false, nil
+	}
+	return len(f.Bytes) == 0, nil
 }

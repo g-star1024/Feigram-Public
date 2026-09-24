@@ -52,6 +52,12 @@ const (
 	// 快速失败对「代理没放行媒体段」这类硬故障的检出速度更重要。
 	nativePipelinedStallTimeout = 5 * time.Minute
 
+	// R4.42：「官方报告到达末尾、但连续前缀未达声明大小」时允许的续传确认次数。
+	// 官方 downloader 的末尾判据是「短读即末尾」（reader.go:18-23），链路把
+	// 某一块截断时它也会当成末尾并**成功**返回；此时必须继续续传而不是收工。
+	// 上限用于防止判据持续误报导致空转（每次确认都要发真实 RPC，代价不为零）。
+	nativeTailConfirmBudget = 5
+
 	// R4.28：首字节超时——本次尝试一个字节都没收到时，30 秒即快速失败。
 	// 媒体路径不通（代理不放行媒体 DC 段）时每次尝试都 0 字节，120s 常规窗口
 	// 会让单并发队列被一个任务白占 2 分钟；30s 档加快轮换与诊断反馈。
@@ -331,6 +337,10 @@ type App struct {
 	//  ② 断流退避走短档并重建连接（见 classifyTransientError / stallRetryDelay）。
 	// 只读写于 a.mu 之下（复核见 stallclass.go）。某 DC 重新跑出字节流即清零。
 	mediaDCStalls map[string]map[int]int
+	// premiumStalls（R4.43）：各账号累计的 FLOOD_PREMIUM_WAIT 次数，
+	// 用于并发降档（adaptivePremiumThreads）。只读写于 a.mu 之下。
+	// 某轮官方下载完整跑完且零限流即清零（clearPremiumStalls）。
+	premiumStalls map[string]int
 	// peerResolveMu 保护 peer 解析闸门（R4.35）：账号级 singleflight + 失败冷却，
 	// 防止多个任务并发深翻会话列表、互相加深 Telegram 限流（2.6.12 实测：
 	// 三任务同时深翻 → FLOOD_WAIT(9)/(6) → 5~10s 后再翻，限流被自己喂大）。
@@ -388,6 +398,8 @@ func main() {
 		mediaProbes: map[string]mediaProbeSnapshot{},
 		// R4.40：媒体 DC 断流计数（账号 → DC → 连续断流次数）
 		mediaDCStalls: map[string]map[int]int{},
+		// R4.43：premium 下载限流计数（账号 → 累计次数），驱动并发降档
+		premiumStalls: map[string]int{},
 		// R4.35：peer 解析闸门（singleflight + 冷却）
 		peerResolveInflight:     map[string]*peerResolveCall{},
 		peerResolveCooldown:     map[string]time.Time{},
@@ -1002,11 +1014,23 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 				reason := "媒体源暂不可用"
 				switch class {
 				case classFlood:
-					delay = time.Duration(floodWaitFromError(err)) * time.Second
+					// R4.43：premium 限流（免费账号下载带宽配额）优先识别——
+					// 长等待上抛时包装成 *floodWaitError，两类都能解析到秒数，
+					// 但用户提示应区分开，避免误解为账号被 FLOOD_WAIT 封禁。
+					secs := premiumWaitFromError(err)
+					isPremium := secs > 0
+					if secs <= 0 {
+						secs = floodWaitFromError(err)
+					}
+					delay = time.Duration(secs) * time.Second
 					if delay > floodWaitBackoffCap {
 						delay = floodWaitBackoffCap
 					}
-					reason = "Telegram 限流（FLOOD_WAIT）"
+					if isPremium {
+						reason = "Telegram 下载限流（FLOOD_PREMIUM_WAIT，免费账号带宽配额）"
+					} else {
+						reason = "Telegram 限流（FLOOD_WAIT）"
+					}
 				case classStall:
 					delay = stallRetryDelay(nextCount)
 					reason = "媒体链路断流（服务端未确认）"
@@ -1137,7 +1161,9 @@ func (a *App) downloadHTTPBridge(task *Task, cancel <-chan struct{}) error {
 	if task.PartPath == "" {
 		task.PartPath = task.FilePath + ".part"
 	}
-	if stat, err := os.Stat(task.FilePath); err == nil && complete(stat.Size(), task.Size) {
+	// R4.42：未声明大小时不得判为「已完成」——complete() 在 expectedSize<=0
+	// 时退化为「实际大小 > 0」，任何非空文件都会被当成下完了（2.6.18 实测）。
+	if stat, err := os.Stat(task.FilePath); err == nil && task.Size > 0 && complete(stat.Size(), task.Size) {
 		return nil
 	}
 	downloaded := int64(0)
@@ -1282,8 +1308,19 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 	if err := os.MkdirAll(filepath.Dir(task.FilePath), 0o755); err != nil {
 		return storageErrorHint(err, filepath.Dir(task.FilePath))
 	}
-	if stat, err := os.Stat(task.FilePath); err == nil && complete(stat.Size(), task.Size) {
-		return nil
+	// R4.42：早退跳过必须要求任务声明了大小。
+	// complete() 在 expectedSize<=0 时退化成「实际大小 > 0」，于是只要目标路径
+	// 上存在任意一个非空文件，任务就会被判成「已完成」并立即返回——2.6.18
+	// 实测「日志全部显示下载完成、实际都没有下载下来」正是这条路径：
+	// 未声明大小的任务（照片等）永不下载，也永不报错。
+	// 未声明大小就无法校验完整性，宁可重下也不能假完成。
+	if stat, err := os.Stat(task.FilePath); err == nil {
+		if task.Size > 0 && complete(stat.Size(), task.Size) {
+			return nil
+		}
+		if task.Size <= 0 && stat.Size() > 0 {
+			log.Printf("task %s 目标文件已存在（%d 字节）但任务未声明大小，无法校验完整性 → 重新下载而不是判为已完成", task.ID, stat.Size())
+		}
 	}
 	downloaded := int64(0)
 	if stat, err := os.Stat(task.PartPath); err == nil {
@@ -1486,6 +1523,9 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 			log.Printf("task %s 无候选 DC 通过真实 RPC 探针（候选 %v），兜底使用 media DC %d", task.ID, candidates, fallbackDC)
 		}
 	}
+	// R4.42：任务未声明大小时，「已由独立探测确认到达末尾」才允许整体交付。
+	// 必须在闭包**外**声明：下载后的完成判定在闭包外执行，需要读这个结论。
+	unknownSizeConfirmed := false
 	download := func() error {
 		lastBytes := downloaded
 		lastTick := time.Now()
@@ -1512,6 +1552,12 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 		// base = 本轮开始的连续前缀；intervals 每轮清空（基址会变）。
 		var base int64
 		intervals := newIntervalSet()
+		// R4.42：官方 downloader 自己的「末尾证据」（短读位置 + 请求次数），
+		// 用于日志与「任务未声明大小」时的独立参照。
+		evidence := &downloadEvidence{}
+		// R4.42：连续「官方报成功但连续前缀不足」的次数，超预算即转为终态失败，
+		// 避免判据持续误报时空转。
+		tailConfirms := 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -1523,9 +1569,10 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 			if task.Size > 0 && downloaded >= task.Size {
 				break
 			}
-			// R4.40：分片按本尝试内的断流次数自适应缩小（1MB → 512KB → 256KB）。
-			// 官方 downloader 的默认分片就是 512KB；1MB 分片在丢包链路上
-			// 「断一次就整片重来」，缩小能把损失摊薄。
+			// R4.40/R4.42：分片按本尝试内的断流次数自适应缩小。
+			// 上限被官方「短读即末尾」判据钉死在 512KB（见 officialPartSizeCap），
+			// 阶梯是 512KB → 256KB → 128KB；officialDownloadOnce 内部还会
+			// 再走一次 normalizePartSize 兜底。
 			partSize := int(adaptivePartSize(a.currentPartSize(), stallCount))
 			location := &tg.InputDocumentFileLocation{
 				ID:            fileID,
@@ -1538,9 +1585,21 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 			// 整片失败才由外层退避」的手写循环。
 			base = downloaded
 			intervals.Reset()
+			// R4.43：免费账号的下载带宽限流（FLOOD_PREMIUM_WAIT）反复出现时
+			// 自动降并发档位——4 路只会持续撞限流，降档后总吞吐反而更高。
 			threads := mediaDownloadThreadsFor(fileDC, primaryDC)
+			threads = adaptivePremiumThreads(threads, a.premiumStallCount(task.UserID, task.AccountID))
+			premiumRunWaits := 0
 			err := officialDownloadOnce(ctx, fileAPI, file, location, base, partSize, threads,
 				intervals,
+				evidence,
+				func(secs int) {
+					// R4.43：撞上 FLOOD_PREMIUM_WAIT——计数（驱动降档）+ 日志。
+					premiumRunWaits++
+					count := a.notePremiumStall(task.UserID, task.AccountID)
+					log.Printf("task %s Telegram 下载限流（FLOOD_PREMIUM_WAIT）：等待 %d 秒后重试（本账号累计 %d 次，当前并发 %d 路）",
+						task.ID, secs, count, threads)
+				},
 				func(off, n, sessionWritten int64) {
 					// 官方 writeAtLoop 是单 goroutine 串行调用，这里无需加锁。
 					// 并发分片重试会重复写同一区域，sessionWritten 可能超出实际
@@ -1595,11 +1654,46 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 					}
 				})
 			if err == nil {
-				// 官方下载器读到文件末尾（空块 / 不满一页）即成功返回。
-				if end := intervals.MaxEnd(); end > 0 {
+				// R4.43：本轮完整跑完且一次 premium 限流都没撞上 → 当前并发档位
+				// 与免费账号带宽配额匹配，历史计数不再压着降档不放。
+				if premiumRunWaits == 0 {
+					a.clearPremiumStalls(task.UserID, task.AccountID)
+				}
+				// R4.42：官方 downloader 的「成功」只说明它碰到了一次短读/空块
+				// （reader.go:18-23 的 block.last()），**不等于文件完整**——链路把
+				// 某一块截断时它同样按末尾处理并成功返回。因此这里分两步：
+				//   ① 用「从 0 起的连续前缀」收敛进度。不能用 MaxEnd：并发分片是
+				//      乱序写入，MaxEnd 会跨过中间的洞，把有洞的文件送进完成判定；
+				//   ② 用权威大小、或一次 4KB 独立探测，确认是否真的到底；
+				//      没到底就继续续传，而不是收工交付。
+				if end := intervals.ContiguousFrom0(); end > 0 {
 					downloaded = max64(downloaded, base+end)
 				}
-				break
+				requests, eofEnd, lastEnd := evidence.snapshot()
+				done, confirmErr := downloadFinished(ctx, fileAPI, location, task.Size, downloaded)
+				if confirmErr != nil {
+					return classifyNativeReadError(confirmErr)
+				}
+				if done {
+					if task.Size <= 0 {
+						unknownSizeConfirmed = true
+					}
+					log.Printf("task %s 下载到达末尾：连续前缀 %d / 声明大小 %d（官方请求 %d 次，报告的末尾 %d，最近响应位置 %d）",
+						task.ID, downloaded, task.Size, requests, eofEnd, lastEnd)
+					break
+				}
+				tailConfirms++
+				if tailConfirms > nativeTailConfirmBudget {
+					return fmt.Errorf("连续 %d 次「官方报告到达末尾、但文件仍未完整」：连续前缀 %d、声明大小 %d、官方报告的末尾 %d、最近响应位置 %d —— 多为链路把分块截断导致官方末尾判据误报，已停止任务避免空转",
+						tailConfirms-1, downloaded, task.Size, eofEnd, lastEnd)
+				}
+				log.Printf("task %s 官方下载器报告到达末尾，但连续前缀 %d 未达 %d → 继续续传（第 %d/%d 次）",
+					task.ID, downloaded, max64(task.Size, eofEnd), tailConfirms, nativeTailConfirmBudget)
+				// 1 秒间隔：避免判据持续误报时打成紧循环（每次都要发真实 RPC）。
+				if sleepErr := sleepCtx(ctx, time.Second); sleepErr != nil {
+					return context.Cause(ctx)
+				}
+				continue
 			}
 			{
 				// 官方 downloader 在 ctx 取消时只返回 ctx.Err()（= context.Canceled），
@@ -1703,7 +1797,16 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 	}
 	size := task.Size
 	if size <= 0 {
-		size = stat.Size()
+		// R4.42：绝不能用 stat.Size() 兜底——downloaded（连续前缀）也来自这个
+		// 文件，拿两者比较等于「文件与自己比较」，恒为真，任何截断都会被当成
+		// 完整交付。2.6.18 实测「日志全部显示下载完成、实际都没下载下来」
+		// 就是这条退化路径：未声明大小的任务（照片等）只要落了任意字节即判完成。
+		// 未声明大小时，唯一可交付的前提是「已用 probeFileEnd 独立确认该偏移
+		// 之后没有数据」——此时连续前缀即文件全长的确证值。
+		if !unknownSizeConfirmed {
+			return fmt.Errorf("下载长度无法确认（任务未声明大小，且官方下载器的末尾判据未通过独立探测）：已落盘 %d 字节，拒绝按完整文件交付", downloaded)
+		}
+		size = downloaded
 	}
 	// R4.41：完成判定必须用「从 0 起的连续前缀」（downloaded），不能用
 	// os.Stat().Size()——并发分片是乱序写入，文件尾可能先落盘而中间仍有洞，
@@ -1718,6 +1821,15 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 			return fmt.Errorf("媒体源返回空响应（已取 0 / %d 字节）：%w", size, errEmptyMediaResponse)
 		}
 		return fmt.Errorf("file incomplete: %d / %d", downloaded, size)
+	}
+	// R4.42：交付前把 .part 裁到连续前缀。正常情况两者相等；但如果文件里
+	// 残留了「洞之后的尾部数据」（并发乱序写入的副产品），不裁掉就会出现
+	// 「大小对得上、内容有洞」的交付物——这正是最难被发现的坏文件。
+	if stat.Size() != downloaded {
+		log.Printf("task %s 交付前裁剪 .part：文件大小 %d → 连续前缀 %d（裁掉洞之后的残留尾部）", task.ID, stat.Size(), downloaded)
+		if truncErr := os.Truncate(task.PartPath, downloaded); truncErr != nil {
+			return truncErr
+		}
 	}
 	return os.Rename(task.PartPath, task.FilePath)
 }
@@ -4056,6 +4168,10 @@ func transientSourceError(err error) bool {
 		"source returned 504",
 		"file_reference_expired",
 		"flood_wait",
+		// R4.43：FLOOD_PREMIUM_WAIT（免费账号下载带宽限流）同样必须瞬态。
+		// 注意它**不包含**子串 "flood_wait"，必须单独入表——2.6.19 实测
+		// 任务推进几百 MB 后直接终态失败，就是栽在这个缺口上。
+		"flood_premium_wait",
 		"dc_migrate",
 		"_migrate",
 		// R4.30：peer 解析失败（找不到会话）不再一票终态——索引落盘 + 深翻分页后

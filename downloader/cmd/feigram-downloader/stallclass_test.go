@@ -113,26 +113,30 @@ func TestStallRetryDelayMuchShorterThanGeneric(t *testing.T) {
 
 func TestAdaptivePartSizeShrinksOnRepeatedStalls(t *testing.T) {
 	base := int64(1024 * 1024)
-	if got := adaptivePartSize(base, 0); got != base {
-		t.Fatalf("无断流时应保持原分片 %d，得到 %d", base, got)
+	// R4.42：配置默认分片是 1MB，而官方 downloader 的末尾判据是
+	// 「返回字节数 < 请求分片大小」（reader.go:18-23）——分片超过服务端单次
+	// 返回上限时第一块就会被误判成末尾。所以自适应必须先把基址夹到上限，
+	// 否则「缩到 512KB」既越界又是空操作。
+	if got := adaptivePartSize(base, 0); got != officialPartSizeCap {
+		t.Fatalf("1MB 配置在无断流时应被夹到上限 %d，得到 %d", officialPartSizeCap, got)
 	}
-	if got := adaptivePartSize(base, 1); got != base {
-		t.Fatalf("首次断流尚不缩小（避免抖动），得到 %d", got)
+	if got := adaptivePartSize(base, 1); got != officialPartSizeCap {
+		t.Fatalf("首次断流尚不缩小（避免抖动），应仍为上限 %d，得到 %d", officialPartSizeCap, got)
 	}
-	if got := adaptivePartSize(base, 2); got != stallShrinkPartSize512KB {
-		t.Fatalf("第 2 次断流应缩到 512KB，得到 %d", got)
+	if got := adaptivePartSize(base, 2); got != stallShrinkPartSizeHalf {
+		t.Fatalf("第 2 次断流应缩到上限的一半（%d），得到 %d", stallShrinkPartSizeHalf, got)
 	}
-	if got := adaptivePartSize(base, 5); got != stallShrinkPartSize256KB {
-		t.Fatalf("第 5 次断流应缩到 256KB，得到 %d", got)
+	if got := adaptivePartSize(base, 5); got != stallShrinkPartSizeQuarter {
+		t.Fatalf("第 5 次断流应缩到上限的四分之一（%d），得到 %d", stallShrinkPartSizeQuarter, got)
 	}
-	// 只允许调小：即便配置分片小于 256KB，也不得被放大。
-	small := int64(128 * 1024)
+	// 只允许调小：即便配置分片小于最小档，也不得被放大。
+	small := int64(64 * 1024)
 	if got := adaptivePartSize(small, 9); got != small {
 		t.Fatalf("自适应不得放大配置分片，期望 %d，得到 %d", small, got)
 	}
-	// base<=0 回退默认。
-	if got := adaptivePartSize(0, 0); got != defaultPartSize {
-		t.Fatalf("base<=0 应回退默认分片 %d，得到 %d", defaultPartSize, got)
+	// base<=0 回退默认分片；默认分片 1MB 同样要被夹到上限。
+	if got := adaptivePartSize(0, 0); got != officialPartSizeCap {
+		t.Fatalf("base<=0 应回退默认分片再夹到上限 %d，得到 %d", officialPartSizeCap, got)
 	}
 }
 
@@ -190,5 +194,95 @@ func TestMediaDCStallMemoryDemotesCandidateOnlyWhenRepeated(t *testing.T) {
 	// 账号隔离：另一账号的断流不得影响本账号候选。
 	if n := app.noteMediaDCStall("u2", "a2", 1); n != 1 {
 		t.Fatalf("不同账号计数应独立，得到 %d", n)
+	}
+}
+
+// --- R4.43：FLOOD_PREMIUM_WAIT（免费账号下载带宽限流）---
+
+// TestPremiumWaitFromErrorParsesRealForms 覆盖 2.6.19 实测的原始错误形态
+// 「invoke pool: rpcDoRequest: rpc error code 420: FLOOD_PREMIUM_WAIT (7)」
+// 与 tgerr 风格的下划线形态；并守住「普通 FLOOD_WAIT 不被误当 premium」。
+func TestPremiumWaitFromErrorParsesRealForms(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"实测包装形态", errors.New("invoke pool: rpcDoRequest: rpc error code 420: FLOOD_PREMIUM_WAIT (7)"), 7},
+		{"括号形态大写", errors.New("rpc error code 420: FLOOD_PREMIUM_WAIT (13)"), 13},
+		{"下划线形态", errors.New("FLOOD_PREMIUM_WAIT_3"), 3},
+		{"类型化上抛", &floodWaitError{Seconds: 12, Err: errors.New("x")}, 12},
+		{"普通 FLOOD_WAIT 不是 premium", errors.New("rpc error code 420: FLOOD_WAIT (1464)"), 0},
+		{"无数字", errors.New("FLOOD_PREMIUM_WAIT"), 0},
+		{"无关错误", errors.New("connection reset"), 0},
+		{"nil", nil, 0},
+	}
+	for _, tc := range cases {
+		if got := premiumWaitFromError(tc.err); got != tc.want {
+			t.Errorf("%s: premiumWaitFromError=%d want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestClassifyTransientErrorPremiumIsFlood 钉死分类：premium 限流必须进
+// classFlood（按 Telegram 秒数等待），不得落进 classStall/classGeneric——
+// 2.6.19 实测它落进「非瞬态」直接终态失败，用户看到的是任务躺死。
+func TestClassifyTransientErrorPremiumIsFlood(t *testing.T) {
+	raw := errors.New("invoke pool: rpcDoRequest: rpc error code 420: FLOOD_PREMIUM_WAIT (7)")
+	if !transientSourceError(raw) {
+		t.Fatal("FLOOD_PREMIUM_WAIT 必须是瞬态（transientSourceError），否则任务直接终态失败——这正是 2.6.19 的缺陷")
+	}
+	if got := classifyTransientError(raw); got != classFlood {
+		t.Fatalf("premium 限流应归为 classFlood，得到 %v", got)
+	}
+	// 类型化上抛形态（长等待）也要进 classFlood。
+	var typed error = &floodWaitError{Seconds: 300, Err: raw}
+	if !transientSourceError(typed) {
+		t.Fatal("类型化上抛形态也必须瞬态")
+	}
+	if got := classifyTransientError(typed); got != classFlood {
+		t.Fatalf("类型化上抛形态应归为 classFlood，得到 %v", got)
+	}
+}
+
+// TestAdaptivePremiumThreadsDowngrades 钉死并发降档阶梯：
+// 0~2 次保持原档；≥3 次减半；≥6 次单线程；base<=0 兜底 1。
+func TestAdaptivePremiumThreadsDowngrades(t *testing.T) {
+	if got := adaptivePremiumThreads(4, 0); got != 4 {
+		t.Fatalf("无限流应保持 4 路，得到 %d", got)
+	}
+	if got := adaptivePremiumThreads(4, 2); got != 4 {
+		t.Fatalf("偶发限流（2 次）不应降档，得到 %d", got)
+	}
+	if got := adaptivePremiumThreads(4, 3); got != 2 {
+		t.Fatalf("累计 3 次应减半到 2 路，得到 %d", got)
+	}
+	if got := adaptivePremiumThreads(4, 6); got != 1 {
+		t.Fatalf("累计 6 次应降到单线程，得到 %d", got)
+	}
+	if got := adaptivePremiumThreads(0, 0); got != 1 {
+		t.Fatalf("base<=0 应回退 1，得到 %d", got)
+	}
+	// 复用主连接的 1 路档不得被进一步放大或变动。
+	if got := adaptivePremiumThreads(1, 9); got != 1 {
+		t.Fatalf("已是单线程时保持 1，得到 %d", got)
+	}
+}
+
+// TestPremiumStallCounters 钉死账号级计数：累计、隔离、清零。
+func TestPremiumStallCounters(t *testing.T) {
+	app := &App{}
+	if n := app.notePremiumStall("u1", "a1"); n != 1 {
+		t.Fatalf("首次计数应为 1，得到 %d", n)
+	}
+	if n := app.notePremiumStall("u1", "a1"); n != 2 {
+		t.Fatalf("二次计数应为 2，得到 %d", n)
+	}
+	if n := app.premiumStallCount("u2", "a1"); n != 0 {
+		t.Fatalf("不同用户应隔离，得到 %d", n)
+	}
+	app.clearPremiumStalls("u1", "a1")
+	if n := app.premiumStallCount("u1", "a1"); n != 0 {
+		t.Fatalf("清零后应为 0，得到 %d", n)
 	}
 }

@@ -445,10 +445,11 @@ func (a *App) fetchNativeDialogs(ctx context.Context, api *tg.Client, account Na
 		// partial 记录「本次列表是残缺的」——中断时必须显式标注，避免上层
 		// 把截断列表当成完整列表（静默降级比报错更难排查）。
 		partial := false
-		// truncated 记录「本文件夹是否因达到上限而提前收工」——用于在触及
-		// 总量上限时给出可操作提示（用户看不到某个群组时能立刻判断是不是
-		// 列表被截断，而不是继续怀疑账号/同步）。
-		truncated := true
+		// R4.42：sawFullList 记录「服务端直接给了完整列表」（messages.dialogs，
+		// 非分片形态）——只有它或「已扫描条数 ≥ 服务端上报总数」才能声称完整。
+		// 此前这里还有一个 truncated 标志，用「去重后条数 ≥ 扫描上限」来推断
+		// 是否被截断；那个判据在有重复项时必然失效（见下方收尾处的说明），已删除。
+		sawFullList := false
 		// R4.36 根因修复：此前只发一次 messages.getDialogs（Limit=limit）就收工，
 		// 而 MTProto 单页硬上限是 100——服务端只回 100 条，第 100 条之后的会话
 		// （大量群组）在列表里永不出现，深翻分页也因「返回 < 请求量」误判到底。
@@ -571,7 +572,7 @@ func (a *App) fetchNativeDialogs(ctx context.Context, api *tg.Client, account Na
 			//   ② 服务端直接给了完整列表（messages.dialogs，非 slice）；
 			//   ③ 已取满服务端 ReportedCount。
 			if pageDialogs == 0 || complete || (serverTotal > 0 && scanned >= serverTotal) {
-				truncated = false
+				sawFullList = complete
 				break
 			}
 			//   ④ 拿不到可续翻的游标（实体缺 accessHash）→ 无法判断还有没有更多，
@@ -590,18 +591,68 @@ func (a *App) fetchNativeDialogs(ctx context.Context, api *tg.Client, account Na
 			}
 		}
 		// 收尾必须把「完整/截断/不完整」说清楚——静默返回一个短列表是上一版最大的坑。
-		if partial {
+		//
+		// R4.42：完整性判定必须比较「**已扫描条数** vs 服务端上报总数」。
+		// 此前写的是 `truncated && len(items) >= limit`，但 len(items) 是**按 peer
+		// 去重后**的条数、limit 是**扫描上限**——只要翻页过程中出现重复项，
+		// 去重后就必然小于 limit，截断分支落空、掉进 else 打印「完整拉取完成」。
+		// 2.6.18 实测就是这样报出「完整拉取完成：494 条（服务端共计 545 条）」
+		// 这种自相矛盾的一行，用户据此以为列表是全的。
+		stopFolders := false
+		switch classifyDialogFetch(scanned, serverTotal, sawFullList, partial) {
+		case outcomePartial:
 			log.Printf("chatapi: 会话列表 folder %d 为【不完整列表】：已返回 %d 条（服务端共计 %d 条），下次拉取会重新分页获取", folderID, len(items), serverTotal)
 			// 已经翻不动了（限流/传输失败），再拉下一个文件夹只会加重限流，直接收工。
+			stopFolders = true
+		case outcomeComplete:
+			log.Printf("chatapi: 会话列表 folder %d 完整拉取完成：%d 条（已扫描 %d 条，服务端共计 %d 条）", folderID, len(items), scanned, serverTotal)
+		case outcomeTruncated:
+			log.Printf("chatapi: 会话列表 folder %d 为【不完整列表】（受单次扫描上限 %d 条限制）：已扫描 %d 条、去重后返回 %d 条（服务端共计 %d 条）——缺少的群组属于列表截断而非同步失败，可提高上限或先缩小查询范围重试", folderID, scanLimit, scanned, len(items), serverTotal)
+		default:
+			log.Printf("chatapi: 会话列表 folder %d 为【不完整列表】：服务端未上报总数、也未返回完整列表，本次返回 %d 条（已扫描 %d 条）——无法确认列表是否完整，不作完整性保证", folderID, len(items), scanned)
+		}
+		if stopFolders {
 			break
-		} else if truncated && len(items) >= limit {
-			log.Printf("chatapi: 会话列表已达上限 %d 条（folder %d 仍有更多会话，服务端共计 %d 条）——若有群组未显示，即为列表截断而非同步失败", limit, folderID, serverTotal)
-		} else {
-			log.Printf("chatapi: 会话列表 folder %d 完整拉取完成：%d 条（服务端共计 %d 条）", folderID, len(items), serverTotal)
 		}
 	}
 	storeNativePeerIndex(account.UserID, account.AccountID, index)
 	return items, nil
+}
+
+// dialogFetchOutcome 描述一次会话列表拉取的完整性结论（R4.42）。
+type dialogFetchOutcome int
+
+const (
+	// outcomeComplete：已确认完整（服务端直接给了完整列表，或已扫描条数达到上报总数）。
+	outcomeComplete dialogFetchOutcome = iota
+	// outcomeTruncated：服务端报了总数，但本次只扫描到一部分（受单次上限约束）。
+	outcomeTruncated
+	// outcomeUnknown：服务端既没报总数、也没给完整列表 —— 不作完整性保证。
+	outcomeUnknown
+	// outcomePartial：中途翻不动了（限流/传输失败），下次重来。
+	outcomePartial
+)
+
+// classifyDialogFetch 判定本次会话列表是否完整（纯函数便于单测）。
+//
+// 关键：必须用「**已扫描条数** vs 服务端上报总数」，而不是「去重后返回条数
+// vs 扫描上限」。后者在有重复项时必然失效——2.6.18 实测：扫描 500 条、按 peer
+// 去重后 494 条、服务端上报 545 条，却因为 494 < 500 而落进「完整拉取完成」
+// 分支，日志里出现「完整拉取完成：494 条（服务端共计 545 条）」这种自相矛盾
+// 的一行，用户据此以为列表是全的（其实少了 51 个会话）。
+func classifyDialogFetch(scanned, serverTotal int, sawFullList, partial bool) dialogFetchOutcome {
+	switch {
+	case partial:
+		return outcomePartial
+	case sawFullList:
+		return outcomeComplete
+	case serverTotal > 0 && scanned >= serverTotal:
+		return outcomeComplete
+	case serverTotal > 0:
+		return outcomeTruncated
+	default:
+		return outcomeUnknown
+	}
 }
 
 // dialogFolderIDs 决定本次会话列表要拉取的归档文件夹。

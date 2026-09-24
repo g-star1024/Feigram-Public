@@ -856,6 +856,23 @@ async function goAllTasks() {
   return Array.isArray(tasks) ? tasks : [];
 }
 
+// R4.42：媒体字节大小必须尽量给出——Go 侧拿不到声明大小就无法校验完整性，
+// 会（正确地）拒绝把文件当完整交付，于是任务永远完不成。
+// 此前只取 message.file?.size || message.document?.size：Go 原生元数据里
+// **没有** message.file，照片也**没有** document.size，于是所有照片任务的
+// size 恒为 0 —— 这正是 2.6.18 实测「日志显示全部下载完成、实际都没下载下来」
+// 的入口（未声明大小会让下游完成判定退化成「文件与自己比较」）。
+function mediaByteSize(message) {
+  const direct = Number(message?.file?.size || message?.document?.size || 0);
+  if (direct > 0) return direct;
+  // 照片：取各档 PhotoSize 中最大的一档（Go 原生元数据为 photo.sizes）。
+  const sizes = message?.photo?.sizes;
+  if (Array.isArray(sizes)) {
+    return sizes.reduce((max, entry) => Math.max(max, Number(entry?.size || 0)), 0);
+  }
+  return 0;
+}
+
 async function ensureGoDownloadTask(userId, accountId, peerId, messageId, options = {}) {
   // M4.1 子步：原生账号经 Go 原生 MTProto 取消息元数据（nativeMediaMeta），避免 GramJS 的 409。
   const native = await nativeAccountRecord(userId, accountId);
@@ -863,7 +880,7 @@ async function ensureGoDownloadTask(userId, accountId, peerId, messageId, option
   const { entity, message } = await nativeMediaMeta(userId, accountId, peerId, messageId);
   const contentType = message.photo ? "image/jpeg" : message.document?.mimeType || "";
   const kind = mediaKind(message, contentType);
-  const size = Number(message.file?.size || message.document?.size || 0);
+  const size = mediaByteSize(message);
   const { fileName, filePath, downloadDir } = await mediaFileInfo(userId, accountId, message, contentType, kind);
   await fs.ensureDir(downloadDir);
   const id = goDownloaderTaskId(userId, accountId, peerId, messageId);

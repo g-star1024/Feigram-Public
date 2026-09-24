@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.18"
-export APP_CHANGELOG="下载内核改用 gotd 官方 telegram/downloader（并发分片 + 分片级重试）；退避分级让链路断流走短退避并重建连接（不再罚站 2m40s）；同一 DC 反复断流降级、分片自适应缩小；断点续传对官方下载器透明（偏移平移 + 连续前缀防空洞）。"
+export APP_VERSION="2.6.20"
+export APP_CHANGELOG="修复免费账号下载限流（FLOOD_PREMIUM_WAIT）导致的终态失败：按 Telegram 秒数精确等待、长等待交由任务层、反复限流自动降并发。"
 export NODE_ENV="production"
 
 is_running() {
