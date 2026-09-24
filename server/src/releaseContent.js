@@ -14,6 +14,18 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.21",
+    title: "Feigram 2.6.21 更新",
+    version: "2.6.21",
+    level: "success",
+    createdAt: "2026-09-24T13:12:58.000Z",
+    body: [
+"修复：普通 FLOOD_WAIT（420）被误报成「免费账号带宽配额 FLOOD_PREMIUM_WAIT」，等待原因显示错误",
+      "修复：普通限流不再污染 premium 计数，避免无辜触发下载并发减半",
+      "说明：免费账号的 FLOOD_PREMIUM_WAIT 处置（按 Telegram 秒数精确等待、长等待交由任务层、反复限流降并发）保持不变"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.20",
     title: "Feigram 2.6.20 更新",
     version: "2.6.20",
@@ -70,20 +82,6 @@ const announcements = [
       "新增逐页诊断日志：每页记录「请求条数 / 返回条数 / 新增条数 / 累计条数 / 服务端共计 / 下一页游标」，翻页是否真的在前进一眼可判。",
       "列表不完整时显式标注【不完整列表】并说明已返回多少条、服务端共计多少条，不再静默返回一个短列表。",
       "peer 索引深翻（backfillNativePeerIndex）同步修正同一处游标缺陷——它此前同样漏传 offset_date，这也是 peer 索引长期涨不上去的原因。"
-    ].join("\n")
-  },
-  {
-    id: "release-2.6.16",
-    title: "Feigram 2.6.16 更新",
-    version: "2.6.16",
-    level: "success",
-    createdAt: "2026-09-24T05:58:28.000Z",
-    body: [
-"修复 2.6.15 安装包依赖树不完整导致的「本地应用启动失败」：构建时 npm ci 静默丢了 11 个文件，其中 engine.io/build/parser-v3/index.js 是 socket.io 的加载期依赖，node 一启动就 MODULE_NOT_FOUND 秒退，飞牛便报启动失败。",
-      "本版重建完整依赖树；下载器与前端功能与 2.6.15 完全一致（DC 迁移修复、AUTH_BYTES_INVALID 转瞬态、会话分页韧性等全部保留）。",
-      "新增依赖树守卫：逐个 require 生产依赖、校验 node_modules 文件数下限、真实启动服务并断言 /api/health 返回 200。",
-      "守卫已接入构建流程与 FPK 核证，判据从「版本号对得上、文件存在」升级为「依赖图能加载、服务真能起来」；用 2.6.15 坏包跑守卫可稳定复现失败，正负例均已验证。",
-      "启动失败原因落盘：启动脚本失败时把原因与日志尾部写入 feigram.log，不再因飞牛吞掉标准输出而无从定位。"
     ].join("\n")
   },
 ];
