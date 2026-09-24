@@ -991,15 +991,23 @@ textarea {
   padding: 4px 7px;
 }
 
+/* R4.46 热修：群组信息面板错位（用户实测：面板缩在窗口左下角被裁掉大半）。
+   R4 界面改版后 ChatInfoPanel 的 JSX 被移到 app-shell 之外的 App 根层级，
+   而本规则没有任何 position——面板退化为文档流末尾的普通块级元素。
+   修复：所有宽度下统一为右侧固定抽屉（与移动端媒体查询行为一致）。 */
 .chat-info-panel {
   background: var(--fn-surface);
   border-left: 1px solid var(--fn-border);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.16);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  height: 100%;
+  inset: 0 0 0 auto;
+  max-width: 92vw;
   min-width: 320px;
   overflow: hidden;
-  width: 340px;
+  position: fixed;
+  width: 360px;
+  z-index: 50;
 }
 
 .chat-info-panel header {
@@ -1945,10 +1953,8 @@ textarea {
   }
 
   .chat-info-panel {
-    inset: 0 0 0 auto;
-    max-width: 92vw;
-    position: fixed;
-    z-index: 50;
+    /* R4.46：定位已上收至基础规则（全端统一右侧固定抽屉），小屏只收窄宽度 */
+    width: min(360px, 92vw);
   }
 
   .back-button {
