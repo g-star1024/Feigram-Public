@@ -14,6 +14,19 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.27",
+    title: "Feigram 2.6.27 更新",
+    version: "2.6.27",
+    level: "success",
+    createdAt: "2026-09-24T22:29:56.000Z",
+    body: [
+"后台缓存列表：已完成的任务自动移出列表（在「资源库」查看），列表与角标只显示进行中的任务",
+      "后台缓存面板：调度设置（开关/限速/并发/模式）与运行诊断页重复，统一收敛到「运行诊断 → Go 下载服务」，面板只保留状态展示与任务列表",
+      "模式功能确认有效（保守=单任务串行、高速=多任务并行），文案按真实行为优化为「稳妥模式（单任务串行）/高速模式（多任务并行）」",
+      "桌面应用图标更新为飞牛官方风格大圆角"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.26",
     title: "Feigram 2.6.26 更新",
     version: "2.6.26",
@@ -56,17 +69,6 @@ const announcements = [
       "账号管理：重新登录按钮移到退出按钮之前",
       "桌面图标名称改为 feigram",
       "修复网络抖动时 waitSession: connection dead / engine forcibly closed 被误判为终态失败"
-    ].join("\n")
-  },
-  {
-    id: "release-2.6.22",
-    title: "Feigram 2.6.22 更新",
-    version: "2.6.22",
-    level: "success",
-    createdAt: "2026-09-24T13:55:37.000Z",
-    body: [
-"- 升级后不再需要手动重试：此前因 FLOOD_PREMIUM_WAIT（免费账号带宽限流）被误判终态失败的任务，升级到本版会自动复活为排队并续传（2.6.21 升级后下载页躺尸的根因：升级复活清单漏了这个新错误文案）",
-      "- 手动「开始」仍可用：强制重启 + 断点续传"
     ].join("\n")
   },
 ];

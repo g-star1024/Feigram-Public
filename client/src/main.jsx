@@ -1033,7 +1033,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
               <span><b>任务数</b>{downloaderState.tasks?.length || downloaderState.taskCount || 0}</span>
               <span><b>并发</b>{downloaderState.config?.concurrency || "-"}</span>
               <span><b>限速</b>{downloaderState.config?.rateLimitBps ? `${formatBytes(downloaderState.config.rateLimitBps)}/s` : "不限速"}</span>
-              <span><b>模式</b>{downloaderState.config?.mode === "fast" ? "高速" : "保守"}</span>
+              <span><b>模式</b>{downloaderState.config?.mode === "fast" ? "高速（并行）" : "稳妥（串行）"}</span>
               {/* R4.25：调度可见化。坑位数与有效在跑数不一致时说明存在僵尸占位
                   （2.6.2 「运行中 1/1 却全部排队中」的矛盾正是这样出现的）。 */}
               <span><b>调度</b>{`${downloaderState.running ?? 0} 在跑 / ${downloaderState.runningSlots ?? 0} 坑位`}</span>
@@ -1054,8 +1054,8 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
                 <option value={String(10 * 1024 * 1024)}>10 MB/s</option>
               </select></label>
               <label><span>Go 模式</span><select value={downloaderState.config?.mode || "conservative"} onChange={(e) => saveDownloaderConfig({ mode: e.target.value })}>
-                <option value="conservative">保守</option>
-                <option value="fast">高速</option>
+                <option value="conservative">稳妥模式（单任务串行，最稳）</option>
+                <option value="fast">高速模式（多任务并行下载）</option>
               </select></label>
               {/* R4.23：移除「媒体源传输层」下拉——单一 Go 原生 MTProto 后无意义，
                   旧入口还会把任务建到已自环的 http-bridge 上（2.6.0 后台缓存全挂的帮凶）。 */}
@@ -1132,7 +1132,7 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
               <span><b>读取样本</b>{formatBytes(cacheSpeedTest.result?.bytesRead || 0)}</span>
               <span><b>耗时</b>{cacheSpeedTest.result?.durationMs ? `${cacheSpeedTest.result.durationMs} ms` : "-"}</span>
               <span><b>降级次数</b>{cacheSpeedTest.result?.fallbackCount || 0}</span>
-              <span><b>缓存模式</b>{cacheSpeedTest.cacheMode === "fast" ? "高速" : "保守"}</span>
+              <span><b>缓存模式</b>{cacheSpeedTest.cacheMode === "fast" ? "高速（并行）" : "稳妥（串行）"}</span>
             </div>
             {cacheSpeedTest.task && <div className="diagnostics-paths">
               <p><strong>测试文件</strong>{cacheSpeedTest.task.fileName || "Telegram 视频"}</p>
@@ -1320,6 +1320,9 @@ function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onCon
   }
 
   const conservative = (silentCacheState.mode || "conservative") !== "fast";
+  /* R4.49：已完成任务自动移出后台缓存列表——它们已收录进「资源库」，
+     继续展示只会让列表越积越长；取消/失败任务仍保留，便于排查与重新排队。 */
+  const activeCaches = useMemo(() => silentCaches.filter((task) => task.status !== "completed"), [silentCaches]);
   return (
     <div className="silent-cache-panel">
       <div className="silent-cache-head">
@@ -1329,38 +1332,22 @@ function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onCon
       {/* R4.46：引擎说明——下载统一走 Go 原生 MTProto（gotd 官方下载内核），
           此处只控制「后台缓存」这类自动任务的调度策略，与手动下载共用同一引擎。 */}
       <p className="silent-cache-engine">下载引擎：Go 原生 MTProto（gotd 官方下载内核）· 支持断点续传与限流自动等待</p>
-      <div className="silent-cache-controls">
-        <label className="check-row"><input type="checkbox" checked={silentCacheState.enabled !== false} onChange={(e) => onControl?.({ enabled: e.target.checked })} /><span>{silentCacheState.enabled !== false ? "已开启后台缓存" : "已暂停后台缓存"}</span></label>
-        <label><span>最大缓存速率</span><select value={String(silentCacheState.rateLimitBps || 0)} onChange={(e) => onControl?.({ rateLimitBps: Number(e.target.value) })}>
-          <option value="0">不限速</option>
-          <option value={String(512 * 1024)}>512 KB/s</option>
-          <option value={String(1024 * 1024)}>1 MB/s</option>
-          <option value={String(2 * 1024 * 1024)}>2 MB/s</option>
-          <option value={String(5 * 1024 * 1024)}>5 MB/s</option>
-          <option value={String(10 * 1024 * 1024)}>10 MB/s</option>
-        </select></label>
-        <label><span>缓存模式</span><select value={silentCacheState.mode || "conservative"} onChange={(e) => onControl?.({ mode: e.target.value })}>
-          <option value="conservative">保守模式（同账号单任务）</option>
-          <option value="fast">跨账号高速模式</option>
-        </select></label>
-        <label><span>并发数量</span><select value={String(silentCacheState.concurrency || 1)} disabled={conservative} onChange={(e) => onControl?.({ concurrency: Number(e.target.value) })}>
-          {[1, 2, 3, 4, 5, 10].map((value) => <option value={String(value)} key={value}>{value}</option>)}
-        </select></label>
-      </div>
-      {conservative && <p className="silent-cache-hint">保守模式下并发固定为 1（同账号单任务）；如需多任务并行，请切换到「跨账号高速模式」。</p>}
+      {/* R4.49：调度控件（开关/速率/并发/模式）与诊断页「Go 下载服务」下发同一份 Go 配置，
+          属重复入口——统一收敛到运行诊断页，此处只保留状态展示与任务列表。 */}
+      <p className="silent-cache-hint">调度设置（开关 / 限速 / 并发 / 模式）已统一移至「运行诊断 → Go 下载服务」。</p>
       <div className="cache-runtime-summary">
         <span><b>运行中</b>{silentCacheState.running || 0} / {silentCacheState.effectiveConcurrency || 1}{conservative ? "（保守模式）" : ""}</span>
         {/* R4.23：移除「传输层 HTTP 回退」统计——单一 Go 原生 MTProto 后恒定，且「回退」一词易误导。 */}
-        <span><b>任务数</b>{silentCaches.length}</span>
+        <span><b>任务数</b>{activeCaches.length}</span>
       </div>
       {error && <p className="error">{error}</p>}
-      {silentCaches.length > 0 && <div className="silent-cache-bulk">
-        <button type="button" className="icon-button" onClick={() => setSelectedIds(silentCaches.filter((task) => task.status !== "completed").map((task) => task.id))}>全选当前</button>
+      {activeCaches.length > 0 && <div className="silent-cache-bulk">
+        <button type="button" className="icon-button" onClick={() => setSelectedIds(activeCaches.map((task) => task.id))}>全选当前</button>
         <button type="button" className="icon-button" onClick={() => setSelectedIds([])} disabled={!selectedIds.length}>清空选择</button>
         <button type="button" className="icon-button danger-button" onClick={cancelSelected} disabled={!selectedIds.length}>取消选中{selectedIds.length ? ` (${selectedIds.length})` : ""}</button>
       </div>}
       <div className="silent-cache-list">
-        {silentCaches.map((task) => {
+        {activeCaches.map((task) => {
           const progress = task.size ? Math.min(100, Math.round((Number(task.downloaded || 0) / Number(task.size)) * 100)) : 0;
           const statusText = task.status === "running" || task.status === "downloading" ? "下载中" : task.status === "queued" ? "排队中" : task.status === "paused" ? "已暂停" : task.status === "completed" ? "已完成" : task.status === "cancelled" ? "已取消" : "失败";
           return (
@@ -1393,7 +1380,7 @@ function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onCon
             </div>
           );
         })}
-        {!silentCaches.length && <div className="empty">暂无群视频后台缓存任务</div>}
+        {!activeCaches.length && <div className="empty">暂无进行中的缓存任务——已完成的视频请在「资源库」查看</div>}
       </div>
     </div>
   );
@@ -1427,7 +1414,7 @@ function DownloadCenter({ open, downloads, onStart, onCancel, onClear, onDelete,
         </header>
         <div className="fn-tabs download-tabs">
           <button className={cx("fn-tab", tab === "tasks" && "active")} onClick={() => onTabChange?.("tasks")}>下载任务{deduped.length ? ` (${deduped.length})` : ""}</button>
-          <button className={cx("fn-tab", tab === "cache" && "active")} onClick={() => { onTabChange?.("cache"); onRefreshSilentCaches?.(); }}>后台缓存{silentCaches.length ? ` (${silentCaches.length})` : ""}</button>
+          <button className={cx("fn-tab", tab === "cache" && "active")} onClick={() => { onTabChange?.("cache"); onRefreshSilentCaches?.(); }}>后台缓存{silentCaches.some((t) => t.status !== "completed") ? ` (${silentCaches.filter((t) => t.status !== "completed").length})` : ""}</button>
         </div>
         {tab === "cache" ? <CachePanel
           silentCacheState={silentCacheState}
