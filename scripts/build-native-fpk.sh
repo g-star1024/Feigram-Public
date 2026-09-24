@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${VERSION:-2.6.15}"
+VERSION="${VERSION:-2.6.16}"
 # R4.25：导出给 prepare-go-downloader.sh，用于 -X main.version 注入 Go 二进制版本。
 export VERSION
 PKG_NAME="feigrampub-${VERSION}"
@@ -29,6 +29,10 @@ cp -R "${ROOT_DIR}/server/src" "${WORK_DIR}/app/server/"
 mkdir -p "${WORK_DIR}/app/server/public"
 cp -R "${ROOT_DIR}/client/dist/." "${WORK_DIR}/app/server/public/"
 npm --prefix "${WORK_DIR}/app/server" ci --omit=dev
+# R4.38：npm ci 曾在沙箱内静默丢文件（2.6.15 事故：engine.io/build/parser-v3/index.js 缺失 →
+# require('socket.io') 抛 MODULE_NOT_FOUND → node 秒退 → 飞牛「本地应用启动失败」）。
+# 构建期就断言「依赖可真实加载 + 服务能真起来」，杜绝产出一个能打包但起不来的包。
+"${ROOT_DIR}/scripts/check-server-deps.sh" "${WORK_DIR}/app/server" --boot
 
 find "${WORK_DIR}" -name ".DS_Store" -delete
 find "${WORK_DIR}/cmd" -type f -exec chmod +x {} \;

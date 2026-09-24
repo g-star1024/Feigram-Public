@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.15"
-export APP_CHANGELOG="DC 迁移修复：FILE_MIGRATE 空格括号形态此前不被识别，迁移指令被当普通瞬态、任务在错误 DC 与文件所在 DC 间打转；现两种形态均解析并即切目标 DC 续传（带预算防循环）。另：AUTH_BYTES_INVALID 转瞬态可读文案；会话分页中间页失败重试一次并返回已拉取部分"
+export APP_VERSION="2.6.16"
+export APP_CHANGELOG="打包修复：2.6.15 安装包内 server 依赖树不完整（npm ci 静默丢失 11 个文件，含 socket.io 加载期依赖 engine.io/build/parser-v3/index.js）导致 node 启动即 MODULE_NOT_FOUND 秒退、飞牛报「本地应用启动失败」；本版重建依赖树并新增构建期与核证期守卫（依赖真实加载 + 真实启动冒烟 + /api/health 200），启动失败原因落盘 feigram.log。功能与 2.6.15 一致。"
 export NODE_ENV="production"
 
 is_running() {
@@ -120,7 +120,10 @@ start)
         } >> "$LOG_FILE"
         stop_running
     fi
-    cd "$SERVER_DIR" || exit 1
+    cd "$SERVER_DIR" || {
+        echo "==== $(date '+%Y-%m-%d %H:%M:%S') START FAILED: server 目录不存在（${SERVER_DIR}） ====" >> "$LOG_FILE"
+        exit 1
+    }
     {
         echo "==== $(date '+%Y-%m-%d %H:%M:%S') Feigram start ===="
         echo "Edition: ${APP_EDITION}"
@@ -145,6 +148,12 @@ start)
         echo "$APP_VERSION" > "$VERSION_FILE"
         exit 0
     fi
+    # R4.38：失败原因必须落盘。此前只 tail 到 stdout，会被飞牛吞掉（2.6.15 事故：
+    # 弹「本地应用启动失败」但拿不到原因，用户要手工 SSH 翻日志）。
+    {
+        echo "==== $(date '+%Y-%m-%d %H:%M:%S') START FAILED (version ${APP_VERSION}) ===="
+        echo "原因：node 进程在启动判定窗口内退出。常见：①包内依赖缺失（下方日志可见 MODULE_NOT_FOUND）；②端口 ${PORT} 被占用（EADDRINUSE）；③磁盘满。"
+    } >> "$LOG_FILE"
     tail -80 "$LOG_FILE"
     exit 1
     ;;

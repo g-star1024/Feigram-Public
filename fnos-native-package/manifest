@@ -1,5 +1,5 @@
 appname=feigrampub
-version=2.6.15
+version=2.6.16
 display_name=Feigram
 desc="""<p><strong>Feigram 2.0 fnOS Client Edition</strong> 是第三方开发的非官方 Telegram 客户端，支持管理员后台、飞牛账户隔离、加密 Telegram session、Telegram 文件夹、媒体预览、后台任务恢复、运行诊断和更新检测。</p><p>仅适用于 x86_64 / amd64 飞牛 OS 设备。</p>"""
 platform=all
@@ -12,4 +12,4 @@ desktop_uidir=ui
 desktop_applaunchname=feigrampub.proxy.Application
 service_port=3088
 checkport=true
-changelog=R4.37 DC 迁移修复：gotd 的 FILE_MIGRATE 错误有空格括号形态「FILE_MIGRATE (1)」，此前正则只认下划线形态导致迁移指令被当普通瞬态、任务在错误 DC 与文件所在 DC 间打转；现两种形态均解析，命中即切目标 DC 续传（带迁移预算防循环）。另：AUTH_BYTES_INVALID 授权导入被拒转瞬态可读文案；会话分页中间页失败重试一次并返回已拉取部分（不再一页失败整单报废）
+changelog=打包修复：2.6.15 安装包内 server 依赖树不完整（npm ci 静默丢失 11 个文件，含 socket.io 加载期依赖 engine.io/build/parser-v3/index.js）导致 node 启动即 MODULE_NOT_FOUND 秒退、飞牛报「本地应用启动失败」；本版重建依赖树并新增构建期与核证期守卫（依赖真实加载 + 真实启动冒烟 + /api/health 200），启动失败原因落盘 feigram.log。功能与 2.6.15 一致。

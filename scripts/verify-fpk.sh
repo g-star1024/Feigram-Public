@@ -64,6 +64,23 @@ else
   say 1 "缺少前端 bundle"
 fi
 
+# R4.38：判据补「依赖图可加载 + 能真起来」。
+# 2.6.15 事故：verify 6/6 PASS 却起不来 —— 包内 node_modules 缺 engine.io/build/parser-v3/index.js，
+# require('socket.io') 在加载期即抛 MODULE_NOT_FOUND。只查版本号/文件存在永远抓不到这一类，
+# 必须把「真实加载依赖 + 真实启动监听」纳入核证。
+GUARD_TMP="$(mktemp -d)"
+if tar -xzOf "$FPK" app.tgz | tar -xz -C "$GUARD_TMP" server 2>/dev/null; then
+  if bash "${ROOT}/scripts/check-server-deps.sh" "${GUARD_TMP}/server" --boot >"${GUARD_TMP}/guard.log" 2>&1; then
+    say 0 "包内 server 依赖真实加载 + 启动冒烟（/api/health 200）"
+  else
+    say 1 "包内 server 依赖真实加载 + 启动冒烟"
+    sed 's/^/        /' "${GUARD_TMP}/guard.log" >&2 || true
+  fi
+else
+  say 1 "解包 app.tgz 内 server 目录"
+fi
+rm -rf "$GUARD_TMP" >/dev/null 2>&1 || true
+
 echo
 if [ "$ok" = "1" ]; then
   echo "FPK 核证通过：${VERSION}"
