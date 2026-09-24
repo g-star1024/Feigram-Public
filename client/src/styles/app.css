@@ -25,6 +25,47 @@ textarea {
 
 button {
   cursor: pointer;
+  transition: filter 140ms ease, transform 140ms ease, box-shadow 180ms ease, opacity 140ms ease;
+}
+
+button:not(:disabled):active {
+  filter: brightness(1.12);
+  transform: translateY(1px) scale(0.97);
+}
+
+button.click-feedback {
+  animation: button-feedback 420ms ease-out;
+}
+
+button[aria-busy="true"] {
+  cursor: progress;
+  opacity: 0.78;
+}
+
+.button-spinner {
+  animation: button-spin 800ms linear infinite;
+}
+
+.action-notice {
+  align-items: center;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  border-radius: 8px;
+  color: var(--muted);
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 10px 12px;
+}
+
+@keyframes button-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes button-feedback {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+  55% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
 }
 
 .auth-page {
@@ -1246,14 +1287,25 @@ textarea {
   padding-right: 4px;
 }
 
-.admin-modal > form,
-.admin-modal > .account-admin,
-.admin-modal > .user-list,
-.admin-modal > .stack {
+.admin-body {
   align-content: start;
   min-height: 0;
   overflow: auto;
   padding-right: 4px;
+}
+
+.admin-body > form,
+.admin-body > .account-admin,
+.admin-body > .user-list,
+.admin-body > .stack {
+  align-content: start;
+  min-height: 0;
+}
+
+.admin-status-message {
+  margin: 0 0 12px;
+  min-height: 40px;
+  width: 100%;
 }
 
 .hint {

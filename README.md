@@ -16,7 +16,7 @@ Feigram 2.0 fnOS Client Edition 是第三方开发的非官方 Telegram 客户�
 - 下载中心：展示用户主动缓存任务、进度、速度、状态；支持开始、取消、清除列表、删除缓存和完成后播放。
 - 群组资源：群组信息中可按图片、视频、文件浏览资源，并可静默缓存本群大于 100MB 的视频。
 - 管理员后台：管理飞牛账户、服务端设置、缓存目录、通知、隐私和分组设置。
-- Go 下载服务：FPK 内嵌独立 Go sidecar，可在管理后台查看健康状态、配置并发/限速，并为后续大文件下载迁移做准备。
+- GramJS 下载服务：主动下载和群组后台缓存使用同一任务队列，支持断点、并发、限速与重启恢复。
 - fnOS 客户端能力：运行诊断、缓存速度诊断、日志尾部查看、应用内更新检测、启动迁移记录、后台任务恢复。
 - 安全与合规：Telegram session 加密存储，登录限流，验证码请求限流，内置隐私政策和服务条款入口。
 
@@ -30,7 +30,7 @@ Feigram 运行在 Web 容器中，和 Telegram 官方桌面客户端不同，无
 - 群组信息中的后台缓存开关会静默缓存大于 100MB 的视频，不写入用户下载列表，最多同时运行 5 个后台缓存任务。
 - 用户主动下载任务和后台缓存任务会落盘保存，服务重启或版本升级后自动恢复。
 - 浏览器无法解码的视频，可以切换本地播放器模式，或先缓存后用系统播放器打开。
-- 2.0.34 起 Go 下载 sidecar 接管大文件下载队列、断点文件、并发和限速；Node 仅保留本机受保护的 Telegram 媒体流桥接，避免旧 Node 下载状态机继续参与任务调度。
+- 2.0.70 起移除实验性 Go sidecar，下载与后台缓存统一由 Telegram/GramJS 管线处理。
 
 ## 首次使用
 
@@ -60,7 +60,7 @@ npm start
 bash scripts/build-native-fpk.sh
 ```
 
-构建产物会输出到 `release/`。脚本会打包前端静态资源、后端服务、Node.js 运行时和 Go 下载 sidecar。
+构建产物会输出到 `release/`。脚本会打包前端静态资源、后端服务和 Node.js 运行时。
 
 ## 官网部署
 
@@ -74,7 +74,6 @@ bash scripts/build-native-fpk.sh
 
 - `client/`：React 前端。
 - `server/`：Express 后端、MTProto 接入、下载缓存、设置和公告。
-- `downloader/`：Go 下载 sidecar，负责独立下载服务 API 和后续 Telegram 大文件下载迁移。
 - `fnos-native-package/`：飞牛 OS FPK 包结构。
 - `scripts/`：构建和运行时准备脚本。
 - `docs/`：发布说明、隐私政策、服务条款。
@@ -89,9 +88,6 @@ Feigram 使用和打包了以下主要开源项目：
 - Express、Socket.IO、cors、dotenv、fs-extra、mime-types、big-integer：后端服务和实时通信。
 - lucide-react：界面图标。
 - Node.js：FPK 内置运行时。
-- Go：构建 FPK 时用于编译内嵌下载 sidecar。
-
-Feigram 参考 `iyear/tdl` 的 DC-aware 下载、分片并发和断点续传思路，但不复制 tdl 源码；tdl 采用 AGPL-3.0 许可证，后续若引入相关代码或二进制组件，需要按许可证要求同步开源和署名。
 
 Telegram 名称、协议和相关商标归其各自权利人所有。Feigram 只是第三方客户端项目，不代表 Telegram 或飞牛官方。
 
@@ -99,8 +95,6 @@ Telegram 名称、协议和相关商标归其各自权利人所有。Feigram 只
 
 - [发布说明](docs/release-notes.md)
 - [缓存与下载逻辑](docs/cache-download-logic.md)
-- [Go 下载 Sidecar](docs/go-downloader-sidecar.md)
-- [下载后端评估](docs/downloader-backend-evaluation.md)
 - [隐私政策](docs/privacy-policy.md)
 - [服务条款](docs/terms-of-service.md)
 
