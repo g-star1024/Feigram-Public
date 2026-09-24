@@ -147,9 +147,12 @@ type Task struct {
 	Error       string             `json:"error"`
 	RetryCount  int                `json:"retryCount"`
 	RetryAfter  int64              `json:"retryAfterUnix"`
-	Order       int64              `json:"order"`
-	CreatedAt   string             `json:"createdAt"`
-	UpdatedAt   string             `json:"updatedAt"`
+	// R4.33：网络自愈自动复活防抖——「重试上限」终态任务在网络恢复后被自动
+	// 拉起一次；若复活后再次打满上限，不再自动拉起（防无限复活循环）。
+	AutoRevived bool   `json:"autoRevived"`
+	Order       int64  `json:"order"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
 }
 
 type NativeFileLocation struct {
@@ -441,6 +444,14 @@ func (a *App) load() error {
 			task.Status = "queued"
 			task.RetryAfter = 0
 			task.Error = "2.6.9 修复媒体 DC 授权导出后自动复活，等待续传"
+		}
+		if task.Status == "error" && strings.Contains(task.Error, "找不到会话") {
+			// R4.33：R4.30 之前「peer 解析失败」会一票终态（2.6.10 实测截图：
+			// 09/23 的 Channel:2052039292 任务至今挂着）；索引落盘 + 会话深翻
+			// 分页后该错误已转瞬态，陈旧终态升级时自动复活（与上面两类同模式）。
+			task.Status = "queued"
+			task.RetryAfter = 0
+			task.Error = "2.6.11 修复 peer 解析（索引落盘+深翻分页）后自动复活，等待续传"
 		}
 		if task.Status != "downloading" && task.Status != "running" {
 			task.SpeedBps = 0

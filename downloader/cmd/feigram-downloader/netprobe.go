@@ -261,7 +261,67 @@ func (a *App) probeMediaDCs(account NativeAccount) mediaProbeSnapshot {
 	a.mediaProbes[key] = snap
 	a.mu.Unlock()
 	log.Printf("media probe: account %s %s", key, snap.Summary)
+	// R4.33：网络自愈闭环——探测确认全部 DC 真实可用时，把该账号「重试上限」
+	// 终态任务自动拉起一轮。此前用户在网络修复后还必须逐个手动点重试。
+	if allMediaDCsHealthy(results) {
+		a.reviveNetworkStalledTasks(account.UserID, account.AccountID)
+	}
 	return snap
+}
+
+// allMediaDCsHealthy 判定一轮探测是否全部 DC 真实可用（TCP+MTProto 握手均过）。
+// 纯函数便于单测。
+func allMediaDCsHealthy(results []mediaDCProbe) bool {
+	if len(results) == 0 {
+		return false
+	}
+	for _, r := range results {
+		if !r.OK || !r.MTPOK {
+			return false
+		}
+	}
+	return true
+}
+
+// isRetryCapError 判定任务错误是否为「瞬态重试上限」终态（新旧文案均覆盖）。
+// 纯函数便于单测。
+func isRetryCapError(errText string) bool {
+	return strings.Contains(errText, "已自动重试") && strings.Contains(errText, "次后停止")
+}
+
+// reviveNetworkStalledTasks 网络自愈自动复活：把指定账号因「重试上限」终态的任务
+// 拉起一轮。每个任务只自动复活一次（AutoRevived 防抖）——若复活后网络再次恶化
+// 打满上限，不会再被自动拉起，避免「探测绿→复活→打满→再复活」的无限循环；
+// 此时用户可手动重试。
+func (a *App) reviveNetworkStalledTasks(userID, accountID string) {
+	a.mu.Lock()
+	ids := make([]string, 0, 4)
+	for id, t := range a.tasks {
+		if t == nil || t.Status != "error" || t.AutoRevived || !isRetryCapError(t.Error) {
+			continue
+		}
+		if t.UserID != userID || t.AccountID != accountID {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	a.mu.Unlock()
+	for _, id := range ids {
+		a.updateTask(id, func(t *Task) {
+			if t.Status != "error" || t.AutoRevived || !isRetryCapError(t.Error) {
+				return // 复活窗口内状态可能已被并发改动，双检防误拉
+			}
+			t.Status = "queued"
+			t.RetryCount = 0
+			t.RetryAfter = 0
+			t.AutoRevived = true
+			t.Error = "网络已恢复（媒体 DC 握手全部正常），自动复活，等待续传"
+			t.UpdatedAt = now()
+		})
+	}
+	if len(ids) > 0 {
+		log.Printf("network healed: %d 个重试上限终态任务已自动复活，等待续传", len(ids))
+	}
 }
 
 // mediaProbeSummary 依据 TCP+MTProto 两层探测结果生成可区分结论（R4.22 铁律：

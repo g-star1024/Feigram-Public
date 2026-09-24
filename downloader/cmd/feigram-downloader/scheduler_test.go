@@ -667,6 +667,49 @@ func TestLatestMediaHandshakeMs(t *testing.T) {
 	}
 }
 
+// R4.33：网络自愈自动复活——探测全绿时应把该账号「重试上限」终态任务拉起一轮；
+// 防抖字段生效（只复活一次）；他账号任务不受影响；非重试上限错误不误拉。
+func TestReviveNetworkStalledTasks(t *testing.T) {
+	if !allMediaDCsHealthy([]mediaDCProbe{{DC: 1, OK: true, MTPOK: true}}) {
+		t.Fatal("单个全绿 DC 应判健康")
+	}
+	if allMediaDCsHealthy([]mediaDCProbe{{DC: 1, OK: true, MTPOK: false}}) {
+		t.Fatal("握手未过不应判健康")
+	}
+	if allMediaDCsHealthy(nil) {
+		t.Fatal("空结果不应判健康")
+	}
+	if !isRetryCapError("媒体源长时间不可用，已自动重试 120 次后停止；请稍后手动重试") {
+		t.Fatal("旧版重试上限文案应被识别")
+	}
+	if !isRetryCapError("媒体源长时间不可用，已自动重试 120 次后停止；请在代理放行 Telegram 全部网段或更换节点后点「重试」，将从断点续传") {
+		t.Fatal("新版重试上限文案应被识别")
+	}
+	if isRetryCapError("file_reference 失效：找不到会话 Channel:1") {
+		t.Fatal("非重试上限错误不应被识别")
+	}
+
+	app := newTestApp(t, Config{Enabled: true, Concurrency: 1, Mode: "conservative"})
+	app.tasks["t1"] = &Task{ID: "t1", UserID: "u", AccountID: "a", Status: "error", Error: "媒体源长时间不可用，已自动重试 120 次后停止；请稍后手动重试", RetryCount: 120}
+	app.tasks["t2"] = &Task{ID: "t2", UserID: "u", AccountID: "a", Status: "error", AutoRevived: true, Error: "已自动重试 120 次后停止", RetryCount: 120}
+	app.tasks["t3"] = &Task{ID: "t3", UserID: "u", AccountID: "b", Status: "error", Error: "已自动重试 120 次后停止", RetryCount: 120}
+	app.tasks["t4"] = &Task{ID: "t4", UserID: "u", AccountID: "a", Status: "error", Error: "找不到会话 Channel:1"}
+
+	app.reviveNetworkStalledTasks("u", "a")
+	if app.tasks["t1"].Status != "queued" || app.tasks["t1"].RetryCount != 0 || !app.tasks["t1"].AutoRevived {
+		t.Fatalf("t1 重试上限任务应被自动复活: %+v", app.tasks["t1"])
+	}
+	if app.tasks["t2"].Status != "error" || !app.tasks["t2"].AutoRevived {
+		t.Fatalf("t2 已复活过不应再拉起: %+v", app.tasks["t2"])
+	}
+	if app.tasks["t3"].Status != "error" {
+		t.Fatalf("t3 属其他账号不应被拉起: %+v", app.tasks["t3"])
+	}
+	if app.tasks["t4"].Status != "error" {
+		t.Fatalf("t4 非重试上限错误不应被拉起（由 load 归一化复活）: %+v", app.tasks["t4"])
+	}
+}
+
 // R4.31：mediaDCDiagnosis 纯函数四分类——下载错误里的诊断文案必须区分
 // 「TCP 即失败」「本地接受未转发」「TCP+握手均正常」三种世界。
 func TestMediaDCDiagnosisCategories(t *testing.T) {

@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.10"
-export APP_CHANGELOG="下载换轨：媒体连接改走主 DC static 地址（与探测同源，代理黑洞终结）；探测去抖（握手超时 10s+重试一次）；首字节看门狗按节点延迟自适应放宽"
+export APP_VERSION="2.6.11"
+export APP_CHANGELOG="网络自愈闭环：媒体 DC 探测全绿时自动复活「重试上限」终态任务（每任务一次防抖）；「找不到会话」陈旧终态升级自动复活"
 export NODE_ENV="production"
 
 is_running() {
