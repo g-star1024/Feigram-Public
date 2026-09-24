@@ -176,8 +176,8 @@ func (c offsetShiftClient) UploadGetFile(ctx context.Context, req *tg.UploadGetF
 				c.onPremiumWait(secs)
 			}
 			wait := time.Duration(secs) * time.Second
-			if cap := c.premiumInlineWaitCap; cap > 0 && wait > cap {
-				return nil, &floodWaitError{Seconds: secs, Err: err}
+			if waitCap := c.premiumInlineWaitCap; waitCap > 0 && wait > waitCap {
+				return nil, &floodWaitError{Seconds: secs, Premium: true, Err: err}
 			}
 			select {
 			case <-time.After(wait):

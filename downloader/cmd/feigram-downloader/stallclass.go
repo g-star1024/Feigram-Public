@@ -297,15 +297,19 @@ func (a *App) mediaDCStallCounts(userID, accountID string) map[int]int {
 var premiumWaitRe = regexp.MustCompile(`(?i)FLOOD_PREMIUM_WAIT[_ (]*(\d+)`)
 
 // premiumWaitFromError 从错误链中解析 FLOOD_PREMIUM_WAIT 的等待秒数；
-// 非该类限流返回 0。优先识别我们自己的 *floodWaitError 包装（长等待上抛
-// 复用同一类型），再按文本兜底——gotd 的 tgerr 不认识这个错误码。
+// 非该类限流返回 0。类型化检查只认带 Premium 标记的上抛（classifyNativeReadError
+// 包装的普通 FLOOD_WAIT 也是 *floodWaitError，不得误判），再按文本兜底——
+// gotd 的 tgerr 不认识这个错误码，实测错误只能靠文本匹配。
 func premiumWaitFromError(err error) int {
 	if err == nil {
 		return 0
 	}
 	var typed *floodWaitError
 	if errors.As(err, &typed) && typed.Seconds > 0 {
-		return typed.Seconds
+		if typed.Premium {
+			return typed.Seconds
+		}
+		return 0
 	}
 	if match := premiumWaitRe.FindStringSubmatch(err.Error()); match != nil {
 		if seconds, convErr := strconv.Atoi(match[1]); convErr == nil && seconds > 0 {

@@ -3912,6 +3912,10 @@ func sentCodeHash(sent tg.AuthSentCodeClass) (string, error) {
 // 按 Telegram 的要求精确等待（封顶 floodWaitBackoffCap）。
 type floodWaitError struct {
 	Seconds int
+	// Premium（R4.43）：标记这是 FLOOD_PREMIUM_WAIT（免费账号下载带宽限流）
+	// 的上抛。classifyNativeReadError 也会把普通 FLOOD_WAIT 包装成同一类型，
+	// 不区分的话 premiumWaitFromError 会把真 FLOOD_WAIT 误标成 premium。
+	Premium bool
 	Err     error
 }
 

@@ -211,7 +211,8 @@ func TestPremiumWaitFromErrorParsesRealForms(t *testing.T) {
 		{"实测包装形态", errors.New("invoke pool: rpcDoRequest: rpc error code 420: FLOOD_PREMIUM_WAIT (7)"), 7},
 		{"括号形态大写", errors.New("rpc error code 420: FLOOD_PREMIUM_WAIT (13)"), 13},
 		{"下划线形态", errors.New("FLOOD_PREMIUM_WAIT_3"), 3},
-		{"类型化上抛", &floodWaitError{Seconds: 12, Err: errors.New("x")}, 12},
+		{"类型化上抛", &floodWaitError{Seconds: 12, Premium: true, Err: errors.New("x")}, 12},
+		{"普通 FLOOD_WAIT 的类型化包装不是 premium", &floodWaitError{Seconds: 1464, Err: errors.New("rpc error code 420: FLOOD_WAIT (1464)")}, 0},
 		{"普通 FLOOD_WAIT 不是 premium", errors.New("rpc error code 420: FLOOD_WAIT (1464)"), 0},
 		{"无数字", errors.New("FLOOD_PREMIUM_WAIT"), 0},
 		{"无关错误", errors.New("connection reset"), 0},
@@ -235,8 +236,8 @@ func TestClassifyTransientErrorPremiumIsFlood(t *testing.T) {
 	if got := classifyTransientError(raw); got != classFlood {
 		t.Fatalf("premium 限流应归为 classFlood，得到 %v", got)
 	}
-	// 类型化上抛形态（长等待）也要进 classFlood。
-	var typed error = &floodWaitError{Seconds: 300, Err: raw}
+	// 类型化上抛形态（长等待）也要进 classFlood，且必须带 Premium 标记。
+	var typed error = &floodWaitError{Seconds: 300, Premium: true, Err: raw}
 	if !transientSourceError(typed) {
 		t.Fatal("类型化上抛形态也必须瞬态")
 	}
