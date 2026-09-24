@@ -14,6 +14,16 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.28",
+    title: "Feigram 2.6.28 更新",
+    version: "2.6.28",
+    level: "success",
+    createdAt: "2026-09-24T22:43:49.000Z",
+    body: [
+"修复桌面图标四周的黑色描边：裁除原图自带的 9px 黑边后重新应用飞牛官方风格大圆角"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.27",
     title: "Feigram 2.6.27 更新",
     version: "2.6.27",
@@ -54,21 +64,6 @@ const announcements = [
     createdAt: "2026-09-24T15:26:27.000Z",
     body: [
 "修复群组信息面板错位：点击会话标题查看群组信息时，面板现在以右侧固定抽屉展示（此前缩在窗口左下角被裁掉）"
-    ].join("\n")
-  },
-  {
-    id: "release-2.6.23",
-    title: "Feigram 2.6.23 更新",
-    version: "2.6.23",
-    level: "success",
-    createdAt: "2026-09-24T14:46:37.000Z",
-    body: [
-"下载列表与后台缓存列表的错误提示净化：只保留中文说明，英文技术链移入悬停提示",
-      "手动下载的任务现在也会进入「资源库」",
-      "后台缓存面板优化：标注下载引擎、保守模式下并发固定为 1 的说明与展示修正",
-      "账号管理：重新登录按钮移到退出按钮之前",
-      "桌面图标名称改为 feigram",
-      "修复网络抖动时 waitSession: connection dead / engine forcibly closed 被误判为终态失败"
     ].join("\n")
   },
 ];
