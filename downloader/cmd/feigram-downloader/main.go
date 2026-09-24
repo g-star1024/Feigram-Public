@@ -53,6 +53,17 @@ const (
 	// 误判挂死；按该 DC 最近探测握手耗时 ×4 放宽，封顶 90s。
 	nativeFirstByteAdaptiveCap = 90 * time.Second
 
+	// R4.36-D：下载进度心跳间隔。长任务期间主日志每 30s 至少有一条可读进度，
+	// 用来区分「低速但仍在传」与「已挂死」（2.6.13 实测两分钟静默的盲区）。
+	downloadHeartbeatInterval = 30 * time.Second
+
+	// R4.36-E：候选 media DC 的轻量真实 RPC 探针超时。握手成功不代表能跑
+	// RPC 流（2.6.13 实测 DC 1 握手全绿却反复 retryUntilAck 5 次失败），
+	// 所以选 DC 前用 help.getConfig 做一次真实加密往返验证，超时即换 DC。
+	mediaDCRealRPCProbeTimeout = 15 * time.Second
+	// mediaDCRealRPCMaxCandidates 单次下载最多尝试几个候选 DC（含首选）。
+	mediaDCRealRPCMaxCandidates = 3
+
 	// R4.29：后台缓存任务两次调度之间的最小间隔（错峰），避免缓存批量入队时
 	// 短时间内连续建连/exportAuth 加深账号限流。
 	autoSpawnMinInterval = 2 * time.Second
@@ -305,6 +316,12 @@ type App struct {
 	peerResolveMu       sync.Mutex
 	peerResolveInflight map[string]*peerResolveCall
 	peerResolveCooldown map[string]time.Time
+	// R4.36 冷却分级：结构性「找不到会话」只退避该 peer（peerResolvePeerCooldown /
+	// peerResolveFailCount），不连坐账号内其他频道的解析；只有限流/传输类失败才
+	// 进账号级 peerResolveCooldown。连续 peerStructFailThreshold 次结构性失败
+	// 升级为可操作终态（peerUnreachableError）。键为 accountKey|peerID。
+	peerResolvePeerCooldown map[string]time.Time
+	peerResolveFailCount    map[string]int
 	// lastAutoSpawn 记录上次调度后台缓存（auto）任务的时间（R4.29 错峰），
 	// 与手动下载之间保持 autoSpawnMinInterval 的最小间隔。
 	lastAutoSpawn time.Time
@@ -348,8 +365,10 @@ func main() {
 		mediaConns:  map[string]*mediaConn{},
 		mediaProbes: map[string]mediaProbeSnapshot{},
 		// R4.35：peer 解析闸门（singleflight + 冷却）
-		peerResolveInflight: map[string]*peerResolveCall{},
-		peerResolveCooldown: map[string]time.Time{},
+		peerResolveInflight:     map[string]*peerResolveCall{},
+		peerResolveCooldown:     map[string]time.Time{},
+		peerResolvePeerCooldown: map[string]time.Time{},
+		peerResolveFailCount:    map[string]int{},
 		client: &http.Client{
 			Timeout:   0,
 			Transport: newMediaTransport(proxy),
@@ -682,7 +701,14 @@ func (a *App) taskCanStartLocked(task *Task, transport string) bool {
 		return task.SourceURL != ""
 	case "native-mtproto":
 		account, ok := a.native[nativeAccountKey(task.UserID, task.AccountID)]
-		return ok && account != nil && nativeAccountEligible(*account)
+		if !ok || account == nil || !nativeAccountEligible(*account) {
+			return false
+		}
+		// R4.36-C：peer 解析处在冷却/退避期时不启动。否则每次都要建连 + 选 DC +
+		// 探测，2 秒后才发现「解析在冷却中」——2.6.13 实测 11:20:01 与 11:22:58
+		// 两次实例，纯浪费且干扰日志判读。
+		_, cooling := a.peerResolveCooldownRemaining(task.UserID, task.AccountID, task.PeerID)
+		return !cooling
 	default:
 		return false
 	}
@@ -709,6 +735,10 @@ func (a *App) taskWaitReasonLocked(task *Task, transport string) string {
 				reason = "等待健康检查通过"
 			}
 			return "Telegram 账号尚未就绪（" + reason + "），下载将在账号恢复后自动继续"
+		}
+		// R4.36-C：解析冷却期把原因与剩余时间写给用户，而不是静默等。
+		if remain, cooling := a.peerResolveCooldownRemaining(task.UserID, task.AccountID, task.PeerID); cooling {
+			return fmt.Sprintf("等待频道解析退避结束（剩余 %s）——%s 的索引解析被限流或暂未找到该会话，结束后自动重试", remain.Round(time.Second), task.PeerID)
 		}
 	}
 	return ""
@@ -1372,9 +1402,40 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 		// R4.31：先捕获目标 DC——switchToMediaDC 失败路径会把 fileDC 重置为 0，
 		// 之前直接打印 fileDC 恒为 0（2.6.8 实测「media DC 0 unavailable」的来源），
 		// 日志失去定位价值。
-		targetDC := fileDC
-		if err := switchToMediaDC(fileDC); err != nil {
-			log.Printf("task %s media DC %d unavailable, fallback current DC: %v", task.ID, targetDC, err)
+		// R4.36-E：候选轮换 + 真实 RPC 探针。握手绿 ≠ 能跑流（2.6.13 实测
+		// DC 1/4 的 MTProto 握手全绿，upload.getFile 却反复 retryUntilAck 失败），
+		// 因此选中候选后立即发一次 help.getConfig 真实加密往返；失败就换下一个
+		// 候选（按最近探测结论优选），最多 mediaDCRealRPCMaxCandidates 个。
+		// 探针只做优选：全部失败时仍兜底使用最后一个连得上的 DC，不让探针
+		// 自身的问题阻断下载。
+		candidates := a.mediaDCCandidates(task.UserID, task.AccountID, fileDC, primaryDC)
+		selected := 0
+		fallbackDC := 0
+		for idx, dc := range candidates {
+			if idx >= mediaDCRealRPCMaxCandidates {
+				break
+			}
+			target := dc
+			if err := switchToMediaDC(dc); err != nil {
+				log.Printf("task %s media DC %d unavailable（候选 %d/%d），尝试下一个：%v", task.ID, target, idx+1, len(candidates), err)
+				continue
+			}
+			fallbackDC = dc
+			if probeErr := a.probeMediaDCRealRPC(ctx, fileAPI, dc); probeErr != nil {
+				log.Printf("task %s media DC %d 真实 RPC 探针失败（候选 %d/%d）：%v", task.ID, dc, idx+1, len(candidates), probeErr)
+				continue
+			}
+			selected = dc
+			log.Printf("task %s media DC %d 通过真实 RPC 探针（候选 %d/%d），开始传输", task.ID, dc, idx+1, len(candidates))
+			break
+		}
+		if selected == 0 && fallbackDC > 0 {
+			if fileDC != fallbackDC {
+				if err := switchToMediaDC(fallbackDC); err != nil {
+					log.Printf("task %s 兜底切回 media DC %d 失败：%v", task.ID, fallbackDC, err)
+				}
+			}
+			log.Printf("task %s 无候选 DC 通过真实 RPC 探针（候选 %v），兜底使用 media DC %d", task.ID, candidates, fallbackDC)
 		}
 	}
 	download := func() error {
@@ -1382,6 +1443,11 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 		lastTick := time.Now()
 		windowStart := time.Now()
 		var windowBytes int64
+		// R4.36-D：心跳用。此前下载中只有秒级写库、没有任何日志——2.6.13 实测
+		// 11:20:43→11:22:46 主日志完全静默，最后只等来 RPC 层的 context canceled，
+		// 无法区分「低速但仍在传」与「已挂死」（日志判读盲区）。
+		lastSpeed := int64(0)
+		lastHeartbeat := time.Now()
 		a.updateTask(task.ID, func(t *Task) {
 			t.Downloaded = downloaded
 			t.Size = max64(t.Size, task.Size)
@@ -1490,12 +1556,25 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 				speed := int64(float64(downloaded-lastBytes) / maxFloat(elapsed, 0.001))
 				lastBytes = downloaded
 				lastTick = time.Now()
+				lastSpeed = speed
 				a.updateTask(task.ID, func(t *Task) {
 					t.Downloaded = downloaded
 					t.SpeedBps = speed
 					t.Size = max64(t.Size, task.Size)
 					t.UpdatedAt = now()
 				})
+			}
+			// R4.36-D：周期性进度心跳，填补「长任务在主日志里长时间静默」的
+			// 判读盲区（2.6.13 实测 11:20:43→11:22:46 无任何输出，事后无法
+			// 判断是在低速传还是已挂死）。
+			if time.Since(lastHeartbeat) >= downloadHeartbeatInterval {
+				lastHeartbeat = time.Now()
+				pct := 0.0
+				if task.Size > 0 {
+					pct = float64(downloaded) / float64(task.Size) * 100
+				}
+				log.Printf("task %s progress: %d/%d bytes (%.1f%%), dc=%d, speed=%.2f MB/s",
+					task.ID, downloaded, task.Size, pct, fileDC, float64(lastSpeed)/(1024*1024))
 			}
 		}
 		return nil
@@ -2082,6 +2161,9 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// R4.36：手动重试重置该 peer 的结构性解析失败计数与退避——用户把频道
+	// 重新加入账号后点「重试」，解析能立刻恢复，不必等计数/冷却自然过期。
+	a.resetPeerResolveFailures(result.UserID, result.AccountID, result.PeerID)
 	go a.pumpOnce()
 	writeJSON(w, http.StatusOK, result)
 }
@@ -3801,6 +3883,12 @@ func maxFloat(a, b float64) float64 {
 
 func transientSourceError(err error) bool {
 	if err == nil {
+		return false
+	}
+	// R4.36：peer 结构性不可达（频道已退出/被删除，深翻分页也找不到）不是瞬态——
+	// 无限重试没有意义，必须转成带操作指引的终态（手动重试可重置计数后恢复）。
+	var unreachable *peerUnreachableError
+	if errors.As(err, &unreachable) {
 		return false
 	}
 	// R4.22：账号未就绪不是「媒体源故障」，但同样要按瞬态处理——账号恢复后

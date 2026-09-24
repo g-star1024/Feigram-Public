@@ -37,8 +37,18 @@ import (
 )
 
 const (
-	defaultChatDialogLimit  = 200
-	maxChatDialogLimit      = 500
+	defaultChatDialogLimit = 200
+	// maxChatDialogLimit 是「会话列表总量」上限（客户端可见条数），不是单次 RPC 的
+	// 可拉取量——MTProto 对 messages.getDialogs 的单页 limit 硬上限是 100，
+	// 传 500 服务端也只返回 100 条（R4.36 实证：此前把两者混为一谈，导致
+	// 每次都只拿到前 100 个会话，第 100 条之后的群组在列表里永不出现，
+	// 深翻分页也因「返回 100 < 500」被误判为已到列表末尾而从未真正翻页）。
+	maxChatDialogLimit = 500
+	// dialogPageSize 是单次 messages.getDialogs 的请求页大小，必须 ≤ Telegram
+	// 的硬上限 100，否则无法区分「本页已到末尾」与「服务端截断」。
+	dialogPageSize = 100
+	// nativeDialogPageRounds 是单个文件夹最多翻多少页（100×30 = 3000 会话）。
+	nativeDialogPageRounds  = 30
 	defaultChatMessageLimit = 50
 	maxChatMessageLimit     = 200
 	avatarChunkSize         = 256 * 1024
@@ -407,73 +417,125 @@ func (a *App) fetchNativeDialogs(ctx context.Context, api *tg.Client, account Na
 	index := map[string]nativePeerInfo{}
 	seen := map[string]bool{}
 	normalized := strings.ToLower(strings.TrimSpace(query))
+	if limit <= 0 {
+		limit = defaultChatDialogLimit
+	}
+	if limit > maxChatDialogLimit {
+		limit = maxChatDialogLimit
+	}
+	// R4.36：带查询词时要扫描更多会话才可能命中（返回条数仍以 limit 封顶）。
+	scanLimit := limit
+	if normalized != "" {
+		scanLimit = maxChatDialogLimit
+	}
 
-	fetchFolders := dialogFolderIDs(includeArchived)
-	for _, folderID := range fetchFolders {
-		request := &tg.MessagesGetDialogsRequest{
-			OffsetPeer: &tg.InputPeerEmpty{},
-			Limit:      limit,
+	for _, folderID := range dialogFolderIDs(includeArchived) {
+		var offsetPeer tg.InputPeerClass = &tg.InputPeerEmpty{}
+		offsetID := 0
+		scanned := 0
+		// truncated 记录「本文件夹是否因达到上限而提前收工」——用于在触及
+		// 总量上限时给出可操作提示（用户看不到某个群组时能立刻判断是不是
+		// 列表被截断，而不是继续怀疑账号/同步）。
+		truncated := true
+		// R4.36 根因修复：此前只发一次 messages.getDialogs（Limit=limit）就收工，
+		// 而 MTProto 单页硬上限是 100——服务端只回 100 条，第 100 条之后的会话
+		// （大量群组）在列表里永不出现，深翻分页也因「返回 < 请求量」误判到底。
+		// 现在按 offset_peer + offset_id 真分页累加，直到达到上限或列表末尾。
+		for page := 0; page < nativeDialogPageRounds && scanned < scanLimit && len(items) < limit; page++ {
+			pageSize := dialogPageSize
+			if remain := scanLimit - scanned; remain < pageSize {
+				pageSize = remain
+			}
+			request := &tg.MessagesGetDialogsRequest{
+				OffsetPeer: offsetPeer,
+				OffsetID:   offsetID,
+				Limit:      pageSize,
+			}
+			if folderID > 0 {
+				request.SetFolderID(folderID)
+			}
+			result, err := api.MessagesGetDialogs(ctx, request)
+			if err != nil {
+				if folderID == 0 {
+					return nil, fmt.Errorf("获取会话列表失败：%w", err)
+				}
+				log.Printf("chatapi: archived dialogs fetch failed for %s/%s: %v", account.UserID, account.AccountID, err)
+				break
+			}
+			dialogs, messages, chats, users, ok := flattenNativeDialogs(result)
+			if !ok {
+				break
+			}
+			for id, info := range indexNativePeers(users, chats) {
+				index[id] = info
+			}
+			lastMessages := map[int]*tg.Message{}
+			for _, item := range messages {
+				if message, ok := item.(*tg.Message); ok {
+					lastMessages[message.ID] = message
+				}
+			}
+			// 分页游标取「本页最后一条 dialog」（即使它已因去重被跳过）；
+			// 拿不到它的 input peer（实体列表缺 accessHash）就无法继续翻页，
+			// 到此为止，避免盲目空翻。
+			pageDialogs := 0
+			var nextPeer tg.InputPeerClass
+			nextOffsetID := 0
+			for _, entry := range dialogs {
+				dialog, ok := entry.(*tg.Dialog)
+				if !ok || dialog == nil {
+					continue
+				}
+				pageDialogs++
+				if info, found := index[peerIDFromPeerClass(dialog.Peer)]; found {
+					if peer, peerErr := nativeInputPeerFromInfo(info); peerErr == nil {
+						nextPeer = peer
+						nextOffsetID = dialog.TopMessage
+					}
+				}
+				peerID := peerIDFromPeerClass(dialog.Peer)
+				if peerID == "" || seen[peerID] {
+					continue
+				}
+				folder, _ := dialog.GetFolderID()
+				info := index[peerID]
+				item := map[string]any{
+					"id":          peerID,
+					"rawId":       info.ID,
+					"accessHash":  info.AccessHash,
+					"title":       chatTitle(info, peerID),
+					"username":    info.Username,
+					"type":        info.Kind,
+					"avatarKey":   peerID,
+					"folderId":    folder,
+					"folderIds":   folderIDs(folder),
+					"unreadCount": dialog.UnreadCount,
+					"pinned":      dialog.Pinned,
+					"archived":    folder == 1,
+					"muted":       nativeDialogMuted(dialog),
+					"bot":         info.Bot,
+					"contact":     info.Contact,
+					"lastMessage": nil,
+				}
+				if message := lastMessages[dialog.TopMessage]; message != nil {
+					item["lastMessage"] = serializeNativeMessage(message, index)
+				}
+				if normalized == "" || chatMatchesQuery(item, normalized) {
+					items = append(items, item)
+				}
+				seen[peerID] = true
+			}
+			scanned += pageDialogs
+			// 本页不满一页 = 已到列表末尾；无下一页游标同样终止。
+			if pageDialogs < pageSize || nextPeer == nil {
+				truncated = false
+				break
+			}
+			offsetPeer = nextPeer
+			offsetID = nextOffsetID
 		}
-		if folderID > 0 {
-			request.SetFolderID(folderID)
-		}
-		result, err := api.MessagesGetDialogs(ctx, request)
-		if err != nil {
-			if folderID == 0 {
-				return nil, fmt.Errorf("获取会话列表失败：%w", err)
-			}
-			log.Printf("chatapi: archived dialogs fetch failed for %s/%s: %v", account.UserID, account.AccountID, err)
-			continue
-		}
-		dialogs, messages, chats, users, ok := flattenNativeDialogs(result)
-		if !ok {
-			continue
-		}
-		for id, info := range indexNativePeers(users, chats) {
-			index[id] = info
-		}
-		lastMessages := map[int]*tg.Message{}
-		for _, item := range messages {
-			if message, ok := item.(*tg.Message); ok {
-				lastMessages[message.ID] = message
-			}
-		}
-		for _, entry := range dialogs {
-			dialog, ok := entry.(*tg.Dialog)
-			if !ok || dialog == nil {
-				continue
-			}
-			peerID := peerIDFromPeerClass(dialog.Peer)
-			if peerID == "" || seen[peerID] {
-				continue
-			}
-			folder, _ := dialog.GetFolderID()
-			info := index[peerID]
-			item := map[string]any{
-				"id":          peerID,
-				"rawId":       info.ID,
-				"accessHash":  info.AccessHash,
-				"title":       chatTitle(info, peerID),
-				"username":    info.Username,
-				"type":        info.Kind,
-				"avatarKey":   peerID,
-				"folderId":    folder,
-				"folderIds":   folderIDs(folder),
-				"unreadCount": dialog.UnreadCount,
-				"pinned":      dialog.Pinned,
-				"archived":    folder == 1,
-				"muted":       nativeDialogMuted(dialog),
-				"bot":         info.Bot,
-				"contact":     info.Contact,
-				"lastMessage": nil,
-			}
-			if message := lastMessages[dialog.TopMessage]; message != nil {
-				item["lastMessage"] = serializeNativeMessage(message, index)
-			}
-			if normalized == "" || chatMatchesQuery(item, normalized) {
-				items = append(items, item)
-			}
-			seen[peerID] = true
+		if truncated && len(items) >= limit {
+			log.Printf("chatapi: 会话列表已达上限 %d 条（folder %d 仍有更多会话）——若有群组未显示，即为列表截断而非同步失败", limit, folderID)
 		}
 	}
 	storeNativePeerIndex(account.UserID, account.AccountID, index)
@@ -1210,10 +1272,41 @@ func serializeNativeMedia(message *tg.Message) map[string]any {
 
 // --- peer 解析 ------------------------------------------------------------
 
+// peerIndexUsable 判断索引条目是否「可直接使用」。channel 必须带 accessHash——
+// 否则 main.go 的 file_reference 刷新链路必然以「native peer 元数据缺失」失败，
+// 等于没有命中；这类贫信息（由消息发送者缓存产生）若在索引里短路返回，会让
+// 「回拉会话列表自愈」永远不被触发，解析逻辑在空 accessHash 上原地绕圈
+// （R4.36 核证）。
+func peerIndexUsable(info nativePeerInfo) bool {
+	if strings.TrimSpace(info.Type) == "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(info.Type), "channel") {
+		return strings.TrimSpace(info.AccessHash) != ""
+	}
+	return true
+}
+
+// lookupNativePeer 在索引中查找可用条目；未命中或条目不可用时返回 false，
+// 让调用方继续走「回拉会话列表 + 深翻分页」自愈路径。
+func lookupNativePeer(index map[string]nativePeerInfo, peerID string) (nativePeerInfo, bool) {
+	if len(index) == 0 {
+		return nativePeerInfo{}, false
+	}
+	info, ok := index[peerID]
+	if !ok || !peerIndexUsable(info) {
+		return nativePeerInfo{}, false
+	}
+	return info, true
+}
+
 // resolveNativePeer 把 "User:123" / "Chat:123" / "Channel:123" 解析为带 accessHash 的元数据。
 // accessHash 只能从 dialogs 返回的 entity 中获得，故本地索引未命中时回拉一次会话列表。
-// nativePeerBackfillRounds 深翻分页轮数上限：每轮 500 会话，6 轮 ≈ 3000/文件夹。
-const nativePeerBackfillRounds = 6
+// nativePeerBackfillRounds 深翻分页轮数上限：每轮 dialogPageSize(100) 会话，
+// 30 轮 ≈ 3000/文件夹。R4.36 修正——此前按「每轮 500 会话」设计，而 MTProto
+// 单页硬上限只有 100，每轮都会被误判为「不满页 = 已到末尾」，分页从未真正推进，
+// 这正是「第 100 条之后的频道永远解析不到」的根因。
+const nativePeerBackfillRounds = nativeDialogPageRounds
 
 // backfillNativePeerIndex 深翻会话列表分页，为 peer 索引补齐「不在首批 500 个
 // 会话」的频道/用户。R4.30：resolveNativePeer 此前只拉一次会话列表（上限 500），
@@ -1229,7 +1322,7 @@ func (a *App) backfillNativePeerIndex(ctx context.Context, api *tg.Client, accou
 			request := &tg.MessagesGetDialogsRequest{
 				OffsetPeer: offsetPeer,
 				OffsetID:   offsetID,
-				Limit:      maxChatDialogLimit,
+				Limit:      dialogPageSize,
 			}
 			if folderID > 0 {
 				request.SetFolderID(folderID)
@@ -1244,8 +1337,8 @@ func (a *App) backfillNativePeerIndex(ctx context.Context, api *tg.Client, accou
 			}
 			index := indexNativePeers(users, chats)
 			storeNativePeerIndex(account.UserID, account.AccountID, index)
-			if len(dialogs) < maxChatDialogLimit {
-				break // 本轮不满页：已到列表末尾
+			if len(dialogs) < dialogPageSize {
+				break // 本轮不满一页：已到列表末尾
 			}
 			// 以最后一个会话构造下一轮 offset。找不到（类型异常/索引缺 accessHash）
 			// 就到此为止，避免盲目空翻。
@@ -1279,14 +1372,13 @@ func (a *App) resolveNativePeer(ctx context.Context, api *tg.Client, account Nat
 	if peerID == "" {
 		return nativePeerInfo{}, errors.New("缺少 peer 参数")
 	}
-	if index := loadNativePeerIndex(account.UserID, account.AccountID); len(index) > 0 {
-		if info, ok := index[peerID]; ok {
-			return info, nil
-		}
+	if info, ok := lookupNativePeer(loadNativePeerIndex(account.UserID, account.AccountID), peerID); ok {
+		return info, nil
 	}
-	// R4.35：解析闸门——账号级 singleflight（并发任务只发一轮 dialogs 拉取/深翻）
+	// R4.35：解析闸门——singleflight（并发任务只发一轮 dialogs 拉取/深翻）
 	// + 失败冷却（被 Telegram 限流后账号级退避，不再 5~10s 就重翻）。
-	return a.peerResolveGate(nativeAccountKey(account.UserID, account.AccountID), func() (nativePeerInfo, error) {
+	// R4.36：冷却分级——结构性失败只退避该 peer，并把连续失败升级为可操作终态。
+	return a.peerResolveGate(nativeAccountKey(account.UserID, account.AccountID), peerID, func() (nativePeerInfo, error) {
 		return a.resolveNativePeerUncached(ctx, api, account, peerID)
 	})
 }
@@ -1297,10 +1389,8 @@ func (a *App) resolveNativePeerUncached(ctx context.Context, api *tg.Client, acc
 	if _, err := a.fetchNativeDialogs(ctx, api, account, maxChatDialogLimit, "", true); err != nil {
 		return nativePeerInfo{}, err
 	}
-	if index := loadNativePeerIndex(account.UserID, account.AccountID); len(index) > 0 {
-		if info, ok := index[peerID]; ok {
-			return info, nil
-		}
+	if info, ok := lookupNativePeer(loadNativePeerIndex(account.UserID, account.AccountID), peerID); ok {
+		return info, nil
 	}
 	// R4.30：首批 500 会话没有目标 peer 时深翻分页（最多 6 轮/文件夹）。
 	// 深翻失败不阻断——已翻到的部分可能已包含目标，最后再查一次索引；
@@ -1312,8 +1402,7 @@ func (a *App) resolveNativePeerUncached(ctx context.Context, api *tg.Client, acc
 		backfillErr = err
 		log.Printf("chatapi: peer %s 深翻会话列表未完成：%v", peerID, err)
 	}
-	index := loadNativePeerIndex(account.UserID, account.AccountID)
-	if info, ok := index[peerID]; ok {
+	if info, ok := lookupNativePeer(loadNativePeerIndex(account.UserID, account.AccountID), peerID); ok {
 		return info, nil
 	}
 	if backfillErr != nil {
@@ -1329,12 +1418,51 @@ type peerResolveCall struct {
 	err  error
 }
 
-// peer 解析冷却：失败后账号级退避，至少 60s；FLOOD_WAIT 时按 Telegram 给的
-// 秒数等待（封顶 15 分钟），避免在限流窗口内反复深翻。
+// peer 解析冷却：失败后按失败性质分级退避，至少 60s；FLOOD_WAIT 时按 Telegram
+// 给的秒数等待（封顶 15 分钟），避免在限流窗口内反复深翻。
 const (
 	peerResolveBaseCooldown = 60 * time.Second
 	peerResolveMaxCooldown  = 15 * time.Minute
+	// peerStructFailThreshold 连续多少次「结构性找不到会话」后判定为不可达
+	//（频道已退出/被删除）。深翻分页 + 索引落盘都覆盖过了，再重试不会变好。
+	peerStructFailThreshold = 3
 )
+
+// peerUnreachableError 表示该 peer 结构性不可达：连续多轮解析（含深翻分页）
+// 都找不到它，说明它已不在账号会话列表里（已退出该群组/频道被删除）。
+// 这不是瞬态错误——无限重试没有意义，必须转成带操作指引的终态。
+// 手动重试会重置计数，用户重新加入频道后可以立刻恢复。
+type peerUnreachableError struct {
+	PeerID string
+	Count  int
+}
+
+func (e *peerUnreachableError) Error() string {
+	return fmt.Sprintf("频道 %s 已不在你的会话列表中（连续 %d 次解析失败，已含会话列表深翻分页）：可能你已退出该群组，或该频道已被删除。"+
+		"该文件的下载无法继续——请先把该频道重新加入你的 Telegram 账号，然后点「重试」恢复（重试会重置解析计数）", e.PeerID, e.Count)
+}
+
+// isRateLimitPeerError 区分「限流/传输类失败」与「结构性失败」：
+// 前者账号级退避（保护账号不再撞 FLOOD_WAIT），后者只退避该 peer
+// （否则一个不可达频道会把其他健康频道的解析一起冻结 60s，R4.36 核证）。
+func isRateLimitPeerError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if floodWaitFromError(err) > 0 {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"flood_wait", "floodwait", "too many requests", "timeout", "deadline exceeded",
+		"connection", "retry limit reached", "retryuntilack", "engine was closed", "eof",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 // peerResolveCooldownDuration 依据失败原因计算冷却时长。纯函数便于单测。
 func peerResolveCooldownDuration(err error) time.Duration {
@@ -1350,14 +1478,17 @@ func peerResolveCooldownDuration(err error) time.Duration {
 	return d
 }
 
-// peerResolveGate 账号级 peer 解析闸门（R4.35）：
-//   - 冷却中：直接返回可读错误（不发起任何 RPC）；
-//   - 已有在途解析：等待其共享结果（singleflight），不重复深翻；
-//   - 否则执行 fn，失败则为该账号设置冷却。
+// peerResolveGate peer 解析闸门（R4.35 引入，R4.36 分级）：
+//   - 账号级冷却：仅限流/传输类失败后设置，保护账号不再撞 FLOOD_WAIT；
+//   - peer 级冷却：结构性「找不到会话」只退避该 peer，不连坐其他频道的解析；
+//   - singleflight：同账号并发解析共享一轮结果，不重复深翻；
+//   - 连续 peerStructFailThreshold 次结构性失败 → peerUnreachableError（终态）。
 //
 // 实测背景（2.6.12）：三个任务同时解析同一个缺失 accessHash 的频道，
 // 各自全量深翻会话列表 → FLOOD_WAIT(9)/(6) → 秒级重试再翻 → 限流自噬。
-func (a *App) peerResolveGate(key string, fn func() (nativePeerInfo, error)) (nativePeerInfo, error) {
+// 实测背景（2.6.13）：同一个不可达频道让整个账号的解析冻结 60s。
+func (a *App) peerResolveGate(accountKey, peerID string, fn func() (nativePeerInfo, error)) (nativePeerInfo, error) {
+	peerKey := peerResolveKeyOf(accountKey, peerID)
 	a.peerResolveMu.Lock()
 	// 惰性初始化：测试与部分构造点用 App 字面量，未走 newApp 初始化。
 	if a.peerResolveInflight == nil {
@@ -1366,35 +1497,105 @@ func (a *App) peerResolveGate(key string, fn func() (nativePeerInfo, error)) (na
 	if a.peerResolveCooldown == nil {
 		a.peerResolveCooldown = map[string]time.Time{}
 	}
-	if until, ok := a.peerResolveCooldown[key]; ok {
+	if a.peerResolvePeerCooldown == nil {
+		a.peerResolvePeerCooldown = map[string]time.Time{}
+	}
+	if a.peerResolveFailCount == nil {
+		a.peerResolveFailCount = map[string]int{}
+	}
+	if until, ok := a.peerResolveCooldown[accountKey]; ok {
 		if remain := time.Until(until); remain > 0 {
 			a.peerResolveMu.Unlock()
 			return nativePeerInfo{}, fmt.Errorf("会话索引解析在冷却中（剩余 %s）——上一轮解析被 Telegram 限流，冷却结束会自动重试", remain.Round(time.Second))
 		}
-		delete(a.peerResolveCooldown, key)
+		delete(a.peerResolveCooldown, accountKey)
 	}
-	if call := a.peerResolveInflight[key]; call != nil {
+	if until, ok := a.peerResolvePeerCooldown[peerKey]; ok {
+		if remain := time.Until(until); remain > 0 {
+			a.peerResolveMu.Unlock()
+			return nativePeerInfo{}, fmt.Errorf("该频道解析退避中（剩余 %s）——上一轮解析没找到这个会话，稍后会自动重试", remain.Round(time.Second))
+		}
+		delete(a.peerResolvePeerCooldown, peerKey)
+	}
+	if call := a.peerResolveInflight[accountKey]; call != nil {
 		a.peerResolveMu.Unlock()
 		<-call.done
 		return call.info, call.err
 	}
 	call := &peerResolveCall{done: make(chan struct{})}
-	a.peerResolveInflight[key] = call
+	a.peerResolveInflight[accountKey] = call
 	a.peerResolveMu.Unlock()
 
 	info, err := fn()
 
 	a.peerResolveMu.Lock()
-	delete(a.peerResolveInflight, key)
-	if err != nil {
+	delete(a.peerResolveInflight, accountKey)
+	if err == nil {
+		// 解析成功：结构性失败计数归零（频道重新可达后立刻恢复常态）。
+		delete(a.peerResolveFailCount, peerKey)
+	} else if isRateLimitPeerError(err) {
 		cooldown := peerResolveCooldownDuration(err)
-		a.peerResolveCooldown[key] = time.Now().Add(cooldown)
-		log.Printf("peer resolve gate: account %s 解析失败，%s 内不再发起解析：%v", key, cooldown, err)
+		a.peerResolveCooldown[accountKey] = time.Now().Add(cooldown)
+		log.Printf("peer resolve gate: account %s 解析失败（限流/传输类），%s 内不再发起解析：%v", accountKey, cooldown, err)
+	} else {
+		cooldown := peerResolveCooldownDuration(err)
+		a.peerResolvePeerCooldown[peerKey] = time.Now().Add(cooldown)
+		a.peerResolveFailCount[peerKey]++
+		count := a.peerResolveFailCount[peerKey]
+		log.Printf("peer resolve gate: %s 解析失败（结构性，第 %d/%d 次），%s 内不再解析该 peer：%v", peerID, count, peerStructFailThreshold, cooldown, err)
+		if count >= peerStructFailThreshold {
+			// 深翻分页 + 索引落盘都覆盖过仍找不到 → 结构性不可达，转可操作终态。
+			err = &peerUnreachableError{PeerID: peerID, Count: count}
+		}
 	}
 	call.info, call.err = info, err
 	close(call.done)
 	a.peerResolveMu.Unlock()
 	return info, err
+}
+
+// peerResolveKeyOf 组合「账号 + peer」的解析退避键。
+func peerResolveKeyOf(accountKey, peerID string) string {
+	return accountKey + "|" + peerID
+}
+
+// peerResolveCooldownRemaining 返回该任务 peer 的解析冷却剩余时间（账号级限流冷却
+// 或 peer 级结构性退避，取先到期的那个）。供调度层在启动前判断——冷却期内启动
+// 注定失败，只是白建连接与白选 DC（R4.36-C）。
+func (a *App) peerResolveCooldownRemaining(userID, accountID, peerID string) (time.Duration, bool) {
+	if userID == "" || accountID == "" || peerID == "" {
+		return 0, false
+	}
+	accountKey := nativeAccountKey(userID, accountID)
+	peerKey := peerResolveKeyOf(accountKey, peerID)
+	a.peerResolveMu.Lock()
+	defer a.peerResolveMu.Unlock()
+	now := time.Now()
+	if until, ok := a.peerResolveCooldown[accountKey]; ok {
+		if remain := until.Sub(now); remain > 0 {
+			return remain, true
+		}
+	}
+	if until, ok := a.peerResolvePeerCooldown[peerKey]; ok {
+		if remain := until.Sub(now); remain > 0 {
+			return remain, true
+		}
+	}
+	return 0, false
+}
+
+// resetPeerResolveFailures 手动重试时清除该 peer 的结构性失败计数与退避，
+// 让「重新加入频道 → 点重试」能立即恢复解析（R4.36）。
+func (a *App) resetPeerResolveFailures(userID, accountID, peerID string) {
+	if userID == "" || accountID == "" || peerID == "" {
+		return
+	}
+	accountKey := nativeAccountKey(userID, accountID)
+	peerKey := peerResolveKeyOf(accountKey, peerID)
+	a.peerResolveMu.Lock()
+	defer a.peerResolveMu.Unlock()
+	delete(a.peerResolveFailCount, peerKey)
+	delete(a.peerResolvePeerCooldown, peerKey)
 }
 
 func nativeInputPeerFromInfo(info nativePeerInfo) (tg.InputPeerClass, error) {

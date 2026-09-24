@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.13"
-export APP_CHANGELOG="限流自噬修复：RPC 传输层失败（retryUntilAck 重试上限）转瞬态；peer 解析加账号级闸门（并发去重 + FLOOD_WAIT 精确冷却），不再三任务并翻会话列表互相加深限流"
+export APP_VERSION="2.6.14"
+export APP_CHANGELOG="会话列表分页根因修复：单页上限 100 被误当 500，第 100 条之后的群组永不显示、深翻分页从未真正翻页（「找不到会话」的真正原因）；现真分页累加。另：peer 冷却分级不连坐、连续 3 次结构性失败转可操作终态、调度前感知冷却、下载进度心跳、选 DC 前真实 RPC 探针"
 export NODE_ENV="production"
 
 is_running() {

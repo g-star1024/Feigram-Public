@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/gotd/td/telegram"
 	dcs "github.com/gotd/td/telegram/dcs"
+	"github.com/gotd/td/tg"
 )
 
 // healthProbeTimeout 分级探测的拨号超时；远小于健康检查整体 45s，避免叠加等待。
@@ -460,6 +462,63 @@ func (a *App) diagnoseMediaDC(dc int) string {
 		mtpErrMsg = mtpErr.Error()
 	}
 	return mediaDCDiagnosis(dc, addr, true, mtpErr == nil, tcpMs, mtpMs, mtpErrMsg, layer)
+}
+
+// mediaDCCandidates 给出本次下载的候选 media DC 顺序（R4.36-E）：
+// 任务元数据里的 DC 优先；其余按最近一轮媒体探测结论排序（MTProto 握手成功
+// 且耗时最短的在前，握手失败的直接排除）；主 DC 兜底。
+// 依据：2.6.13 实测 DC 4/1 的 MTProto 握手全绿，但 upload.getFile 的 invoke
+// 反复 retryUntilAck 5 次失败——握手正常不等于能跑 RPC 流，候选需优选。
+func (a *App) mediaDCCandidates(userID, accountID string, preferred, primaryDC int) []int {
+	out := []int{}
+	seen := map[int]bool{}
+	push := func(dc int) {
+		if dc <= 0 || seen[dc] {
+			return
+		}
+		seen[dc] = true
+		out = append(out, dc)
+	}
+	push(preferred)
+	a.mu.Lock()
+	snap, ok := a.mediaProbes[nativeAccountKey(userID, accountID)]
+	a.mu.Unlock()
+	if ok {
+		type cand struct {
+			dc int
+			ms int64
+		}
+		items := []cand{}
+		for _, r := range snap.Results {
+			if r.DC <= 0 || !r.MTPOK {
+				continue
+			}
+			items = append(items, cand{dc: r.DC, ms: r.MTPDuration})
+		}
+		sort.Slice(items, func(i, j int) bool { return items[i].ms < items[j].ms })
+		for _, it := range items {
+			push(it.dc)
+		}
+	}
+	push(primaryDC)
+	return out
+}
+
+// probeMediaDCRealRPC 在已切换到的 media DC 上发一次轻量真实 RPC（help.getConfig），
+// 验证「不只是握手成功，而是能跑真实加密 RPC 往返」（R4.36-E）。
+// 2.6.13 实测：DC 1/4 的 MTProto 真握手全绿，upload.getFile 却反复
+// retryUntilAck 5 次失败——握手与真实 RPC 是两回事。
+// 探针只做「优选」：调用方在全部候选探针失败时仍会兜底使用能连上的 DC。
+func (a *App) probeMediaDCRealRPC(ctx context.Context, api *tg.Client, dc int) error {
+	if api == nil {
+		return errors.New("media DC client 不可用")
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, mediaDCRealRPCProbeTimeout)
+	defer cancel()
+	if _, err := api.HelpGetConfig(probeCtx); err != nil {
+		return fmt.Errorf("DC %d help.getConfig: %w", dc, err)
+	}
+	return nil
 }
 
 // mediaDCDiagnosis 依据两层探测结果生成下载错误里的诊断文案。纯函数便于单测。

@@ -912,7 +912,7 @@ func TestPeerResolveGateSingleflightAndCooldown(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			results[idx], errs[idx] = app.peerResolveGate("u|a", gateFn)
+			results[idx], errs[idx] = app.peerResolveGate("u|a", "Channel:1", gateFn)
 		}(i)
 	}
 	<-started // 首轮已开始
@@ -934,10 +934,10 @@ func TestPeerResolveGateSingleflightAndCooldown(t *testing.T) {
 		failCalls++
 		return nativePeerInfo{}, errors.New("rpcDoRequest: rpc error code 420: FLOOD_WAIT (9)")
 	}
-	if _, err := app.peerResolveGate("u|b", failFn); err == nil {
+	if _, err := app.peerResolveGate("u|b", "Channel:9", failFn); err == nil {
 		t.Fatal("首次解析失败应返回错误")
 	}
-	_, err := app.peerResolveGate("u|b", failFn)
+	_, err := app.peerResolveGate("u|b", "Channel:9", failFn)
 	if err == nil || !strings.Contains(err.Error(), "解析在冷却中") {
 		t.Fatalf("冷却期内应返回冷却错误: %v", err)
 	}
@@ -945,9 +945,125 @@ func TestPeerResolveGateSingleflightAndCooldown(t *testing.T) {
 		t.Fatalf("冷却期内不应再发起解析，实际 %d 次", failCalls)
 	}
 	// 其他账号不受影响（冷却按账号隔离）
-	if _, err := app.peerResolveGate("u|c", func() (nativePeerInfo, error) {
+	if _, err := app.peerResolveGate("u|c", "Channel:1", func() (nativePeerInfo, error) {
 		return nativePeerInfo{ID: "1", Type: "user", AccessHash: "1"}, nil
 	}); err != nil {
 		t.Fatalf("其他账号不应被冷却波及: %v", err)
+	}
+
+	// R4.36-B：结构性「找不到会话」只退避该 peer，不连坐同账号其他频道的解析
+	//（2.6.13 实测缺口：一个不可达频道冻结整个账号 60s）。
+	structFn := func() (nativePeerInfo, error) {
+		return nativePeerInfo{}, errors.New("找不到会话 Channel:777，可能已退出该群组、会话已被删除")
+	}
+	if _, err := app.peerResolveGate("u|d", "Channel:777", structFn); err == nil {
+		t.Fatal("结构性失败首次应返回错误")
+	}
+	if _, err := app.peerResolveGate("u|d", "Channel:777", structFn); err == nil || !strings.Contains(err.Error(), "退避中") {
+		t.Fatalf("结构性失败后应仅对该 peer 退避: %v", err)
+	}
+	if _, err := app.peerResolveGate("u|d", "Channel:888", func() (nativePeerInfo, error) {
+		return nativePeerInfo{ID: "888", Type: "channel", AccessHash: "7"}, nil
+	}); err != nil {
+		t.Fatalf("结构性失败不得连坐同账号其他频道: %v", err)
+	}
+
+	// 连续 peerStructFailThreshold 次结构性失败 → 可操作终态（非瞬态，不再无限重试）。
+	app.peerResolveMu.Lock()
+	app.peerResolveFailCount[peerResolveKeyOf("u|e", "Channel:777")] = peerStructFailThreshold - 1
+	app.peerResolveMu.Unlock()
+	_, err = app.peerResolveGate("u|e", "Channel:777", structFn)
+	var unreachable *peerUnreachableError
+	if !errors.As(err, &unreachable) {
+		t.Fatalf("连续 %d 次结构性失败应升级为 peerUnreachableError: %v", peerStructFailThreshold, err)
+	}
+	if transientSourceError(err) {
+		t.Fatal("结构性不可达不得被判为瞬态错误（否则会无限重试）")
+	}
+	// 手动重试重置后立刻恢复可解析。
+	app.resetPeerResolveFailures("u", "e", "Channel:777")
+	if _, err := app.peerResolveGate("u|e", "Channel:777", func() (nativePeerInfo, error) {
+		return nativePeerInfo{ID: "777", Type: "channel", AccessHash: "9"}, nil
+	}); err != nil {
+		t.Fatalf("手动重试重置后应能正常解析: %v", err)
+	}
+}
+
+// R4.36-G：会话列表分页参数的守卫。messages.getDialogs 单页硬上限是 100，
+// 若把 dialogPageSize 调大，服务端会截断到 100，代码就会把「被截断」误判为
+// 「已到列表末尾」——这正是「第 100 条之后的群组永不出现」的根因，必须防回归。
+func TestDialogPaginationGuards(t *testing.T) {
+	if dialogPageSize > 100 {
+		t.Fatalf("dialogPageSize=%d 超过 Telegram 单页硬上限 100", dialogPageSize)
+	}
+	if dialogPageSize <= 0 {
+		t.Fatal("dialogPageSize 必须为正")
+	}
+	if maxChatDialogLimit%dialogPageSize != 0 {
+		t.Fatalf("会话总量上限 %d 应为页大小 %d 的整数倍，避免半页请求", maxChatDialogLimit, dialogPageSize)
+	}
+	if nativePeerBackfillRounds*dialogPageSize < maxChatDialogLimit {
+		t.Fatalf("深翻能力 %d 轮×%d 页 < 总量上限 %d，无法覆盖全部会话",
+			nativePeerBackfillRounds, dialogPageSize, maxChatDialogLimit)
+	}
+}
+
+// R4.36-E：候选 media DC 按「首选 → 探测握手耗时升序 → 主 DC 兜底」排序，
+// 握手失败的 DC 直接排除。
+func TestMediaDCCandidatesOrdering(t *testing.T) {
+	app := &App{mediaProbes: map[string]mediaProbeSnapshot{}}
+	app.mediaProbes[nativeAccountKey("u", "a")] = mediaProbeSnapshot{
+		Results: []mediaDCProbe{
+			{DC: 2, MTPOK: true, MTPDuration: 5000},
+			{DC: 4, MTPOK: true, MTPDuration: 1200},
+			{DC: 1, MTPOK: false},
+			{DC: 5, MTPOK: true, MTPDuration: 3000},
+		},
+	}
+	got := app.mediaDCCandidates("u", "a", 4, 5)
+	want := []int{4, 5, 2}
+	if len(got) != len(want) {
+		t.Fatalf("候选数量不符: got=%v want=%v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("候选顺序不符: got=%v want=%v", got, want)
+		}
+	}
+	// 无探测快照：仍要给出「首选 + 主 DC」的最小候选，且不重复。
+	app2 := &App{mediaProbes: map[string]mediaProbeSnapshot{}}
+	got = app2.mediaDCCandidates("u", "b", 4, 4)
+	if len(got) != 1 || got[0] != 4 {
+		t.Fatalf("首选与主 DC 相同时不应重复: %v", got)
+	}
+}
+
+// R4.36-C：调度层能看到解析冷却的剩余时间，从而不启动注定失败的任务。
+func TestPeerResolveCooldownRemaining(t *testing.T) {
+	app := &App{
+		peerResolveCooldown:     map[string]time.Time{},
+		peerResolvePeerCooldown: map[string]time.Time{},
+		peerResolveFailCount:    map[string]int{},
+	}
+	if _, cooling := app.peerResolveCooldownRemaining("u", "a", "Channel:1"); cooling {
+		t.Fatal("无冷却时不应报告冷却中")
+	}
+	// 账号级限流冷却：同账号任意 peer 都应看到。
+	app.peerResolveMu.Lock()
+	app.peerResolveCooldown["u|a"] = time.Now().Add(30 * time.Second)
+	app.peerResolveMu.Unlock()
+	if remain, cooling := app.peerResolveCooldownRemaining("u", "a", "Channel:1"); !cooling || remain <= 0 {
+		t.Fatalf("账号级冷却应被调度层感知: remain=%s cooling=%v", remain, cooling)
+	}
+	// peer 级结构性退避：只影响该 peer，同账号其他 peer 不受影响。
+	app.peerResolveMu.Lock()
+	delete(app.peerResolveCooldown, "u|a")
+	app.peerResolvePeerCooldown[peerResolveKeyOf("u|a", "Channel:7")] = time.Now().Add(20 * time.Second)
+	app.peerResolveMu.Unlock()
+	if _, cooling := app.peerResolveCooldownRemaining("u", "a", "Channel:7"); !cooling {
+		t.Fatal("peer 级退避应被调度层感知")
+	}
+	if _, cooling := app.peerResolveCooldownRemaining("u", "a", "Channel:8"); cooling {
+		t.Fatal("peer 级退避不得波及同账号其他 peer")
 	}
 }

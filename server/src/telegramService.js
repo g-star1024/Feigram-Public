@@ -43,6 +43,9 @@ const SLOW_TASK_MS = 3 * 60 * 1000;
 const MIN_HEALTHY_SPEED_BPS = 128 * 1024;
 const FAST_ZERO_SPEED_DEGRADE_MS = 45 * 1000;
 const IDLE_SPEED_RESET_MS = 20 * 1000;
+// 会话列表总量上限。R4.36：Go 侧此前只发一次 messages.getDialogs，而 MTProto
+// 单页硬上限是 100——用户会话数超过 100 时列表就显示不全（第 100 条之后的群组
+// 永不出现）。Go 侧已改为真分页累加，此上限现在才真正生效。
 const DIALOG_FETCH_LIMIT = 500;
 
 function stableId(prefix, ...parts) {
