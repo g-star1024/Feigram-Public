@@ -4,8 +4,13 @@ package main
 // 这些函数是纯函数，可在无 Telegram 凭据的环境下离线验证（铁律 4 的「真实验证」）。
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"os"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/tg"
 )
@@ -313,4 +318,201 @@ func TestTransientSourceErrorPeerResolution(t *testing.T) {
 	if transientSourceError(errors.New("invalid native channel id: parsing \"\"")) {
 		t.Fatal("非瞬态错误不应被误判")
 	}
+}
+
+// --- R4.39：会话列表分页游标守卫 -----------------------------------------
+//
+// 背景（2.6.16 实测）：messages.getDialogs 的 offset_date 在 TL 里是**无条件字段**
+// （gotd 生成代码 EncodeBare 里是裸 `b.PutInt(g.OffsetDate)`，无 flag 守卫），官方
+// dialogs.Iterator（telegram/query/dialogs/iter.go:153-164）每页都会带上它。此前只传
+// offset_peer + offset_id、offset_date 恒为 0，服务端拿 (date=0, id, peer) 定位不到
+// 「上一页末尾」，于是每页都从列表开头重发 → 页间大面积重叠：4 页取回 400 条，
+// 按 peer 去重后只剩 102 条，用户看到的群组列表自然永远「不全」。
+
+func channelInfo(id int64, accessHash int64) nativePeerInfo {
+	return nativePeerInfo{
+		PeerID:     "Channel:" + strconv.FormatInt(id, 10),
+		Type:       "channel",
+		ID:         strconv.FormatInt(id, 10),
+		AccessHash: strconv.FormatInt(accessHash, 10),
+		Kind:       "group",
+	}
+}
+
+func TestNextDialogCursorCarriesIDAndDate(t *testing.T) {
+	index := map[string]nativePeerInfo{"Channel:1": channelInfo(1, 1001)}
+	dialogs := []tg.DialogClass{&tg.Dialog{Peer: &tg.PeerChannel{ChannelID: 1}, TopMessage: 777}}
+	messages := lastMessageByID([]tg.MessageClass{&tg.Message{ID: 777, Date: 1700000000}})
+
+	cursor := nextDialogCursor(dialogs, index, messages)
+	if !cursor.OK {
+		t.Fatal("有实体、有消息时应能算出可续翻游标")
+	}
+	if cursor.ID != 777 {
+		t.Fatalf("游标 ID 应为该会话 top_message，实际 %d", cursor.ID)
+	}
+	if cursor.Date != 1700000000 {
+		t.Fatalf("游标必须带上日期（offset_date 是 TL 无条件字段，缺失会让服务端定位不到上一页末尾 → 翻页重叠），实际 %+v", cursor)
+	}
+	channel, ok := cursor.Peer.(*tg.InputPeerChannel)
+	if !ok || channel.ChannelID != 1 {
+		t.Fatalf("游标 peer 应为 Channel:1，实际 %#v", cursor.Peer)
+	}
+}
+
+func TestNextDialogCursorKeepsLastKnownDateWhenTopMessageMissing(t *testing.T) {
+	index := map[string]nativePeerInfo{
+		"Channel:1": channelInfo(1, 1001),
+		"Channel:2": channelInfo(2, 2002),
+	}
+	dialogs := []tg.DialogClass{
+		&tg.Dialog{Peer: &tg.PeerChannel{ChannelID: 1}, TopMessage: 100},
+		// 最后一个会话的 top message 不在本页 messages 里。
+		&tg.Dialog{Peer: &tg.PeerChannel{ChannelID: 2}, TopMessage: 200},
+	}
+	messages := lastMessageByID([]tg.MessageClass{&tg.Message{ID: 100, Date: 1699999999}})
+
+	cursor := nextDialogCursor(dialogs, index, messages)
+	if cursor.ID != 100 || cursor.Date != 1699999999 {
+		t.Fatalf("消息缺失时应沿用上一个已知的 ID/日期（与官方迭代器同），实际 %+v", cursor)
+	}
+	channel, ok := cursor.Peer.(*tg.InputPeerChannel)
+	if !ok || channel.ChannelID != 2 {
+		t.Fatalf("peer 仍应推进到本页最后一个可解析会话（Channel:2），实际 %#v", cursor.Peer)
+	}
+}
+
+func TestNextDialogCursorStopsWhenNoResolvablePeer(t *testing.T) {
+	dialogs := []tg.DialogClass{&tg.Dialog{Peer: &tg.PeerChannel{ChannelID: 9}, TopMessage: 5}}
+	if cursor := nextDialogCursor(dialogs, map[string]nativePeerInfo{}, nil); cursor.OK {
+		t.Fatalf("实体缺失 accessHash 时应判定不可续翻（避免盲目空翻），实际 %+v", cursor)
+	}
+}
+
+func TestNativeDialogTotal(t *testing.T) {
+	total, complete, ok := nativeDialogTotal(&tg.MessagesDialogsSlice{
+		Count:   850,
+		Dialogs: []tg.DialogClass{&tg.Dialog{}},
+	})
+	if !ok || complete || total != 850 {
+		t.Fatalf("dialogsSlice 应给出总数 850 且标记未完成，实际 total=%d complete=%v ok=%v", total, complete, ok)
+	}
+
+	total, complete, ok = nativeDialogTotal(&tg.MessagesDialogs{
+		Dialogs: []tg.DialogClass{&tg.Dialog{}, &tg.Dialog{}},
+	})
+	if !ok || !complete || total != 2 {
+		t.Fatalf("dialogs（非 slice）表示列表一次给全，实际 total=%d complete=%v ok=%v", total, complete, ok)
+	}
+
+	if _, _, ok := nativeDialogTotal(&tg.MessagesDialogsNotModified{}); ok {
+		t.Fatal("未修改响应不应被当成有效计数来源")
+	}
+}
+
+func TestSleepCtxCancelsOnDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := sleepCtx(ctx, time.Hour); err == nil {
+		t.Fatal("上下文已取消时应立刻返回错误，而不是傻等")
+	}
+	if err := sleepCtx(context.Background(), 0); err != nil {
+		t.Fatalf("时长 <= 0 应直接返回：%v", err)
+	}
+}
+
+// TestGetDialogsRequestsAlwaysCarryCursorFields 是「游标字段完整性」守卫。
+// 上面那个 bug 无法在单测里用真实 RPC 复现（它依赖 Telegram 服务端的定位行为），
+// 所以守卫直接锚在请求字面量上：任何一处 messages.getDialogs 请求构造都必须显式
+// 给出 OffsetPeer / OffsetID / OffsetDate 三个字段。
+//
+// 负例核证（判据必须能红）：
+//
+//	cp chatapi.go /tmp/broken.go && （删掉其中一行 OffsetDate: offsetDate）
+//	FG_DIALOGS_SOURCE=/tmp/broken.go go test -run TestGetDialogsRequestsAlwaysCarryCursorFields
+func TestGetDialogsRequestsAlwaysCarryCursorFields(t *testing.T) {
+	path := os.Getenv("FG_DIALOGS_SOURCE")
+	if path == "" {
+		path = "chatapi.go"
+	}
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取 %s 失败：%v", path, err)
+	}
+
+	blocks := dialogRequestLiterals(source)
+	if len(blocks) < 2 {
+		t.Fatalf("只找到 %d 处 messages.getDialogs 请求构造，预期至少 2 处（会话列表分页 + peer 索引深翻）——守卫失效会静默放过整类游标 bug", len(blocks))
+	}
+	for i, block := range blocks {
+		for _, field := range []string{"OffsetPeer:", "OffsetID:", "OffsetDate:"} {
+			if !bytes.Contains(block, []byte(field)) {
+				t.Errorf("第 %d 处 messages.getDialogs 请求缺少 %s（offset_date 是 TL 无条件字段，漏传会导致翻页重叠）：\n%s", i+1, field, block)
+			}
+		}
+	}
+}
+
+// dialogRequestLiterals 从源码里取出每个 MessagesGetDialogsRequest{...} 字面量：
+// 从 `{` 起按花括号配平扫描，跳过字符串字面量与行注释（避免注释/文案里的括号干扰）。
+func dialogRequestLiterals(source []byte) [][]byte {
+	const marker = "MessagesGetDialogsRequest{"
+	var out [][]byte
+	for cursor := 0; cursor < len(source); {
+		offset := bytes.Index(source[cursor:], []byte(marker))
+		if offset < 0 {
+			break
+		}
+		open := cursor + offset + len(marker) - 1
+		depth := 0
+		inString := false
+		inComment := false
+		end := -1
+		for i := open; i < len(source); i++ {
+			current := source[i]
+			if inComment {
+				if current == '\n' {
+					inComment = false
+				}
+				continue
+			}
+			if inString {
+				if current == '\\' {
+					i++
+					continue
+				}
+				if current == '"' {
+					inString = false
+				}
+				continue
+			}
+			if current == '/' && i+1 < len(source) && source[i+1] == '/' {
+				inComment = true
+				i++
+				continue
+			}
+			if current == '"' {
+				inString = true
+				continue
+			}
+			switch current {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					end = i + 1
+				}
+			}
+			if end > 0 {
+				break
+			}
+		}
+		if end < 0 {
+			break
+		}
+		out = append(out, source[open:end])
+		cursor = end
+	}
+	return out
 }

@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.16"
-export APP_CHANGELOG="打包修复：2.6.15 安装包内 server 依赖树不完整（npm ci 静默丢失 11 个文件，含 socket.io 加载期依赖 engine.io/build/parser-v3/index.js）导致 node 启动即 MODULE_NOT_FOUND 秒退、飞牛报「本地应用启动失败」；本版重建依赖树并新增构建期与核证期守卫（依赖真实加载 + 真实启动冒烟 + /api/health 200），启动失败原因落盘 feigram.log。功能与 2.6.15 一致。"
+export APP_VERSION="2.6.17"
+export APP_CHANGELOG="会话列表翻页游标修复：messages.getDialogs 的 offset_date 是无条件 TL 字段（官方迭代器每页都带），此前恒发 0 使服务端定位不到上一页末尾、每页从列表开头重发——4 页取回 400 条去重后仅剩 102 条，这才是「群组列表还是不全」的真因；现补齐游标并按服务端上报总数判末尾。另：翻页遇 FLOOD_WAIT 等待后续翻不再直接截断、页间加 200ms 间隔防自造限流、逐页诊断日志、不完整列表显式标注；peer 索引深翻同一缺陷一并修正。"
 export NODE_ENV="production"
 
 is_running() {

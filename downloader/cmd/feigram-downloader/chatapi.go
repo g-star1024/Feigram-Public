@@ -48,7 +48,13 @@ const (
 	// 的硬上限 100，否则无法区分「本页已到末尾」与「服务端截断」。
 	dialogPageSize = 100
 	// nativeDialogPageRounds 是单个文件夹最多翻多少页（100×30 = 3000 会话）。
-	nativeDialogPageRounds  = 30
+	nativeDialogPageRounds = 30
+	// nativeDialogFloodWaitMax 是「翻页途中允许等待的限流上限（秒）」。超过就判定
+	// 账号正被重度限流，不再干等，直接返回部分列表并明确标注不完整。
+	nativeDialogFloodWaitMax = 30
+	// nativeDialogPageGap 是页间小间隔：连发 getDialogs 会自造限流（2.6.16 实测
+	// 5 页连发触发 FLOOD_WAIT(24)，恰好把最后一页打掉、列表被截断）。
+	nativeDialogPageGap     = 200 * time.Millisecond
 	defaultChatMessageLimit = 50
 	maxChatMessageLimit     = 200
 	avatarChunkSize         = 256 * 1024
@@ -432,7 +438,13 @@ func (a *App) fetchNativeDialogs(ctx context.Context, api *tg.Client, account Na
 	for _, folderID := range dialogFolderIDs(includeArchived) {
 		var offsetPeer tg.InputPeerClass = &tg.InputPeerEmpty{}
 		offsetID := 0
+		// offsetDate 必须与 offsetID/offsetPeer 同步推进，见下方 request 构造处注释。
+		offsetDate := 0
 		scanned := 0
+		serverTotal := 0
+		// partial 记录「本次列表是残缺的」——中断时必须显式标注，避免上层
+		// 把截断列表当成完整列表（静默降级比报错更难排查）。
+		partial := false
 		// truncated 记录「本文件夹是否因达到上限而提前收工」——用于在触及
 		// 总量上限时给出可操作提示（用户看不到某个群组时能立刻判断是不是
 		// 列表被截断，而不是继续怀疑账号/同步）。
@@ -449,6 +461,15 @@ func (a *App) fetchNativeDialogs(ctx context.Context, api *tg.Client, account Na
 			request := &tg.MessagesGetDialogsRequest{
 				OffsetPeer: offsetPeer,
 				OffsetID:   offsetID,
+				// R4.39 根因修复：offset_date 在 TL 里是**无条件字段**（gotd 生成的
+				// EncodeBare 里 `b.PutInt(g.OffsetDate)` 没有任何 flag 守卫），而官方
+				// dialogs.Iterator（telegram/query/dialogs/iter.go:153-164）每页都会把
+				// 它设成「上一页最后一条消息的日期」。此前我们只传 offset_peer +
+				// offset_id 而 offset_date 恒为 0，服务端拿 (date=0, id, peer) 定位不到
+				// 「上一页末尾」这个位置，于是又从列表开头重发 → 页与页大面积重叠：
+				// 2.6.16 实测 4 页共取回 400 条，按 peer 去重后只剩 102 条，用户看到
+				// 的群组列表自然「还是不全」。
+				OffsetDate: offsetDate,
 				Limit:      pageSize,
 			}
 			if folderID > 0 {
@@ -458,17 +479,27 @@ func (a *App) fetchNativeDialogs(ctx context.Context, api *tg.Client, account Na
 			if err != nil {
 				// R4.37：真分页后一次拉取要串行多页 RPC，代理抖动会让中间某页
 				// 失败——此前 folder 0 任何一页失败就整单报废（2.6.14 实测
-				// listNativeChats 直接报错、前端列表全空）。现在页级重试一次；
-				// 仍失败则返回已拉取的部分（首页失败才整体报错），部分列表好过没有。
+				// listNativeChats 直接报错、前端列表全空）。
+				// R4.39：遇限流不再直接放弃翻页——几十秒的 FLOOD_WAIT 等一等就能
+				// 接着翻；此前第 5 页 FLOOD_WAIT(24) 直接收工，列表被永久截断成
+				// 已拉取的部分（2.6.16 实测）。
+				if wait := floodWaitFromError(err); wait > 0 && wait <= nativeDialogFloodWaitMax {
+					log.Printf("chatapi: 会话列表第 %d 页遇限流 FLOOD_WAIT(%d)，等待后继续翻页", page+1, wait)
+					if sleepErr := sleepCtx(ctx, time.Duration(wait)*time.Second); sleepErr != nil {
+						partial = true
+						break
+					}
+				}
 				retried, retryErr := api.MessagesGetDialogs(ctx, request)
 				if retryErr != nil {
 					if folderID == 0 && len(items) == 0 && page == 0 {
 						return nil, fmt.Errorf("获取会话列表失败：%w", retryErr)
 					}
+					partial = true
 					if folderID == 0 {
-						log.Printf("chatapi: 会话列表第 %d 页拉取失败（已重试一次），返回已拉取的 %d 条：%v", page+1, len(items), retryErr)
+						log.Printf("chatapi: 会话列表【不完整】——folder %d 第 %d 页拉取失败（已重试），仅返回已拉取的 %d 条（服务端共计 %d 条）：%v", folderID, page+1, len(items), serverTotal, retryErr)
 					} else {
-						log.Printf("chatapi: archived dialogs fetch failed for %s/%s: %v", account.UserID, account.AccountID, retryErr)
+						log.Printf("chatapi: archived dialogs 【incomplete】folder %d page %d for %s/%s: %v", folderID, page+1, account.UserID, account.AccountID, retryErr)
 					}
 					break
 				}
@@ -478,33 +509,25 @@ func (a *App) fetchNativeDialogs(ctx context.Context, api *tg.Client, account Na
 			if !ok {
 				break
 			}
+			total, complete, hasTotal := nativeDialogTotal(result)
+			if hasTotal {
+				serverTotal = total
+			}
 			for id, info := range indexNativePeers(users, chats) {
 				index[id] = info
 			}
-			lastMessages := map[int]*tg.Message{}
-			for _, item := range messages {
-				if message, ok := item.(*tg.Message); ok {
-					lastMessages[message.ID] = message
-				}
-			}
-			// 分页游标取「本页最后一条 dialog」（即使它已因去重被跳过）；
-			// 拿不到它的 input peer（实体列表缺 accessHash）就无法继续翻页，
-			// 到此为止，避免盲目空翻。
+			lastMessages := lastMessageByID(messages)
+			// 分页游标统一由 nextDialogCursor 计算（与 gotd 官方 dialogs.Iterator 同算法）：
+			// 取「本页最后一个可解析会话」的 input peer + 其 top message 的 ID 与日期。
+			// 拿不到就到此为止，避免盲目空翻。
 			pageDialogs := 0
-			var nextPeer tg.InputPeerClass
-			nextOffsetID := 0
+			itemsBefore := len(items)
 			for _, entry := range dialogs {
 				dialog, ok := entry.(*tg.Dialog)
 				if !ok || dialog == nil {
 					continue
 				}
 				pageDialogs++
-				if info, found := index[peerIDFromPeerClass(dialog.Peer)]; found {
-					if peer, peerErr := nativeInputPeerFromInfo(info); peerErr == nil {
-						nextPeer = peer
-						nextOffsetID = dialog.TopMessage
-					}
-				}
 				peerID := peerIDFromPeerClass(dialog.Peer)
 				if peerID == "" || seen[peerID] {
 					continue
@@ -538,16 +561,43 @@ func (a *App) fetchNativeDialogs(ctx context.Context, api *tg.Client, account Na
 				seen[peerID] = true
 			}
 			scanned += pageDialogs
-			// 本页不满一页 = 已到列表末尾；无下一页游标同样终止。
-			if pageDialogs < pageSize || nextPeer == nil {
+			cursor := nextDialogCursor(dialogs, index, lastMessages)
+			// 逐页诊断日志（R4.39 新增）：下一页到底有没有真的翻出去，看这一行就够了
+			// ——「返回 100 / 新增 3」就是游标没前进的指纹。
+			log.Printf("chatapi: 会话列表 folder %d 第 %d 页：请求 %d / 返回 %d / 新增 %d / 累计 %d（服务端共计 %d，游标 date=%d id=%d 可续翻=%v）",
+				folderID, page+1, pageSize, pageDialogs, len(items)-itemsBefore, len(items), serverTotal, cursor.Date, cursor.ID, cursor.OK)
+			// 终止条件（R4.39 起以服务端 ReportedCount 为准，不再用「本页不满一页」猜）：
+			//   ① 本页 0 条 = 确实到列表末尾；
+			//   ② 服务端直接给了完整列表（messages.dialogs，非 slice）；
+			//   ③ 已取满服务端 ReportedCount。
+			if pageDialogs == 0 || complete || (serverTotal > 0 && scanned >= serverTotal) {
 				truncated = false
 				break
 			}
-			offsetPeer = nextPeer
-			offsetID = nextOffsetID
+			//   ④ 拿不到可续翻的游标（实体缺 accessHash）→ 无法判断还有没有更多，
+			//      按「不完整」处理：不能一边翻不动一边对外声称列表已完整。
+			if !cursor.OK {
+				partial = true
+				log.Printf("chatapi: 会话列表 folder %d 第 %d 页拿不到续翻游标（实体缺 accessHash），无法确认是否已到末尾——按不完整处理", folderID, page+1)
+				break
+			}
+			offsetPeer, offsetID, offsetDate = cursor.Peer, cursor.ID, cursor.Date
+			// 页间小间隔：连发 getDialogs 会自造限流（2.6.16 实测 5 页连发触发
+			// FLOOD_WAIT(24)，恰好把最后一页打掉）。
+			if sleepErr := sleepCtx(ctx, nativeDialogPageGap); sleepErr != nil {
+				partial = true
+				break
+			}
 		}
-		if truncated && len(items) >= limit {
-			log.Printf("chatapi: 会话列表已达上限 %d 条（folder %d 仍有更多会话）——若有群组未显示，即为列表截断而非同步失败", limit, folderID)
+		// 收尾必须把「完整/截断/不完整」说清楚——静默返回一个短列表是上一版最大的坑。
+		if partial {
+			log.Printf("chatapi: 会话列表 folder %d 为【不完整列表】：已返回 %d 条（服务端共计 %d 条），下次拉取会重新分页获取", folderID, len(items), serverTotal)
+			// 已经翻不动了（限流/传输失败），再拉下一个文件夹只会加重限流，直接收工。
+			break
+		} else if truncated && len(items) >= limit {
+			log.Printf("chatapi: 会话列表已达上限 %d 条（folder %d 仍有更多会话，服务端共计 %d 条）——若有群组未显示，即为列表截断而非同步失败", limit, folderID, serverTotal)
+		} else {
+			log.Printf("chatapi: 会话列表 folder %d 完整拉取完成：%d 条（服务端共计 %d 条）", folderID, len(items), serverTotal)
 		}
 	}
 	storeNativePeerIndex(account.UserID, account.AccountID, index)
@@ -572,6 +622,91 @@ func flattenNativeDialogs(result tg.MessagesDialogsClass) ([]tg.DialogClass, []t
 		return typed.Dialogs, typed.Messages, typed.Chats, typed.Users, true
 	default:
 		return nil, nil, nil, nil, false
+	}
+}
+
+// lastMessageByID 把本页返回的 messages 按消息 ID 建索引——分页游标的 ID 与日期
+// 都由它提供（等价于官方 dialogs.Iterator 里的 messageMap，只是那里按 peer 索引）。
+func lastMessageByID(messages []tg.MessageClass) map[int]*tg.Message {
+	byID := make(map[int]*tg.Message, len(messages))
+	for _, item := range messages {
+		if message, ok := item.(*tg.Message); ok && message != nil {
+			byID[message.ID] = message
+		}
+	}
+	return byID
+}
+
+// nativeDialogCursor 是 messages.getDialogs 的翻页位置。
+// R4.39：peer / ID / date 三者缺一不可 —— offset_date 在 TL 里是无条件字段。
+type nativeDialogCursor struct {
+	Peer tg.InputPeerClass
+	ID   int
+	Date int
+	OK   bool
+}
+
+// nativeDialogTotal 取服务端上报的会话总数与「本次响应是否已是完整列表」。
+// messages.dialogsSlice 带 Count（该文件夹会话总数）；messages.dialogs 表示整个列表
+// 一次给全 —— 官方 dialogs.Iterator 同样用它判定 lastBatch（iter.go:106-119）。
+func nativeDialogTotal(result tg.MessagesDialogsClass) (total int, complete bool, ok bool) {
+	switch typed := result.(type) {
+	case *tg.MessagesDialogs:
+		return len(typed.Dialogs), true, true
+	case *tg.MessagesDialogsSlice:
+		return typed.Count, false, true
+	default:
+		return 0, false, false
+	}
+}
+
+// nextDialogCursor 计算「下一页从哪开始」，算法与 gotd 官方 dialogs.Iterator.apply
+// （telegram/query/dialogs/iter.go:133-164）保持一致：
+//   - offset_peer：本页最后一个能解析出 InputPeer 的会话；
+//   - offset_id / offset_date：该会话 top message 的 ID 与日期（该消息不在本页
+//     messages 里时沿用上一个已知值，与官方实现相同）。
+//
+// R4.39 根因：此前只推进 offset_peer + offset_id，漏了 offset_date（TL 无条件字段，
+// gotd 生成的 EncodeBare 里是裸 `b.PutInt(g.OffsetDate)`，没有 flag 守卫）——服务端
+// 拿 (date=0, id, peer) 定位不到「上一页末尾」，于是每页都从列表开头重发，页与页
+// 大面积重叠：实测 4 页取回 400 条，按 peer 去重后只剩 102 条。
+func nextDialogCursor(dialogs []tg.DialogClass, index map[string]nativePeerInfo, lastMessages map[int]*tg.Message) nativeDialogCursor {
+	var cursor nativeDialogCursor
+	for _, entry := range dialogs {
+		dialog, ok := entry.(*tg.Dialog)
+		if !ok || dialog == nil {
+			continue
+		}
+		info, found := index[peerIDFromPeerClass(dialog.Peer)]
+		if !found {
+			continue
+		}
+		peer, err := nativeInputPeerFromInfo(info)
+		if err != nil {
+			continue
+		}
+		if message := lastMessages[dialog.TopMessage]; message != nil {
+			cursor.ID = message.ID
+			cursor.Date = message.Date
+		}
+		cursor.Peer = peer
+		cursor.OK = true
+	}
+	return cursor
+}
+
+// sleepCtx 是「可被取消的等待」，用于翻页途中按 FLOOD_WAIT 秒数等待。
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -1330,10 +1465,17 @@ func (a *App) backfillNativePeerIndex(ctx context.Context, api *tg.Client, accou
 	for _, folderID := range []int{0, 1} {
 		var offsetPeer tg.InputPeerClass = &tg.InputPeerEmpty{}
 		offsetID := 0
+		offsetDate := 0
+		fetched := 0
+		serverTotal := 0
 		for round := 0; round < nativePeerBackfillRounds; round++ {
 			request := &tg.MessagesGetDialogsRequest{
 				OffsetPeer: offsetPeer,
 				OffsetID:   offsetID,
+				// R4.39：与 fetchNativeDialogs 同一处游标 bug —— offset_date 是 TL
+				// 无条件字段，漏传会让服务端定位不到上一页末尾、每轮从列表开头重发，
+				// 深翻看起来在跑却几乎翻不出去（peer 索引长期停在几百个也是这个原因）。
+				OffsetDate: offsetDate,
 				Limit:      dialogPageSize,
 			}
 			if folderID > 0 {
@@ -1343,37 +1485,34 @@ func (a *App) backfillNativePeerIndex(ctx context.Context, api *tg.Client, accou
 			if err != nil {
 				return fmt.Errorf("深翻会话列表（folder %d 第 %d 轮）失败：%w", folderID, round+1, err)
 			}
-			dialogs, _, chats, users, ok := flattenNativeDialogs(result)
+			dialogs, messages, chats, users, ok := flattenNativeDialogs(result)
 			if !ok {
 				break
 			}
 			index := indexNativePeers(users, chats)
 			storeNativePeerIndex(account.UserID, account.AccountID, index)
-			if len(dialogs) < dialogPageSize {
-				break // 本轮不满一页：已到列表末尾
+			pageTotal, complete, hasTotal := nativeDialogTotal(result)
+			if hasTotal {
+				serverTotal = pageTotal
 			}
-			// 以最后一个会话构造下一轮 offset。找不到（类型异常/索引缺 accessHash）
-			// 就到此为止，避免盲目空翻。
-			var last *tg.Dialog
-			for _, entry := range dialogs {
-				if dialog, isDialog := entry.(*tg.Dialog); isDialog && dialog != nil {
-					last = dialog
-				}
+			fetched += len(dialogs)
+			log.Printf("chatapi: 深翻 folder %d 第 %d 轮：返回 %d 条 / 累计 %d（服务端共计 %d）", folderID, round+1, len(dialogs), fetched, serverTotal)
+			if len(dialogs) == 0 || complete {
+				break // 空页或服务端已给全量：到底了
 			}
-			if last == nil {
+			// 游标统一走 nextDialogCursor（与官方 dialogs.Iterator 同算法）。
+			// 拿不到（类型异常/索引缺 accessHash）就到此为止，避免盲目空翻。
+			next := nextDialogCursor(dialogs, index, lastMessageByID(messages))
+			if !next.OK {
 				break
 			}
-			roundIndex := index
-			info, found := roundIndex[peerIDFromPeerClass(last.Peer)]
-			if !found {
+			offsetPeer, offsetID, offsetDate = next.Peer, next.ID, next.Date
+			if serverTotal > 0 && fetched >= serverTotal {
 				break
 			}
-			nextPeer, peerErr := nativeInputPeerFromInfo(info)
-			if peerErr != nil {
-				break
+			if sleepErr := sleepCtx(ctx, nativeDialogPageGap); sleepErr != nil {
+				return sleepErr
 			}
-			offsetPeer = nextPeer
-			offsetID = last.TopMessage
 		}
 	}
 	return nil
