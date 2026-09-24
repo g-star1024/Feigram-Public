@@ -94,6 +94,38 @@ function mergeDownloads(items) {
   }, new Map()).values()].sort((a, b) => String(b.createdAt || b.updatedAt).localeCompare(String(a.createdAt || a.updatedAt)));
 }
 
+/* R4.46：下载/缓存列表的用户可见错误文案净化。
+   Go 侧任务错误是「中文说明：英文技术链」形态（如「媒体链路断流（第 1 次）→ 重建连接并以
+   512 KB 分片续传：get file: get next chunk: ... context canceled」），英文链对用户是噪音。
+   规则：按中文冒号切分，保留**含中文**的前缀段；首个纯英文段起全部丢弃（原始文本保留在
+   title 里供悬停排查）。整条都是英文技术链时按关键词映射成中文结论。 */
+const ERROR_KEYWORD_MAP = [
+  [/transient failure|将自动重试|自动续传/i, "网络波动，稍后自动重试"],
+  [/connection dead|waitsession|engine (was |forcibly )?closed|context canceled/i, "连接已中断，稍后自动重试"],
+  [/connection refused|reset by peer|broken pipe|closed network connection/i, "网络连接被重置，稍后自动重试"],
+  [/timeout|timed out|deadline exceeded/i, "网络超时，稍后自动重试"],
+  [/no such host|dial tcp|no route to host|network is unreachable/i, "无法连接 Telegram 服务器"],
+  [/retry limit/i, "连接重试次数用尽，稍后自动重试"],
+  [/file_reference|FILE_REFERENCE/i, "媒体引用已过期，将自动刷新后重试"],
+  [/flood/i, "触发 Telegram 限流，按提示等待后自动重试"]
+];
+
+function friendlyTaskError(raw) {
+  if (!raw) return "";
+  const text = String(raw);
+  const segments = text.split("：");
+  const kept = [];
+  for (const seg of segments) {
+    if (!/[\u4e00-\u9fff]/.test(seg)) break;
+    kept.push(seg);
+  }
+  if (kept.length) return kept.join("：").trim();
+  for (const [pattern, label] of ERROR_KEYWORD_MAP) {
+    if (pattern.test(text)) return label;
+  }
+  return text;
+}
+
 function sortSilentCaches(items) {
   return [...items].sort((a, b) => {
     const orderDiff = Number(a.order || 0) - Number(b.order || 0);
@@ -884,9 +916,10 @@ function AdminPanel({ accounts, accountId, canAdmin, onAccountChange, onAccountL
                 {account.id === accountId
                   ? <span className="native-status ready">当前</span>
                   : <button className="icon-button" onClick={() => onAccountChange(account.id)}>切换</button>}
-                {canAdmin && <button className="icon-button" type="button" onClick={() => startNativeQrLogin(native || { accountId: account.id, displayName: account.displayName || account.label, phone: account.phoneNumber })}>重新登录</button>}
                 {canAdmin && account.needsMigration && <button className="icon-button primary-button" type="button" onClick={() => migrateAccountToGo(account)}>迁移到 Go</button>}
                 {canAdmin && account.authMode === "native" && <span className="native-status ready">已迁移 Go</span>}
+                {/* R4.46：「重新登录」紧挨「退出」之前（用户实测反馈），中间不再隔着迁移徽标。 */}
+                {canAdmin && <button className="icon-button" type="button" onClick={() => startNativeQrLogin(native || { accountId: account.id, displayName: account.displayName || account.label, phone: account.phoneNumber })}>重新登录</button>}
                 <button className="icon-button danger-button" onClick={() => onAccountLogout(account.id)}><LogOut size={16} />退出</button>
               </div>;
             })}
@@ -1286,12 +1319,16 @@ function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onCon
     }
   }
 
+  const conservative = (silentCacheState.mode || "conservative") !== "fast";
   return (
     <div className="silent-cache-panel">
       <div className="silent-cache-head">
         <strong>后台缓存</strong>
         <button className="icon-button" type="button" onClick={onRefresh}><RefreshCw size={14} />刷新</button>
       </div>
+      {/* R4.46：引擎说明——下载统一走 Go 原生 MTProto（gotd 官方下载内核），
+          此处只控制「后台缓存」这类自动任务的调度策略，与手动下载共用同一引擎。 */}
+      <p className="silent-cache-engine">下载引擎：Go 原生 MTProto（gotd 官方下载内核）· 支持断点续传与限流自动等待</p>
       <div className="silent-cache-controls">
         <label className="check-row"><input type="checkbox" checked={silentCacheState.enabled !== false} onChange={(e) => onControl?.({ enabled: e.target.checked })} /><span>{silentCacheState.enabled !== false ? "已开启后台缓存" : "已暂停后台缓存"}</span></label>
         <label><span>最大缓存速率</span><select value={String(silentCacheState.rateLimitBps || 0)} onChange={(e) => onControl?.({ rateLimitBps: Number(e.target.value) })}>
@@ -1306,12 +1343,13 @@ function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onCon
           <option value="conservative">保守模式（同账号单任务）</option>
           <option value="fast">跨账号高速模式</option>
         </select></label>
-        <label><span>并发数量</span><select value={String(silentCacheState.concurrency || 1)} onChange={(e) => onControl?.({ concurrency: Number(e.target.value) })}>
+        <label><span>并发数量</span><select value={String(silentCacheState.concurrency || 1)} disabled={conservative} onChange={(e) => onControl?.({ concurrency: Number(e.target.value) })}>
           {[1, 2, 3, 4, 5, 10].map((value) => <option value={String(value)} key={value}>{value}</option>)}
         </select></label>
       </div>
+      {conservative && <p className="silent-cache-hint">保守模式下并发固定为 1（同账号单任务）；如需多任务并行，请切换到「跨账号高速模式」。</p>}
       <div className="cache-runtime-summary">
-        <span><b>运行中</b>{silentCacheState.running || 0} / {silentCacheState.effectiveConcurrency || silentCacheState.concurrency || 1}</span>
+        <span><b>运行中</b>{silentCacheState.running || 0} / {silentCacheState.effectiveConcurrency || 1}{conservative ? "（保守模式）" : ""}</span>
         {/* R4.23：移除「传输层 HTTP 回退」统计——单一 Go 原生 MTProto 后恒定，且「回退」一词易误导。 */}
         <span><b>任务数</b>{silentCaches.length}</span>
       </div>
@@ -1351,7 +1389,7 @@ function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onCon
                 <span>{formatTime(task.updatedAt)}</span>
               </div>
               <div className="mini-progress"><i style={{ width: `${progress}%` }} /></div>
-              {task.error && <small>{task.error}</small>}
+              {task.error && <small title={task.error}>{friendlyTaskError(task.error)}</small>}
             </div>
           );
         })}
@@ -1426,7 +1464,7 @@ function DownloadCenter({ open, downloads, onStart, onCancel, onClear, onDelete,
                   <span>{formatTime(item.updatedAt)}</span>
                 </div>
                 <div className="download-progress"><i style={{ width: `${progress}%` }} /></div>
-                {item.error && <p className="download-error">{item.error}</p>}
+                {item.error && <p className="download-error" title={item.error}>{friendlyTaskError(item.error)}</p>}
                 <div className="download-actions" onClick={(event) => event.stopPropagation()}>
                   {item.status === "completed" && item.kind === "video" && <button onClick={() => onPlay(item)}><Play size={12} />播放</button>}
                   {item.status !== "downloading" && item.status !== "completed" && <button onClick={() => onStart(item)}><Play size={12} />开始</button>}
@@ -1619,9 +1657,18 @@ function Dashboard({ accounts, downloads, silentCaches, silentCacheState, me, ac
 }
 
 /* 资源库（04 §6.6）：已缓存媒体卡片网格 + 筛选 Tabs */
-function LibraryPage({ accountId, silentCaches, onPlay }) {
+/* R4.46：资源库纳入手动下载任务。此前 LibraryPage 只渲染 silentCaches（后台缓存），
+   用户手动点下载的任务（downloads，Go 下载任务表）完成后再也找不到入口。
+   两个列表可能包含同一媒体（手动+自动各建过任务），复用 mergeDownloads 按
+   「账号:会话:文件名:大小」去重合并，再筛「已完成或已有文件名」的条目。 */
+function libraryItems(downloads = [], silentCaches = []) {
+  const merged = mergeDownloads([...downloads, ...silentCaches]);
+  return merged.filter((task) => task.status === "completed" || task.fileName);
+}
+
+function LibraryPage({ accountId, downloads = [], silentCaches = [], onPlay }) {
   const [filter, setFilter] = useState("all");
-  const cached = silentCaches.filter((task) => task.status === "completed" || task.fileName);
+  const cached = libraryItems(downloads, silentCaches);
   const visible = filter === "all" ? cached : cached.filter((task) => (task.kind || "video") === filter);
   const tabs = [
     { key: "all", label: `全部 ${cached.length}` },
@@ -1645,7 +1692,7 @@ function LibraryPage({ accountId, silentCaches, onPlay }) {
       {!visible.length && <div className="fn-card fn-empty" style={{ gridColumn: "1 / -1" }}>
         <Library size={28} />
         <h3>{filter === "all" ? "资源库为空" : "该分类下暂无资源"}</h3>
-        <span>开启后台缓存的会话会自动把大视频收录到这里</span>
+        <span>手动下载与后台缓存的媒体都会自动收录到这里</span>
       </div>}
     </div>
     {!accountId && <p style={{ color: "var(--fn-text-3)", fontSize: 13 }}>尚未选择 Telegram 账号，部分媒体可能无法打开。</p>}
@@ -2461,7 +2508,7 @@ function App() {
             onAddAccount={() => { setAdminInitialTab("accounts"); setAnnouncementOpen(false); setAdminOpen(true); }}
             latestAnnouncement={announcements[0] || null}
           />}
-          {view === "library" && <LibraryPage accountId={accountId} silentCaches={silentCaches} onPlay={openLibraryItem} />}
+          {view === "library" && <LibraryPage accountId={accountId} downloads={downloads} silentCaches={silentCaches} onPlay={openLibraryItem} />}
           {view === "downloads" && <DownloadCenter
             open
             downloads={downloads}

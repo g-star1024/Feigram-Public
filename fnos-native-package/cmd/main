@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.22"
-export APP_CHANGELOG="修复升级后旧限流失败任务不自动复活"
+export APP_VERSION="2.6.23"
+export APP_CHANGELOG="下载体验优化：错误文案净化、手动下载进资源库、网络抖动自动续传修复"
 export NODE_ENV="production"
 
 is_running() {

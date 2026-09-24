@@ -1656,6 +1656,23 @@ textarea {
   padding: 0 10px;
 }
 
+/* R4.46：引擎说明与保守模式提示 */
+.silent-cache-engine {
+  color: var(--fn-text-3);
+  font-size: 0.78rem;
+  margin: 0;
+}
+
+.silent-cache-hint {
+  background: var(--fn-surface-2);
+  border-left: 3px solid var(--fn-primary);
+  border-radius: 6px;
+  color: var(--fn-text-2);
+  font-size: 0.78rem;
+  margin: 0;
+  padding: 8px 10px;
+}
+
 .cache-runtime-summary {
   display: grid;
   gap: 8px;

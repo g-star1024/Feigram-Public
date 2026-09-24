@@ -969,7 +969,12 @@ async function goSilentCacheState(userId) {
     rateLimitBps: Number(config.rateLimitBps || 0),
     concurrency: Math.max(1, Number(config.concurrency || 1)),
     configuredConcurrency: Math.max(1, Number(config.concurrency || 1)),
-    effectiveConcurrency: Number(state?.running || 0),
+    // R4.46：effectiveConcurrency 此前误用 Go 的全局 running 计数（含手动任务），
+    // 且保守模式实际强制并发 1（main.go pumpOnce：Mode != "fast" → limit=1），
+    // 面板却显示「运行中 0/5」误导用户。改为按模式计算真实并发上限。
+    effectiveConcurrency: (config.mode || "conservative") === "fast"
+      ? Math.max(1, Number(config.concurrency || 1))
+      : 1,
     mode: config.mode || "conservative",
     transport: config.transport || state?.transport || "native-mtproto",
     running: tasks.filter((task) => task.status === "running").length,

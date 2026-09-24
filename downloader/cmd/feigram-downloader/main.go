@@ -4210,6 +4210,13 @@ func transientSourceError(err error) bool {
 		"retry limit reached",
 		"retryuntilack",
 		"engine was closed",
+		// R4.46：2.6.22 实测（22:27-22:31 日志）网络抖动窗口的两种漏网形态——
+		// ① `waitSession: connection dead`（媒体池等会话时连接已死，任务一票终态失败）；
+		// ② `engine forcibly closed: context canceled`（连接重建时引擎被强制关闭）。
+		// 都是链路层瞬态，按退避自动续传，重试上限兜底。
+		"connection dead",
+		"waitsession",
+		"engine forcibly closed",
 		// R4.35：peer 解析闸门的账号级冷却——冷却期内失败是「等窗口过去」的瞬态，
 		// 按退避重试，冷却结束后自动续传。
 		"解析在冷却中",

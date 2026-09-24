@@ -921,6 +921,23 @@ func TestTransientSourceErrorRPCTransport(t *testing.T) {
 	}
 }
 
+// R4.46：2.6.22 实测（22:27-22:31 日志）网络抖动窗口两种漏网形态必须瞬态——
+// ① `waitSession: connection dead`（此前一票终态：`task ... failed: get file:
+//    get next chunk: waitSession: connection dead`）；
+// ② `engine forcibly closed: context canceled`（连接重建强关引擎）。
+// 负例：用户主动取消（纯 context canceled，无引擎前缀）不得被误判瞬态复活。
+func TestTransientSourceErrorConnectionDead(t *testing.T) {
+	if !transientSourceError(errors.New("get file: get next chunk: waitSession: connection dead")) {
+		t.Fatal("waitSession: connection dead 应为瞬态")
+	}
+	if !transientSourceError(errors.New("get file: get next chunk: invoke pool: rpcDoRequest: retryUntilAck: engine forcibly closed: context canceled")) {
+		t.Fatal("engine forcibly closed 应为瞬态")
+	}
+	if transientSourceError(errors.New("context canceled")) {
+		t.Fatal("纯 context canceled（用户主动取消）不应靠瞬态表复活")
+	}
+}
+
 // R4.35：peer 解析冷却时长——基础 60s；FLOOD_WAIT 按 Telegram 秒数（封顶 15min）。
 func TestPeerResolveCooldownDuration(t *testing.T) {
 	cases := []struct {
