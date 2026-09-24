@@ -143,6 +143,37 @@ func (a *App) latestMediaHandshakeMs(userID, accountID string, dc int) int64 {
 	return 0
 }
 
+// latestMediaHandshakeMaxMs 返回该账号最近一次媒体探测中所有成功握手的最长耗时
+// （毫秒）；无快照或全败时返回 0。R4.34：媒体连接建立窗口据此自适应——
+// 常驻连接建立在账号主 DC 上，用全 DC 最大握手耗时做保守上界。
+func (a *App) latestMediaHandshakeMaxMs(userID, accountID string) int64 {
+	a.mu.Lock()
+	snap, ok := a.mediaProbes[nativeAccountKey(userID, accountID)]
+	a.mu.Unlock()
+	if !ok {
+		return 0
+	}
+	var maxMs int64
+	for _, r := range snap.Results {
+		if r.MTPOK && r.MTPDuration > maxMs {
+			maxMs = r.MTPDuration
+		}
+	}
+	return maxMs
+}
+
+// latestMediaProbeHint 返回该账号最近一轮媒体探测的可读结论（R4.34，供连接
+// 建立超时的错误文案引用；无快照返回空串——调用方自行判空跳过拼接）。
+func (a *App) latestMediaProbeHint(userID, accountID string) string {
+	a.mu.Lock()
+	snap, ok := a.mediaProbes[nativeAccountKey(userID, accountID)]
+	a.mu.Unlock()
+	if !ok || snap.Summary == "" {
+		return ""
+	}
+	return "最近媒体探测结论：" + snap.Summary
+}
+
 // healthStageDiagnosis 依据分级探测结果解释 client.Run 的失败，返回更精确的错误描述。
 // 纯函数便于单测。
 //
@@ -263,8 +294,13 @@ func (a *App) probeMediaDCs(account NativeAccount) mediaProbeSnapshot {
 	log.Printf("media probe: account %s %s", key, snap.Summary)
 	// R4.33：网络自愈闭环——探测确认全部 DC 真实可用时，把该账号「重试上限」
 	// 终态任务自动拉起一轮。此前用户在网络修复后还必须逐个手动点重试。
+	// R4.34：探测转差时重臂复活标记——复活机会按「断网窗口」计（每窗口一次），
+	// 否则复活后一旦撞上网络恶化，任务永久失去自动复活资格（2.6.11 实测：
+	// 启动复活→节点恶化→45s 连接超时终态→此后探测全绿也不再拉起）。
 	if allMediaDCsHealthy(results) {
 		a.reviveNetworkStalledTasks(account.UserID, account.AccountID)
+	} else {
+		a.rearmNetworkRevive(account.UserID, account.AccountID)
 	}
 	return snap
 }
@@ -290,9 +326,9 @@ func isRetryCapError(errText string) bool {
 }
 
 // reviveNetworkStalledTasks 网络自愈自动复活：把指定账号因「重试上限」终态的任务
-// 拉起一轮。每个任务只自动复活一次（AutoRevived 防抖）——若复活后网络再次恶化
-// 打满上限，不会再被自动拉起，避免「探测绿→复活→打满→再复活」的无限循环；
-// 此时用户可手动重试。
+// 拉起一轮。每个任务在每个「断网窗口」内只自动复活一次（AutoRevived 防抖，
+// 网络转差时由 rearmNetworkRevive 重臂）——避免「探测绿→复活→打满→再复活」
+// 的无限循环；防抖仍挡不住的持续坏网由重试上限终态 + 用户手动重试兜底。
 func (a *App) reviveNetworkStalledTasks(userID, accountID string) {
 	a.mu.Lock()
 	ids := make([]string, 0, 4)
@@ -321,6 +357,36 @@ func (a *App) reviveNetworkStalledTasks(userID, accountID string) {
 	}
 	if len(ids) > 0 {
 		log.Printf("network healed: %d 个重试上限终态任务已自动复活，等待续传", len(ids))
+	}
+}
+
+// rearmNetworkRevive 网络转差时重置该账号 error 任务的 AutoRevived 标记（R4.34）：
+// 自动复活机会按「断网窗口」计——每个窗口结束时（下一轮探测全绿）仍能获得一次
+// 自动拉起，而单个窗口内不会形成复活循环。
+func (a *App) rearmNetworkRevive(userID, accountID string) {
+	a.mu.Lock()
+	ids := make([]string, 0, 4)
+	for id, t := range a.tasks {
+		if t == nil || t.Status != "error" || !t.AutoRevived {
+			continue
+		}
+		if t.UserID != userID || t.AccountID != accountID {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	a.mu.Unlock()
+	for _, id := range ids {
+		a.updateTask(id, func(t *Task) {
+			if t.Status != "error" || !t.AutoRevived {
+				return // 窗口内状态可能已被并发改动，双检防误清
+			}
+			t.AutoRevived = false
+			t.UpdatedAt = now()
+		})
+	}
+	if len(ids) > 0 {
+		log.Printf("network degraded: %d 个终态任务的自动复活标记已重臂（网络恢复后可再拉起一次）", len(ids))
 	}
 }
 

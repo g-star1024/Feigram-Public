@@ -710,6 +710,70 @@ func TestReviveNetworkStalledTasks(t *testing.T) {
 	}
 }
 
+// R4.34：网络转差时重臂 AutoRevived——复活机会按「断网窗口」计。
+// 2.6.11 实测：启动复活→节点恶化→45s 连接超时终态→此后探测全绿也不再拉起。
+func TestRearmNetworkRevive(t *testing.T) {
+	app := newTestApp(t, Config{Enabled: true, Concurrency: 1, Mode: "conservative"})
+	app.tasks["t1"] = &Task{ID: "t1", UserID: "u", AccountID: "a", Status: "error", AutoRevived: true, Error: "已自动重试 120 次后停止"}
+	app.tasks["t2"] = &Task{ID: "t2", UserID: "u", AccountID: "a", Status: "queued", AutoRevived: true, Error: ""}
+	app.tasks["t3"] = &Task{ID: "t3", UserID: "u", AccountID: "b", Status: "error", AutoRevived: true, Error: "已自动重试 120 次后停止"}
+	app.tasks["t4"] = &Task{ID: "t4", UserID: "u", AccountID: "a", Status: "error", Error: "已自动重试 120 次后停止"}
+
+	app.rearmNetworkRevive("u", "a")
+	if app.tasks["t1"].AutoRevived {
+		t.Fatalf("t1 error+已复活任务应被重臂: %+v", app.tasks["t1"])
+	}
+	if !app.tasks["t2"].AutoRevived {
+		t.Fatalf("t2 非 error 状态不应被动: %+v", app.tasks["t2"])
+	}
+	if !app.tasks["t3"].AutoRevived {
+		t.Fatalf("t3 属其他账号不应被动: %+v", app.tasks["t3"])
+	}
+	if app.tasks["t4"].AutoRevived {
+		t.Fatalf("t4 本就未复活，重臂后仍应保持 false: %+v", app.tasks["t4"])
+	}
+	// 重臂后下一轮探测全绿应能再次复活 t1
+	app.reviveNetworkStalledTasks("u", "a")
+	if app.tasks["t1"].Status != "queued" {
+		t.Fatalf("重臂后 t1 应能再次被自动复活: %+v", app.tasks["t1"])
+	}
+}
+
+// R4.34：媒体连接建立超时/失败必须归入瞬态——2.6.11 实测网络抖动下
+// 第一次 45s 超时即一票终态，一次自动重试机会都没拿到。
+func TestTransientSourceErrorMediaConnStart(t *testing.T) {
+	if !transientSourceError(errors.New("媒体连接建立超时（45 秒）：请检查代理是否放行 Telegram")) {
+		t.Fatal("媒体连接建立超时应为瞬态")
+	}
+	if !transientSourceError(fmt.Errorf("媒体连接启动失败：%w", errors.New("connection reset by peer"))) {
+		t.Fatal("媒体连接启动失败（含底层瞬态）应为瞬态")
+	}
+	if !transientSourceError(fmt.Errorf("媒体连接建立失败：%w", errors.New("connection refused"))) {
+		t.Fatal("媒体连接建立失败（含底层瞬态）应为瞬态")
+	}
+}
+
+// R4.34：媒体连接建立窗口按最近握手耗时自适应——基础 45s，8×握手ms 放宽，封顶 120s。
+func TestMediaConnStartTimeoutFor(t *testing.T) {
+	cases := []struct {
+		handshakeMs int64
+		want        time.Duration
+	}{
+		{0, 45 * time.Second},       // 无探测数据 → 基础档
+		{3000, 45 * time.Second},    // 8×3s=24s < 45s → 基础档
+		{5625, 45 * time.Second},    // 8×5.625s=45s → 恰为基础档
+		{5000, 45 * time.Second},    // 8×5s=40s < 45s（实测握手 4~5s 节点仍走基础档）
+		{10000, 80 * time.Second},   // 高延迟节点放宽
+		{60000, 120 * time.Second},  // 封顶 120s
+		{120000, 120 * time.Second}, // 超限封顶
+	}
+	for _, c := range cases {
+		if got := mediaConnStartTimeoutFor(c.handshakeMs); got != c.want {
+			t.Fatalf("mediaConnStartTimeoutFor(%d) = %s, want %s", c.handshakeMs, got, c.want)
+		}
+	}
+}
+
 // R4.31：mediaDCDiagnosis 纯函数四分类——下载错误里的诊断文案必须区分
 // 「TCP 即失败」「本地接受未转发」「TCP+握手均正常」三种世界。
 func TestMediaDCDiagnosisCategories(t *testing.T) {

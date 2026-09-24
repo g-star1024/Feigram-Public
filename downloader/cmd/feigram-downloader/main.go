@@ -453,6 +453,15 @@ func (a *App) load() error {
 			task.RetryAfter = 0
 			task.Error = "2.6.11 修复 peer 解析（索引落盘+深翻分页）后自动复活，等待续传"
 		}
+		if task.Status == "error" && strings.Contains(task.Error, "媒体连接建立超时") {
+			// R4.34：2.6.11 的瞬态表缺「媒体连接建立超时」，网络抖动下第一次
+			// 45s 连接建立超时即一票终态（09/24 09:10 实测：自动复活的任务
+			// 撞上节点恶化直接躺死）。升级后自动复活续传。
+			task.Status = "queued"
+			task.RetryAfter = 0
+			task.AutoRevived = false
+			task.Error = "2.6.12 修复连接建立超时误判终态后自动复活，等待续传"
+		}
 		if task.Status != "downloading" && task.Status != "running" {
 			task.SpeedBps = 0
 		}
@@ -2040,6 +2049,9 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 		task.Error = ""
 		task.RetryCount = 0
 		task.RetryAfter = 0
+		// R4.34：手动重试即用户明确表达「再给我一次机会」，清掉自动复活
+		// 防抖标记，网络恢复后仍可再自动拉起。
+		task.AutoRevived = false
 		task.UpdatedAt = now()
 	default:
 		a.mu.Unlock()
@@ -3818,6 +3830,12 @@ func transientSourceError(err error) bool {
 		// R4.31：DC_ID_INVALID 是 session 与 DC 状态不同步的授权层错误——
 		// 换个连接/重试常能自愈，不该一票终态（真实持续出现由重试上限兜底）。
 		"dc_id_invalid",
+		// R4.34：常驻媒体连接建立超时/失败是链路层瞬态——2.6.11 实测网络抖动时
+		// 任务第一次 45s 超时就被打成终态，一次自动重试机会都没拿到（瞬态表里
+		// 只有英文 timeout，盖不住中文文案）。按退避自动续传，重试上限兜底。
+		"媒体连接建立超时",
+		"媒体连接启动失败",
+		"媒体连接建立失败",
 	}
 	for _, marker := range markers {
 		if strings.Contains(text, marker) {

@@ -14,13 +14,13 @@ package main
 //   - 重新登录（session 变化）或账号删除时自动重建/回收（session 指纹自愈）。
 //
 // 锁纪律：mediaMu 与 a.mu 是两把独立的锁。持 a.mu 的代码路径（如 stateLocked）
-// 绝不获取 mediaMu；acquireMediaConn 的等待窗口（连接建立最多 45s）只持 mediaMu，
-// 因此不会阻塞 /api/state。client 内部的 session 存储回调会拿 a.mu——两者无环。
+// 绝不获取 mediaMu；acquireMediaConn 的等待窗口（连接建立最多 45~120s，R4.34 起
+// 按握手耗时自适应）只持 mediaMu，因此不会阻塞 /api/state。client 内部的 session
+// 存储回调会拿 a.mu——两者无环。
 
 import (
 	"context"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -28,8 +28,27 @@ import (
 	"github.com/gotd/td/telegram"
 )
 
-// mediaConnStartTimeout 等待常驻连接建立（TCP + MTProto 握手 + session 加载）的上限。
-const mediaConnStartTimeout = 45 * time.Second
+// 媒体连接建立窗口（R4.34 自适应）：基础上限 45s；该账号最近媒体探测的握手
+// 耗时偏高（高延迟节点）时按 8×握手ms 放宽，封顶 120s——与 R4.32 首字节
+// 看门狗的自适应思路对齐，别把「慢」误判成「挂死」。
+const (
+	mediaConnStartBaseTimeout = 45 * time.Second
+	mediaConnStartMaxTimeout  = 120 * time.Second
+)
+
+// mediaConnStartTimeoutFor 依据最近握手耗时计算连接建立等待上限。纯函数便于单测。
+func mediaConnStartTimeoutFor(handshakeMs int64) time.Duration {
+	timeout := mediaConnStartBaseTimeout
+	if handshakeMs > 0 {
+		if scaled := time.Duration(handshakeMs) * 8 * time.Millisecond; scaled > timeout {
+			timeout = scaled
+		}
+	}
+	if timeout > mediaConnStartMaxTimeout {
+		timeout = mediaConnStartMaxTimeout
+	}
+	return timeout
+}
 
 type mediaConn struct {
 	key         string
@@ -83,6 +102,9 @@ func (a *App) acquireMediaConn(account NativeAccount, apiHash string) (*mediaCon
 	key := nativeAccountKey(account.UserID, account.AccountID)
 	a.mediaMu.Lock()
 	defer a.mediaMu.Unlock()
+	// R4.34：等待窗口按最近探测握手耗时自适应（无探测数据保持 45s 基础档）。
+	// 此处持 mediaMu 后取 a.mu——锁序合法（持 a.mu 的路径不取 mediaMu）。
+	startTimeout := mediaConnStartTimeoutFor(a.latestMediaHandshakeMaxMs(account.UserID, account.AccountID))
 
 	if conn := a.mediaConns[key]; conn != nil {
 		select {
@@ -106,9 +128,9 @@ func (a *App) acquireMediaConn(account NativeAccount, apiHash string) (*mediaCon
 		case err := <-conn.done:
 			delete(a.mediaConns, key)
 			return nil, fmt.Errorf("媒体连接启动失败：%w", err)
-		case <-time.After(mediaConnStartTimeout):
+		case <-time.After(startTimeout):
 			a.dropMediaConnLocked(key)
-			return nil, errors.New("媒体连接建立超时（45 秒）：请检查代理是否放行 Telegram")
+			return nil, fmt.Errorf("媒体连接建立超时（%s）：请检查代理是否放行 Telegram。%s", startTimeout.Round(time.Second), a.latestMediaProbeHint(account.UserID, account.AccountID))
 		}
 	}
 
@@ -145,9 +167,9 @@ func (a *App) acquireMediaConn(account NativeAccount, apiHash string) (*mediaCon
 	case err := <-conn.done:
 		delete(a.mediaConns, key)
 		return nil, fmt.Errorf("媒体连接建立失败：%w", err)
-	case <-time.After(mediaConnStartTimeout):
+	case <-time.After(startTimeout):
 		a.dropMediaConnLocked(key)
-		return nil, errors.New("媒体连接建立超时（45 秒）：请检查代理是否放行 Telegram")
+		return nil, fmt.Errorf("媒体连接建立超时（%s）：请检查代理是否放行 Telegram。%s", startTimeout.Round(time.Second), a.latestMediaProbeHint(account.UserID, account.AccountID))
 	}
 }
 

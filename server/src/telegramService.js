@@ -427,7 +427,18 @@ async function listNativeChats(userId, accountId, query = "", includeArchived = 
 }
 
 async function listNativeFolders(userId, accountId) {
-  const items = await downloaderSidecar.accountFolders({ userId, accountId });
+  let items;
+  try {
+    items = await downloaderSidecar.accountFolders({ userId, accountId });
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      // R4.34：启动窗口 Go 侧忙（首个任务 + 健康检查 + 媒体连接竞争）时
+      // 45s 超时 abort，裸 DOMException 对用户无意义——转可读文案。
+      // 2.6.11 实测：启动即打出整段 "DOMException [AbortError]" 噪音。
+      throw new Error("文件夹列表加载超时（超过 45 秒）。Go 下载服务可能正在启动或繁忙，请稍后重试");
+    }
+    throw error;
+  }
   return Array.isArray(items) ? items : [];
 }
 
