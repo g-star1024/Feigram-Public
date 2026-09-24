@@ -1067,3 +1067,39 @@ func TestPeerResolveCooldownRemaining(t *testing.T) {
 		t.Fatal("peer 级退避不得波及同账号其他 peer")
 	}
 }
+
+// R4.37：MIGRATE 错误文本两种形态都要能解析出目标 DC——gotd 实际会打出
+// "rpc error code 303: FILE_MIGRATE (1)"（空格括号形态），此前只认下划线形态，
+// migrationDC 返回 0，任务在错误 DC 与文件所在 DC 之间打转（2.6.14 实测 6f32）。
+func TestMigrationDCErrorForms(t *testing.T) {
+	cases := []struct {
+		msg  string
+		want int
+	}{
+		{"rpc error code 303: FILE_MIGRATE (1)", 1},
+		{"connect Telegram media DC 4: FILE_MIGRATE_4", 4},
+		{"rpc error code 303: PHONE_MIGRATE (2)", 2},
+		{"rpc error code 400: AUTH_BYTES_INVALID", 0},
+		{"invoke pool: retry limit reached", 0},
+	}
+	for _, tc := range cases {
+		if got := migrationDC(errors.New(tc.msg)); got != tc.want {
+			t.Fatalf("migrationDC(%q) = %d, want %d", tc.msg, got, tc.want)
+		}
+	}
+	if got := migrationDC(nil); got != 0 {
+		t.Fatalf("migrationDC(nil) = %d, want 0", got)
+	}
+}
+
+// R4.37：AUTH_BYTES_INVALID（export/import 授权字节被目标 DC 拒收，多为代理
+// 连接损坏）必须判为瞬态——重试常能自愈，不能一次失败就终态。
+func TestTransientSourceErrorAuthBytesInvalid(t *testing.T) {
+	err := classifyNativeReadError(errors.New("connect Telegram media DC 1: transfer: onTransfer: import from 1: invoke pool: rpc error code 400: AUTH_BYTES_INVALID"))
+	if !transientSourceError(err) {
+		t.Fatalf("AUTH_BYTES_INVALID 包装后应判为瞬态：%v", err)
+	}
+	if !strings.Contains(err.Error(), "授权导入被拒") {
+		t.Fatalf("错误文案应可读：%v", err)
+	}
+}

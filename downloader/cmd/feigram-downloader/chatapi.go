@@ -456,11 +456,23 @@ func (a *App) fetchNativeDialogs(ctx context.Context, api *tg.Client, account Na
 			}
 			result, err := api.MessagesGetDialogs(ctx, request)
 			if err != nil {
-				if folderID == 0 {
-					return nil, fmt.Errorf("获取会话列表失败：%w", err)
+				// R4.37：真分页后一次拉取要串行多页 RPC，代理抖动会让中间某页
+				// 失败——此前 folder 0 任何一页失败就整单报废（2.6.14 实测
+				// listNativeChats 直接报错、前端列表全空）。现在页级重试一次；
+				// 仍失败则返回已拉取的部分（首页失败才整体报错），部分列表好过没有。
+				retried, retryErr := api.MessagesGetDialogs(ctx, request)
+				if retryErr != nil {
+					if folderID == 0 && len(items) == 0 && page == 0 {
+						return nil, fmt.Errorf("获取会话列表失败：%w", retryErr)
+					}
+					if folderID == 0 {
+						log.Printf("chatapi: 会话列表第 %d 页拉取失败（已重试一次），返回已拉取的 %d 条：%v", page+1, len(items), retryErr)
+					} else {
+						log.Printf("chatapi: archived dialogs fetch failed for %s/%s: %v", account.UserID, account.AccountID, retryErr)
+					}
+					break
 				}
-				log.Printf("chatapi: archived dialogs fetch failed for %s/%s: %v", account.UserID, account.AccountID, err)
-				break
+				result = retried
 			}
 			dialogs, messages, chats, users, ok := flattenNativeDialogs(result)
 			if !ok {

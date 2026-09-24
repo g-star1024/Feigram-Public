@@ -1,5 +1,5 @@
 appname=feigrampub
-version=2.6.14
+version=2.6.15
 display_name=Feigram
 desc="""<p><strong>Feigram 2.0 fnOS Client Edition</strong> 是第三方开发的非官方 Telegram 客户端，支持管理员后台、飞牛账户隔离、加密 Telegram session、Telegram 文件夹、媒体预览、后台任务恢复、运行诊断和更新检测。</p><p>仅适用于 x86_64 / amd64 飞牛 OS 设备。</p>"""
 platform=all
@@ -12,4 +12,4 @@ desktop_uidir=ui
 desktop_applaunchname=feigrampub.proxy.Application
 service_port=3088
 checkport=true
-changelog=R4.36 会话列表分页根因修复：messages.getDialogs 单页硬上限 100 被误当 500，导致第 100 条之后的群组永不显示、深翻分页从未真正翻页（这才是「找不到会话」的真正原因）；现真分页累加，会话列表与 peer 索引均能取满上限。另：peer 解析冷却分级（结构性失败只退避该 peer，不连坐其他频道）+ 连续 3 次结构性失败转可操作终态、调度前感知解析冷却、下载进度心跳、选 DC 前做真实 RPC 探针（握手绿≠能跑流）
+changelog=R4.37 DC 迁移修复：gotd 的 FILE_MIGRATE 错误有空格括号形态「FILE_MIGRATE (1)」，此前正则只认下划线形态导致迁移指令被当普通瞬态、任务在错误 DC 与文件所在 DC 间打转；现两种形态均解析，命中即切目标 DC 续传（带迁移预算防循环）。另：AUTH_BYTES_INVALID 授权导入被拒转瞬态可读文案；会话分页中间页失败重试一次并返回已拉取部分（不再一页失败整单报废）

@@ -14,6 +14,24 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.15",
+    title: "Feigram 2.6.15 更新",
+    version: "2.6.15",
+    level: "success",
+    createdAt: "2026-09-24T05:10:00.000Z",
+    body: [
+"### R4.37 DC 迁移修复 + 分页韧性（2.6.14 实测反馈）",
+      "- **FILE_MIGRATE 两种形态均识别**。gotd 会打出 `FILE_MIGRATE (1)`（空格",
+      "括号形态），此前只认 `FILE_MIGRATE_1` 下划线形态——迁移指令被当普通瞬态，",
+      "任务在错误 DC 与文件所在 DC 之间打转（2.6.14 实测 6f32 复现）。现在命中即",
+      "切目标 DC 续传（带 3 次迁移预算防循环）。",
+      "- **AUTH_BYTES_INVALID 转瞬态**。export/import 授权字节被目标 DC 拒收",
+      "（多为代理连接损坏），重试常能自愈；现可读文案 + 自动重试，不再一票终态。",
+      "- **会话分页韧性**。真分页后中间页失败会重试一次，仍失败则返回已拉取的",
+      "部分结果——不再「一页失败、整单报废」导致前端列表全空。",
+    ].join("\n")
+  },
+  {
     id: "release-2.6.14",
     title: "Feigram 2.6.14 更新",
     version: "2.6.14",

@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.14"
-export APP_CHANGELOG="会话列表分页根因修复：单页上限 100 被误当 500，第 100 条之后的群组永不显示、深翻分页从未真正翻页（「找不到会话」的真正原因）；现真分页累加。另：peer 冷却分级不连坐、连续 3 次结构性失败转可操作终态、调度前感知冷却、下载进度心跳、选 DC 前真实 RPC 探针"
+export APP_VERSION="2.6.15"
+export APP_CHANGELOG="DC 迁移修复：FILE_MIGRATE 空格括号形态此前不被识别，迁移指令被当普通瞬态、任务在错误 DC 与文件所在 DC 间打转；现两种形态均解析并即切目标 DC 续传（带预算防循环）。另：AUTH_BYTES_INVALID 转瞬态可读文案；会话分页中间页失败重试一次并返回已拉取部分"
 export NODE_ENV="production"
 
 is_running() {

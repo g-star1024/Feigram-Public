@@ -91,7 +91,15 @@ var errEmptyMediaResponse = errors.New("媒体源返回空响应")
 // 用户在下载中心只能看到永久「排队中」——补上可读原因，避免二次排障盲区。
 const errMissingFilePathReason = "任务缺少落盘路径，等待重新创建下载任务"
 
-var migrateRe = regexp.MustCompile(`(?:FILE|PHONE|NETWORK|USER)?_?MIGRATE_([0-9]+)`)
+// R4.37：gotd 的 MIGRATE 错误有两种文本形态——"FILE_MIGRATE_4"（消息内嵌下划线）
+// 与 "rpc error code 303: FILE_MIGRATE (4)"（code + 空格括号实参）。此前只匹配
+// 前者，2.6.14 实测里 "FILE_MIGRATE (1)" 落到通用瞬态（2m40s 后重头再来），
+// 任务在 DC1（import 被拒）与 DC2（文件不在此）之间打转。
+var migrateRe = regexp.MustCompile(`(?:FILE|PHONE|NETWORK|USER)?_?MIGRATE(?:_|\s*\()([0-9]+)\)?`)
+
+// nativeDCMigrationBudget 单次下载尝试内允许的 DC 迁移次数上限——防两个 DC
+// 互相踢皮球（如授权导入持续被拒）造成的无限迁移循环。
+const nativeDCMigrationBudget = 3
 
 // M5.2：结构化日志（级别/账号/任务维度）。
 // 默认 JSON 输出到 stdout，级别由 LOG_LEVEL 环境变量控制（debug/info/warn/error，默认 info）。
@@ -1455,6 +1463,8 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 		})
 		// M3.3：file_reference 刷新预算，避免引用持续过期时无限续传。
 		fileRefRefreshes := 0
+		// R4.37：DC 迁移预算，防两个 DC 互相踢皮球（授权导入持续被拒）。
+		dcMigrations := 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -1522,7 +1532,11 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 					continue
 				}
 				if migrateDC := migrationDC(err); migrateDC > 0 {
-					log.Printf("task %s got Telegram DC migration request to %d at offset %d: %v", task.ID, migrateDC, downloaded, err)
+					dcMigrations++
+					if dcMigrations > nativeDCMigrationBudget {
+						return fmt.Errorf("连续 %d 次 DC 迁移仍未取到流（最后目标 DC %d），多为代理连接质量差导致授权导入反复被拒：%w", dcMigrations-1, migrateDC, err)
+					}
+					log.Printf("task %s Telegram 要求迁移到 DC %d（第 %d/%d 次），切换后从 offset %d 继续：%v", task.ID, migrateDC, dcMigrations, nativeDCMigrationBudget, downloaded, err)
 					if err := switchToMediaDC(migrateDC); err != nil {
 						return classifyNativeReadError(err)
 					}
@@ -3727,10 +3741,14 @@ func classifyNativeReadError(err error) error {
 			}
 		}
 		return fmt.Errorf("FLOOD_WAIT: Telegram 要求等待后重试：%w", err)
-	case strings.Contains(msg, "_MIGRATE_"):
+	case strings.Contains(msg, "_MIGRATE_") || strings.Contains(msg, "MIGRATE ("):
 		return fmt.Errorf("DC_MIGRATE: Telegram 要求切换 DC 后重试：%w", err)
 	case strings.Contains(msg, "DC_ID_INVALID"):
 		return fmt.Errorf("DC_ID_INVALID: 媒体 DC 授权导出被拒（session 与 DC 状态可能不同步；账号本身可用，若持续出现请退出后重新登录）：%w", err)
+	case strings.Contains(msg, "AUTH_BYTES_INVALID"):
+		// R4.37：2.6.14 实测（12:54:07）export/import 授权字节被目标 DC 拒收——
+		// 多为代理连接损坏导致导出数据不完整，重试常能自愈，必须可读且瞬态。
+		return fmt.Errorf("AUTH_BYTES_INVALID: 媒体 DC 授权导入被拒（多为代理连接损坏导致导出数据不完整，将自动重试）：%w", err)
 	default:
 		return err
 	}
@@ -3935,6 +3953,9 @@ func transientSourceError(err error) bool {
 		// R4.31：DC_ID_INVALID 是 session 与 DC 状态不同步的授权层错误——
 		// 换个连接/重试常能自愈，不该一票终态（真实持续出现由重试上限兜底）。
 		"dc_id_invalid",
+		// R4.37：AUTH_BYTES_INVALID 是 export/import 授权字节被目标 DC 拒收——
+		// 多为代理连接损坏，重试常能自愈（2.6.14 实测 6f32 在 DC1 反复出现）。
+		"auth_bytes_invalid",
 		// R4.34：常驻媒体连接建立超时/失败是链路层瞬态——2.6.11 实测网络抖动时
 		// 任务第一次 45s 超时就被打成终态，一次自动重试机会都没拿到（瞬态表里
 		// 只有英文 timeout，盖不住中文文案）。按退避自动续传，重试上限兜底。
