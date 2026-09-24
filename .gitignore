@@ -15,3 +15,4 @@ fnos-native-package/app/bin/ffprobe
 # 21MB 二进制进仓库只会让 diff 变噪音；构建脚本会自动重新产出）
 downloader/feigram-downloader
 *.tmp
+app.tgz
