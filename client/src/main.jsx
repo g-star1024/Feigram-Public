@@ -1687,7 +1687,7 @@ function LibraryPage({ accountId, downloads = [], silentCaches = [], onPlay }) {
           <strong>{task.fileName || `消息 ${task.messageId}`}</strong>
           <small>{task.kind || "video"} · {formatBytes(task.size)} · {formatTime(task.updatedAt || task.createdAt)}</small>
         </span>
-        {task.status && <span className={cx("fn-badge fn-badge--soft", task.status !== "completed" && `fn-badge--${task.status === "error" ? "danger" : "warning"}`)}>{task.status === "completed" ? "已缓存" : task.status === "error" ? "失败" : "缓存中"}</span>}
+        {task.status && <span className={cx("fn-badge", task.status === "completed" ? "fn-badge--success" : task.status === "error" ? "fn-badge--danger" : "fn-badge--warning")}>{task.status === "completed" ? "已缓存" : task.status === "error" ? "失败" : "缓存中"}</span>}
       </button>)}
       {!visible.length && <div className="fn-card fn-empty" style={{ gridColumn: "1 / -1" }}>
         <Library size={28} />

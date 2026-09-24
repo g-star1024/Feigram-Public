@@ -14,6 +14,16 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.26",
+    title: "Feigram 2.6.26 更新",
+    version: "2.6.26",
+    level: "success",
+    createdAt: "2026-09-24T22:08:26.000Z",
+    body: [
+"资源库「已缓存」徽标改为绿色，与「缓存中」（黄色）状态明确区分"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.25",
     title: "Feigram 2.6.25 更新",
     version: "2.6.25",
@@ -57,18 +67,6 @@ const announcements = [
     body: [
 "- 升级后不再需要手动重试：此前因 FLOOD_PREMIUM_WAIT（免费账号带宽限流）被误判终态失败的任务，升级到本版会自动复活为排队并续传（2.6.21 升级后下载页躺尸的根因：升级复活清单漏了这个新错误文案）",
       "- 手动「开始」仍可用：强制重启 + 断点续传"
-    ].join("\n")
-  },
-  {
-    id: "release-2.6.21",
-    title: "Feigram 2.6.21 更新",
-    version: "2.6.21",
-    level: "success",
-    createdAt: "2026-09-24T13:12:58.000Z",
-    body: [
-"修复：普通 FLOOD_WAIT（420）被误报成「免费账号带宽配额 FLOOD_PREMIUM_WAIT」，等待原因显示错误",
-      "修复：普通限流不再污染 premium 计数，避免无辜触发下载并发减半",
-      "说明：免费账号的 FLOOD_PREMIUM_WAIT 处置（按 Telegram 秒数精确等待、长等待交由任务层、反复限流降并发）保持不变"
     ].join("\n")
   },
 ];
