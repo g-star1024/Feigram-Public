@@ -11,4 +11,7 @@ fnos-native-package/app/bin/node
 fnos-native-package/app/bin/feigram-downloader
 fnos-native-package/app/bin/ffmpeg
 fnos-native-package/app/bin/ffprobe
+# Go 下载器本地构建产物（R4.38：自 M5.1 起被误跟踪且未随版本更新，
+# 21MB 二进制进仓库只会让 diff 变噪音；构建脚本会自动重新产出）
+downloader/feigram-downloader
 *.tmp
