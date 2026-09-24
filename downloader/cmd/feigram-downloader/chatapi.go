@@ -1284,6 +1284,16 @@ func (a *App) resolveNativePeer(ctx context.Context, api *tg.Client, account Nat
 			return info, nil
 		}
 	}
+	// R4.35：解析闸门——账号级 singleflight（并发任务只发一轮 dialogs 拉取/深翻）
+	// + 失败冷却（被 Telegram 限流后账号级退避，不再 5~10s 就重翻）。
+	return a.peerResolveGate(nativeAccountKey(account.UserID, account.AccountID), func() (nativePeerInfo, error) {
+		return a.resolveNativePeerUncached(ctx, api, account, peerID)
+	})
+}
+
+// resolveNativePeerUncached 单次真实解析：回拉首批会话 → 深翻分页 → 再查索引。
+// 调用方须经 peerResolveGate（闸门保证同账号同一时刻只跑一轮）。
+func (a *App) resolveNativePeerUncached(ctx context.Context, api *tg.Client, account NativeAccount, peerID string) (nativePeerInfo, error) {
 	if _, err := a.fetchNativeDialogs(ctx, api, account, maxChatDialogLimit, "", true); err != nil {
 		return nativePeerInfo{}, err
 	}
@@ -1293,15 +1303,98 @@ func (a *App) resolveNativePeer(ctx context.Context, api *tg.Client, account Nat
 		}
 	}
 	// R4.30：首批 500 会话没有目标 peer 时深翻分页（最多 6 轮/文件夹）。
-	// 深翻失败不阻断——已翻到的部分可能已包含目标，最后再查一次索引。
+	// 深翻失败不阻断——已翻到的部分可能已包含目标，最后再查一次索引；
+	// R4.35：失败原因保留进最终错误，让 FLOOD_WAIT 秒数能被 floodWaitFromError
+	// 提取（此前深翻的 FLOOD_WAIT 只写日志，任务按通用退避 5~10s 重试，
+	// 在限流窗口内反复撞墙、把限流喂得更大）。
+	var backfillErr error
 	if err := a.backfillNativePeerIndex(ctx, api, account); err != nil {
+		backfillErr = err
 		log.Printf("chatapi: peer %s 深翻会话列表未完成：%v", peerID, err)
 	}
 	index := loadNativePeerIndex(account.UserID, account.AccountID)
 	if info, ok := index[peerID]; ok {
 		return info, nil
 	}
+	if backfillErr != nil {
+		return nativePeerInfo{}, fmt.Errorf("找不到会话 %s，可能已退出该群组、会话已被删除，或 Telegram 暂时无法解析该会话；索引刷新未完成：%w", peerID, backfillErr)
+	}
 	return nativePeerInfo{}, fmt.Errorf("找不到会话 %s，可能已退出该群组、会话已被删除，或 Telegram 暂时无法解析该会话", peerID)
+}
+
+// peerResolveCall 一次在途解析的共享结果（singleflight）。
+type peerResolveCall struct {
+	done chan struct{}
+	info nativePeerInfo
+	err  error
+}
+
+// peer 解析冷却：失败后账号级退避，至少 60s；FLOOD_WAIT 时按 Telegram 给的
+// 秒数等待（封顶 15 分钟），避免在限流窗口内反复深翻。
+const (
+	peerResolveBaseCooldown = 60 * time.Second
+	peerResolveMaxCooldown  = 15 * time.Minute
+)
+
+// peerResolveCooldownDuration 依据失败原因计算冷却时长。纯函数便于单测。
+func peerResolveCooldownDuration(err error) time.Duration {
+	d := peerResolveBaseCooldown
+	if wait := floodWaitFromError(err); wait > 0 {
+		if wd := time.Duration(wait) * time.Second; wd > d {
+			d = wd
+		}
+	}
+	if d > peerResolveMaxCooldown {
+		d = peerResolveMaxCooldown
+	}
+	return d
+}
+
+// peerResolveGate 账号级 peer 解析闸门（R4.35）：
+//   - 冷却中：直接返回可读错误（不发起任何 RPC）；
+//   - 已有在途解析：等待其共享结果（singleflight），不重复深翻；
+//   - 否则执行 fn，失败则为该账号设置冷却。
+//
+// 实测背景（2.6.12）：三个任务同时解析同一个缺失 accessHash 的频道，
+// 各自全量深翻会话列表 → FLOOD_WAIT(9)/(6) → 秒级重试再翻 → 限流自噬。
+func (a *App) peerResolveGate(key string, fn func() (nativePeerInfo, error)) (nativePeerInfo, error) {
+	a.peerResolveMu.Lock()
+	// 惰性初始化：测试与部分构造点用 App 字面量，未走 newApp 初始化。
+	if a.peerResolveInflight == nil {
+		a.peerResolveInflight = map[string]*peerResolveCall{}
+	}
+	if a.peerResolveCooldown == nil {
+		a.peerResolveCooldown = map[string]time.Time{}
+	}
+	if until, ok := a.peerResolveCooldown[key]; ok {
+		if remain := time.Until(until); remain > 0 {
+			a.peerResolveMu.Unlock()
+			return nativePeerInfo{}, fmt.Errorf("会话索引解析在冷却中（剩余 %s）——上一轮解析被 Telegram 限流，冷却结束会自动重试", remain.Round(time.Second))
+		}
+		delete(a.peerResolveCooldown, key)
+	}
+	if call := a.peerResolveInflight[key]; call != nil {
+		a.peerResolveMu.Unlock()
+		<-call.done
+		return call.info, call.err
+	}
+	call := &peerResolveCall{done: make(chan struct{})}
+	a.peerResolveInflight[key] = call
+	a.peerResolveMu.Unlock()
+
+	info, err := fn()
+
+	a.peerResolveMu.Lock()
+	delete(a.peerResolveInflight, key)
+	if err != nil {
+		cooldown := peerResolveCooldownDuration(err)
+		a.peerResolveCooldown[key] = time.Now().Add(cooldown)
+		log.Printf("peer resolve gate: account %s 解析失败，%s 内不再发起解析：%v", key, cooldown, err)
+	}
+	call.info, call.err = info, err
+	close(call.done)
+	a.peerResolveMu.Unlock()
+	return info, err
 }
 
 func nativeInputPeerFromInfo(info nativePeerInfo) (tg.InputPeerClass, error) {

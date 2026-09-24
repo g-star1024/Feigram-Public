@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.12"
-export APP_CHANGELOG="网络自愈补漏：「媒体连接建立超时」转瞬态不再一次即终态；AutoRevived 按断网窗口重臂；连接建立窗口按握手耗时自适应（45~120s）"
+export APP_VERSION="2.6.13"
+export APP_CHANGELOG="限流自噬修复：RPC 传输层失败（retryUntilAck 重试上限）转瞬态；peer 解析加账号级闸门（并发去重 + FLOOD_WAIT 精确冷却），不再三任务并翻会话列表互相加深限流"
 export NODE_ENV="production"
 
 is_running() {

@@ -1,5 +1,26 @@
 # Feigram Public 发布说明
 
+## 版本 2.6.13
+
+- ### R4.35 限流自噬修复（用户 2.6.12 实测反馈）
+- - **RPC 传输层失败转瞬态**：2.6.12 实测（10:42:00）网络抖动时
+  `invoke pool: rpcDoRequest: retryUntilAck: retry limit reached after 5 attempts`
+  被当终态（首个失败即 error）。现把 `retry limit reached` / `retryuntilack` /
+  `engine was closed` 加入瞬态表；load() 归一化把 2.6.12 落盘的此类终态任务
+  升级时自动复活。
+- - **peer 解析账号级闸门**（`peerResolveGate`）：2.6.12 实测三个任务同时解析同一个
+  缺失 accessHash 的频道（Channel:2052039292），各自全量深翻会话列表 → 同时触发
+  `FLOOD_WAIT (9)` / `FLOOD_WAIT (6)` → 5~10s 后再次深翻 → **限流被自己喂大**。
+  现在：并发解析只执行一轮真实深翻（singleflight，结果共享）；失败后账号级冷却
+  （基础 60s，`FLOOD_WAIT` 按 Telegram 秒数，封顶 15 分钟），冷却期内直接返回
+  可读原因、不发 RPC；深翻失败原因保留进最终错误，使 `floodWaitFromError`
+  能提取精确等待秒数。
+- - 本轮 2.6.12 已验证生效的部分：健康检查自动恢复（572ms）→ 任务自动启动 →
+  常驻连接 510ms 建立 → 探测全绿自动复活（`network healed: 1 个…`）→ 调度紧循环
+  冷却 2m（R4.26）→ FLOOD_WAIT 精确等待。链路自愈闭环成立。
+- - 节点转发质量仍不稳（探测在「全部握手正常」与「5/5 全黑洞」间摆动），
+  建议更换节点。
+
 ## 版本 2.6.12
 
 - ### R4.34 网络自愈补漏（用户 2.6.11 实测反馈）

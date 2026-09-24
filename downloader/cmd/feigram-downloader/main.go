@@ -298,6 +298,13 @@ type App struct {
 	// mediaProbes 是各账号最近一次媒体 DC 分级探测快照（R4.29），随 /api/state
 	// 进诊断页；读写在 a.mu 下进行（探测的网络 IO 在锁外完成）。
 	mediaProbes map[string]mediaProbeSnapshot
+	// peerResolveMu 保护 peer 解析闸门（R4.35）：账号级 singleflight + 失败冷却，
+	// 防止多个任务并发深翻会话列表、互相加深 Telegram 限流（2.6.12 实测：
+	// 三任务同时深翻 → FLOOD_WAIT(9)/(6) → 5~10s 后再翻，限流被自己喂大）。
+	// 独立锁，与 a.mu / mediaMu 均无环（闸门内不持有其他锁做 RPC）。
+	peerResolveMu       sync.Mutex
+	peerResolveInflight map[string]*peerResolveCall
+	peerResolveCooldown map[string]time.Time
 	// lastAutoSpawn 记录上次调度后台缓存（auto）任务的时间（R4.29 错峰），
 	// 与手动下载之间保持 autoSpawnMinInterval 的最小间隔。
 	lastAutoSpawn time.Time
@@ -340,6 +347,9 @@ func main() {
 		taskLogs:    map[string]*taskLogState{},
 		mediaConns:  map[string]*mediaConn{},
 		mediaProbes: map[string]mediaProbeSnapshot{},
+		// R4.35：peer 解析闸门（singleflight + 冷却）
+		peerResolveInflight: map[string]*peerResolveCall{},
+		peerResolveCooldown: map[string]time.Time{},
 		client: &http.Client{
 			Timeout:   0,
 			Transport: newMediaTransport(proxy),
@@ -461,6 +471,13 @@ func (a *App) load() error {
 			task.RetryAfter = 0
 			task.AutoRevived = false
 			task.Error = "2.6.12 修复连接建立超时误判终态后自动复活，等待续传"
+		}
+		if task.Status == "error" && strings.Contains(task.Error, "retry limit reached") {
+			// R4.35：2.6.12 的瞬态表缺 RPC 引擎层 marker，「retryUntilAck: retry
+			// limit reached」被一票终态（10:42:00 实测）。升级后自动复活续传。
+			task.Status = "queued"
+			task.RetryAfter = 0
+			task.Error = "2.6.13 修复 RPC 传输层失败误判终态后自动复活，等待续传"
 		}
 		if task.Status != "downloading" && task.Status != "running" {
 			task.SpeedBps = 0
@@ -3836,6 +3853,15 @@ func transientSourceError(err error) bool {
 		"媒体连接建立超时",
 		"媒体连接启动失败",
 		"媒体连接建立失败",
+		// R4.35：RPC 引擎层的传输级失败也是瞬态——2.6.12 实测（10:42:00）网络抖动时
+		// `invoke pool: rpcDoRequest: retryUntilAck: retry limit reached after 5 attempts`
+		// 被当终态（首个失败即 error），任务直接躺死等手动重试。
+		"retry limit reached",
+		"retryuntilack",
+		"engine was closed",
+		// R4.35：peer 解析闸门的账号级冷却——冷却期内失败是「等窗口过去」的瞬态，
+		// 按退避重试，冷却结束后自动续传。
+		"解析在冷却中",
 	}
 	for _, marker := range markers {
 		if strings.Contains(text, marker) {

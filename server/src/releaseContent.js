@@ -14,6 +14,26 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.13",
+    title: "Feigram 2.6.13 更新",
+    version: "2.6.13",
+    level: "success",
+    createdAt: "2026-09-24T03:00:00.000Z",
+    body: [
+"### R4.35 限流自噬修复（2.6.12 实测反馈）",
+      "- 2.6.12 实测好消息：网络恢复后健康检查自动转绿、任务自动启动、媒体连接",
+      "510ms 建立、探测全绿自动复活、调度紧循环冷却全部按预期工作。",
+      "- **RPC 传输层失败转瞬态**。网络抖动时 `retryUntilAck: retry limit reached",
+      "after 5 attempts` 被一票终态，任务躺死等手动点。现按退避自动续传；升级时",
+      "落盘的此类终态任务自动复活。",
+      "- **peer 解析加账号级闸门**。三个任务同时解析同一个缺失 accessHash 的频道，",
+      "各自全量深翻会话列表 → Telegram 限流 FLOOD_WAIT(9)/(6) → 5~10s 后再翻，",
+      "限流被自己越喂越大。现并发解析只跑一轮（结果共享），失败后账号级冷却",
+      "（FLOOD_WAIT 按 Telegram 秒数，封顶 15 分钟）——不再自噬。",
+      "另：本轮节点转发质量仍不稳（探测在「全绿」与「全黑洞」间摆动），建议更换节点。"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.12",
     title: "Feigram 2.6.12 更新",
     version: "2.6.12",

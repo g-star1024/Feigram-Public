@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -46,6 +47,9 @@ func newTestApp(t *testing.T, cfg Config) *App {
 		taskLogs:    map[string]*taskLogState{},
 		mediaConns:  map[string]*mediaConn{},
 		mediaProbes: map[string]mediaProbeSnapshot{},
+		// R4.35：peer 解析闸门
+		peerResolveInflight: map[string]*peerResolveCall{},
+		peerResolveCooldown: map[string]time.Time{},
 		// http-bridge 用例需要非 nil 的 a.client（downloadHTTPBridge 直接使用）。
 		client: &http.Client{},
 		proxy:  &proxyRuntime{},
@@ -850,5 +854,100 @@ func TestPumpOnceManualPrioritizesOverAuto(t *testing.T) {
 		if app.tasks["a-auto"].Status == "queued" && !app.pumpOnce() {
 			t.Fatalf("手动任务结束后 auto 任务应恢复调度，status=%q err=%q", app.tasks["a-auto"].Status, app.tasks["a-auto"].Error)
 		}
+	}
+}
+
+// R4.35：RPC 引擎层传输失败（retryUntilAck 重试上限）必须归入瞬态——
+// 2.6.12 实测（10:42:00）网络抖动下首个失败即一票终态。
+func TestTransientSourceErrorRPCTransport(t *testing.T) {
+	if !transientSourceError(errors.New("invoke pool: rpcDoRequest: retryUntilAck: retry limit reached after 5 attempts")) {
+		t.Fatal("retryUntilAck 重试上限应为瞬态")
+	}
+	if !transientSourceError(errors.New("rpcDoRequest: rpc error code 420: FLOOD_WAIT (9)")) {
+		t.Fatal("FLOOD_WAIT 应为瞬态")
+	}
+	if !transientSourceError(errors.New("会话索引解析在冷却中（剩余 42s）——上一轮解析被 Telegram 限流，冷却结束会自动重试")) {
+		t.Fatal("解析冷却应为瞬态（等窗口过去）")
+	}
+}
+
+// R4.35：peer 解析冷却时长——基础 60s；FLOOD_WAIT 按 Telegram 秒数（封顶 15min）。
+func TestPeerResolveCooldownDuration(t *testing.T) {
+	cases := []struct {
+		err  error
+		want time.Duration
+	}{
+		{errors.New("找不到会话 Channel:1"), 60 * time.Second},
+		{errors.New("rpcDoRequest: rpc error code 420: FLOOD_WAIT (9)"), 60 * time.Second},    // 9s < 60s 基础档
+		{errors.New("rpcDoRequest: rpc error code 420: FLOOD_WAIT (600)"), 10 * time.Minute},  // 按限流秒数
+		{errors.New("rpcDoRequest: rpc error code 420: FLOOD_WAIT (3600)"), 15 * time.Minute}, // 封顶
+	}
+	for _, c := range cases {
+		if got := peerResolveCooldownDuration(c.err); got != c.want {
+			t.Fatalf("peerResolveCooldownDuration(%v) = %s, want %s", c.err, got, c.want)
+		}
+	}
+}
+
+// R4.35：peer 解析闸门——并发调用只执行一次真实解析（singleflight）；
+// 失败后进入账号级冷却，冷却期内不再发起解析。
+func TestPeerResolveGateSingleflightAndCooldown(t *testing.T) {
+	app := newTestApp(t, Config{Enabled: true, Concurrency: 1, Mode: "conservative"})
+
+	var calls int32
+	release := make(chan struct{})
+	started := make(chan struct{}, 4)
+	gateFn := func() (nativePeerInfo, error) {
+		atomic.AddInt32(&calls, 1)
+		started <- struct{}{}
+		<-release
+		return nativePeerInfo{ID: "2052039292", Type: "channel", AccessHash: "42"}, nil
+	}
+
+	const workers = 3
+	results := make([]nativePeerInfo, workers)
+	errs := make([]error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx], errs[idx] = app.peerResolveGate("u|a", gateFn)
+		}(i)
+	}
+	<-started // 首轮已开始
+	time.Sleep(50 * time.Millisecond)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("并发解析只应执行一次，实际 %d 次", got)
+	}
+	close(release)
+	wg.Wait()
+	for i := 0; i < workers; i++ {
+		if errs[i] != nil || results[i].AccessHash != "42" {
+			t.Fatalf("第 %d 个并发调用应共享解析结果: info=%+v err=%v", i, results[i], errs[i])
+		}
+	}
+
+	// 失败 → 冷却：后续调用不执行 fn，返回可读冷却错误。
+	failCalls := 0
+	failFn := func() (nativePeerInfo, error) {
+		failCalls++
+		return nativePeerInfo{}, errors.New("rpcDoRequest: rpc error code 420: FLOOD_WAIT (9)")
+	}
+	if _, err := app.peerResolveGate("u|b", failFn); err == nil {
+		t.Fatal("首次解析失败应返回错误")
+	}
+	_, err := app.peerResolveGate("u|b", failFn)
+	if err == nil || !strings.Contains(err.Error(), "解析在冷却中") {
+		t.Fatalf("冷却期内应返回冷却错误: %v", err)
+	}
+	if failCalls != 1 {
+		t.Fatalf("冷却期内不应再发起解析，实际 %d 次", failCalls)
+	}
+	// 其他账号不受影响（冷却按账号隔离）
+	if _, err := app.peerResolveGate("u|c", func() (nativePeerInfo, error) {
+		return nativePeerInfo{ID: "1", Type: "user", AccessHash: "1"}, nil
+	}); err != nil {
+		t.Fatalf("其他账号不应被冷却波及: %v", err)
 	}
 }
