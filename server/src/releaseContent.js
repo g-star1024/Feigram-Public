@@ -14,6 +14,18 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.29",
+    title: "Feigram 2.6.29 更新",
+    version: "2.6.29",
+    level: "success",
+    createdAt: "2026-09-24T23:17:54.000Z",
+    body: [
+"修复「加载更早消息」一直显示加载中的问题：前端请求增加超时兜底（80 秒），超时或失败立即复位按钮并弹中文提示，不再永久卡住",
+      "服务端到 Go 下载服务的消息/媒体/文件夹/Peer 查询超时从 45 秒对齐到 65 秒（与 Go 侧 60 秒查询上限匹配，避免先被掐断只看到英文报错）",
+      "加载到没有更早消息时按钮自动收起并提示「没有更早的消息了」"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.28",
     title: "Feigram 2.6.28 更新",
     version: "2.6.28",
@@ -54,16 +66,6 @@ const announcements = [
     createdAt: "2026-09-24T21:59:20.000Z",
     body: [
 "桌面图标显示名称「feigram」改为首字母大写的「Feigram」"
-    ].join("\n")
-  },
-  {
-    id: "release-2.6.24",
-    title: "Feigram 2.6.24 更新",
-    version: "2.6.24",
-    level: "success",
-    createdAt: "2026-09-24T15:26:27.000Z",
-    body: [
-"修复群组信息面板错位：点击会话标题查看群组信息时，面板现在以右侧固定抽屉展示（此前缩在窗口左下角被裁掉）"
     ].join("\n")
   },
 ];

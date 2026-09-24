@@ -7,27 +7,50 @@ export function setToken(token) {
 }
 
 export async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${getToken()}`,
-      ...(options.headers || {})
-    }
-  });
-  const contentType = response.headers.get("content-type") || "";
-  const payload = contentType.includes("application/json") ? await response.json() : await response.text();
-  if (!response.ok) {
-    const error = new Error(payload?.error || payload || "请求失败");
-    // M2.4：保留服务端下发的降级标记（如 needsRelogin），
-    // 否则前端无法判断迁移失败后应自动切换到「重新登录」。
-    if (payload && typeof payload === "object") {
-      error.status = response.status;
-      error.needsRelogin = Boolean(payload.needsRelogin);
-    }
-    throw error;
+  // R4.51：前端请求超时兜底。此前浏览器→Node 一段是裸 fetch，没有任何超时——
+  // webview 半开连接或 Node 僵死时，调用方 Promise 永不落定，「加载更早消息」等
+  // 按钮会永久停在「加载中」。timeoutMs 超时后中止并翻译成中文提示。
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 0;
+  const controller = new AbortController();
+  const external = options.signal;
+  const relayAbort = () => controller.abort(external.reason);
+  if (external) {
+    if (external.aborted) controller.abort(external.reason);
+    else external.addEventListener("abort", relayAbort, { once: true });
   }
-  return payload;
+  const timer = timeoutMs ? setTimeout(() => controller.abort(new DOMException("timeout", "TimeoutError")), timeoutMs) : null;
+  try {
+    const response = await fetch(path, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${getToken()}`,
+        ...(options.headers || {})
+      }
+    });
+    const contentType = response.headers.get("content-type") || "";
+    const payload = contentType.includes("application/json") ? await response.json() : await response.text();
+    if (!response.ok) {
+      const error = new Error(payload?.error || payload || "请求失败");
+      // M2.4：保留服务端下发的降级标记（如 needsRelogin），
+      // 否则前端无法判断迁移失败后应自动切换到「重新登录」。
+      if (payload && typeof payload === "object") {
+        error.status = response.status;
+        error.needsRelogin = Boolean(payload.needsRelogin);
+      }
+      throw error;
+    }
+    return payload;
+  } catch (err) {
+    if (err?.name === "TimeoutError" || (err?.name === "AbortError" && timeoutMs && !external?.aborted)) {
+      throw new Error("请求超时，请检查网络后重试");
+    }
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (external) external.removeEventListener("abort", relayAbort);
+  }
 }
 
 export async function appLogin(password) {

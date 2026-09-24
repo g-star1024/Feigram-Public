@@ -237,19 +237,22 @@ function accountDialogs({ userId, accountId, limit = 0, query = "", includeArchi
 }
 
 function accountFolders({ userId, accountId }) {
-  return request(accountChatPath(accountId, "folders", { userId }), { timeoutMs: 45000 });
+  // R4.51：Node 超时统一升到 65s（与 accountDialogs 同理）——Go 的 chatQueryTimeout
+  // 是 60s，Node 45s 会先掐断，用户只能看到英文 abort；下载占用代理时聊天查询变慢，
+  // 这正是「加载更早消息一直加载中」的诱因之一。
+  return request(accountChatPath(accountId, "folders", { userId }), { timeoutMs: 65000 });
 }
 
 function accountMessages({ userId, accountId, peer, limit = 0, before = 0, around = 0 }) {
-  return request(accountChatPath(accountId, "messages", { userId, peer, limit, before, around }), { timeoutMs: 45000 });
+  return request(accountChatPath(accountId, "messages", { userId, peer, limit, before, around }), { timeoutMs: 65000 });
 }
 
 function accountMedia({ userId, accountId, peer, limit = 0, before = 0 }) {
-  return request(accountChatPath(accountId, "media", { userId, peer, limit, before }), { timeoutMs: 45000 });
+  return request(accountChatPath(accountId, "media", { userId, peer, limit, before }), { timeoutMs: 65000 });
 }
 
 function accountPeer({ userId, accountId, peer }) {
-  return request(accountChatPath(accountId, "peer", { userId, peer }), { timeoutMs: 30000 });
+  return request(accountChatPath(accountId, "peer", { userId, peer }), { timeoutMs: 65000 });
 }
 
 // --- M4.3: Go Telegram Core 写路径与会话详情 ---

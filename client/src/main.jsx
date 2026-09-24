@@ -2043,9 +2043,10 @@ function App() {
       pendingScrollRef.current = null;
     }
     setBusy(true);
+    setLoadingOlder(false);
     try {
       const around = targetMessageId ? `&around=${encodeURIComponent(targetMessageId)}` : "";
-      const list = await api(`/api/messages?account=${encodeURIComponent(accountId)}&peer=${encodeURIComponent(chat.id)}&limit=80${around}`);
+      const list = await api(`/api/messages?account=${encodeURIComponent(accountId)}&peer=${encodeURIComponent(chat.id)}&limit=80${around}`, { timeoutMs: 80000 });
       setMessages(list);
       setHasOlder(list.length >= 80);
       if (targetMessageId && !list.some((message) => Number(message.id) === targetMessageId)) {
@@ -2072,7 +2073,7 @@ function App() {
     setChatDetailsLoading(true);
     setChatMediaLoadingMore(false);
     try {
-      const info = await api(`/api/chats/${encodeURIComponent(accountId)}/${encodeURIComponent(activeChat.id)}/details`);
+      const info = await api(`/api/chats/${encodeURIComponent(accountId)}/${encodeURIComponent(activeChat.id)}/details`, { timeoutMs: 80000 });
       setChatDetails(info);
     } catch (err) {
       notify(err.message);
@@ -2086,7 +2087,7 @@ function App() {
     setChatMediaLoadingMore(true);
     try {
       const before = chatDetails.nextMediaBefore || 0;
-      const page = await api(`/api/chats/${encodeURIComponent(accountId)}/${encodeURIComponent(activeChat.id)}/media?before=${encodeURIComponent(before)}&limit=30`);
+      const page = await api(`/api/chats/${encodeURIComponent(accountId)}/${encodeURIComponent(activeChat.id)}/media?before=${encodeURIComponent(before)}&limit=30`, { timeoutMs: 80000 });
       setChatDetails((current) => {
         if (!current) return current;
         const seen = new Set((current.files || []).map((file) => String(file.id)));
@@ -2170,7 +2171,7 @@ function App() {
     if (!activeChat) return;
     const element = messagesRef.current;
     const top = element?.scrollTop || 0;
-    const list = await api(`/api/messages?account=${encodeURIComponent(accountId)}&peer=${encodeURIComponent(activeChat.id)}&limit=80`);
+    const list = await api(`/api/messages?account=${encodeURIComponent(accountId)}&peer=${encodeURIComponent(activeChat.id)}&limit=80`, { timeoutMs: 80000 });
     setMessages(list);
     setHasOlder(list.length >= 80);
     requestAnimationFrame(() => {
@@ -2186,14 +2187,22 @@ function App() {
     setLoadingOlder(true);
     setError("");
     try {
-      const older = await api(`/api/messages?account=${encodeURIComponent(accountId)}&peer=${encodeURIComponent(activeChat.id)}&limit=80&before=${encodeURIComponent(firstId)}`);
+      const older = await api(`/api/messages?account=${encodeURIComponent(accountId)}&peer=${encodeURIComponent(activeChat.id)}&limit=80&before=${encodeURIComponent(firstId)}`, { timeoutMs: 80000 });
+      // R4.51：空页说明已到历史尽头，收起按钮而不是反复可点。
+      if (!older.length) {
+        setHasOlder(false);
+        notify("没有更早的消息了");
+        return;
+      }
       setMessages((current) => [...older, ...current]);
       setHasOlder(older.length >= 80);
       requestAnimationFrame(() => {
         if (element) element.scrollTop = element.scrollHeight - previousHeight;
       });
     } catch (err) {
+      // R4.51：失败必须即时反馈（此前只写顶部 inline error，按钮还可能被误认为卡死）。
       setError(err.message);
+      notify(`加载更早消息失败：${err.message}`);
     } finally {
       setLoadingOlder(false);
     }
