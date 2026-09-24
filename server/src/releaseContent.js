@@ -14,6 +14,16 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.25",
+    title: "Feigram 2.6.25 更新",
+    version: "2.6.25",
+    level: "success",
+    createdAt: "2026-09-24T21:59:20.000Z",
+    body: [
+"桌面图标显示名称「feigram」改为首字母大写的「Feigram」"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.24",
     title: "Feigram 2.6.24 更新",
     version: "2.6.24",
@@ -59,18 +69,6 @@ const announcements = [
 "修复：普通 FLOOD_WAIT（420）被误报成「免费账号带宽配额 FLOOD_PREMIUM_WAIT」，等待原因显示错误",
       "修复：普通限流不再污染 premium 计数，避免无辜触发下载并发减半",
       "说明：免费账号的 FLOOD_PREMIUM_WAIT 处置（按 Telegram 秒数精确等待、长等待交由任务层、反复限流降并发）保持不变"
-    ].join("\n")
-  },
-  {
-    id: "release-2.6.20",
-    title: "Feigram 2.6.20 更新",
-    version: "2.6.20",
-    level: "success",
-    createdAt: "2026-09-24T12:02:28.000Z",
-    body: [
-"【免费账号下载限流不再直接判失败】Telegram 对免费账号的下载带宽限流会返回 FLOOD_PREMIUM_WAIT（括号里的数字就是「请等 N 秒」），而 gotd 与我们的限流识别此前都不认识这个错误码，任务推进到几百 MB 后会直接终态失败；现在按 Telegram 给的秒数精确等待后自动续传，等待原因会显示在任务里。",
-      "【等待分两层，不误撞看门狗】3 分钟以内的等待在下载器内部就地等待并重试同一个请求（4 路并发各自独立等待，代价最小）；超过 3 分钟的等待交给任务层按秒数精确等待，避免在下载器里空等被无进度看门狗误判成「挂死」而杀掉任务。",
-      "【反复限流会自动降并发】同一账号累计 premium 限流 ≥3 次 → 并发减半，≥6 次 → 单线程；某一轮下载完整跑完且一次限流都没撞上即恢复原并发。免费账号的带宽配额是固定的，4 路并发只会持续撞限流、把时间耗在反复等待上，降档后总吞吐反而更高。"
     ].join("\n")
   },
 ];

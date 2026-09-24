@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.24"
-export APP_CHANGELOG="修复群组信息面板显示错位"
+export APP_VERSION="2.6.25"
+export APP_CHANGELOG="桌面图标名称首字母大写"
 export NODE_ENV="production"
 
 is_running() {
