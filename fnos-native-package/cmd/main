@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.21"
-export APP_CHANGELOG="修复普通 FLOOD_WAIT 被误判为 premium 下载限流（错误提示与并发降档）"
+export APP_VERSION="2.6.22"
+export APP_CHANGELOG="修复升级后旧限流失败任务不自动复活"
 export NODE_ENV="production"
 
 is_running() {

@@ -534,6 +534,17 @@ func (a *App) load() error {
 			task.RetryAfter = 0
 			task.Error = "2.6.13 修复 RPC 传输层失败误判终态后自动复活，等待续传"
 		}
+		if task.Status == "error" && strings.Contains(task.Error, "FLOOD_PREMIUM_WAIT") {
+			// R4.45：2.6.19 时代 FLOOD_PREMIUM_WAIT（免费账号下载带宽限流，
+			// 括号里就是「等 N 秒」）不被任何层识别，任务推进几百 MB 后一票终态
+			//（09/24 21:49 实测：升级 2.6.21 后下载页全部躺尸、零自动拉起）。
+			// 2.6.21 起该错误按 Telegram 秒数精确等待后续传，落盘的陈旧终态
+			// 升级时自动复活；复活后由 pump 常驻循环自动拉起。
+			task.Status = "queued"
+			task.RetryAfter = 0
+			task.AutoRevived = false
+			task.Error = "2.6.21 修复免费账号带宽限流误判终态后自动复活，等待续传"
+		}
 		if task.Status != "downloading" && task.Status != "running" {
 			task.SpeedBps = 0
 		}

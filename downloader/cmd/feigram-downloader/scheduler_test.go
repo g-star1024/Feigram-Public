@@ -590,6 +590,56 @@ func TestLoadRevivesMetadataURLFailures(t *testing.T) {
 	}
 }
 
+// R4.45：2.6.19 时代 FLOOD_PREMIUM_WAIT 被一票终态；2.6.21 起按秒数等待后续传，
+// 落盘的陈旧终态升级时必须自动复活（09/24 21:49 实测：升级后下载页全部躺尸）。
+func TestLoadRevivesPremiumWaitFailures(t *testing.T) {
+	dir := t.TempDir()
+	store := map[string]any{
+		"config": map[string]any{"enabled": true},
+		"tasks": []map[string]any{
+			{
+				"id": "p1", "userId": "u1", "accountId": "a1", "status": "error",
+				"error":      "invoke pool: rpcDoRequest: rpc error code 420: FLOOD_PREMIUM_WAIT (7)",
+				"retryAfter": time.Now().Add(10 * time.Minute).Unix(),
+			},
+			{"id": "p2", "userId": "u1", "accountId": "a1", "status": "error", "error": "其他真实失败"},
+		},
+	}
+	raw, _ := json.Marshal(store)
+	if err := os.WriteFile(filepath.Join(dir, "tasks.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{
+		config:     Config{Enabled: true},
+		dataDir:    dir,
+		storePath:  filepath.Join(dir, "tasks.json"),
+		tasks:      map[string]*Task{},
+		native:     map[string]*NativeAccount{},
+		logins:     map[string]*NativeLogin{},
+		qrLogins:   map[string]*NativeQRLogin{},
+		running:    map[string]chan struct{}{},
+		taskSpawns: map[string]*spawnStat{},
+		taskLogs:   map[string]*taskLogState{},
+		proxy:      &proxyRuntime{},
+	}
+	if err := app.load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	got := app.tasks["p1"]
+	if got.Status != "queued" {
+		t.Fatalf("FLOOD_PREMIUM_WAIT 陈旧终态应复活为 queued，got %q", got.Status)
+	}
+	if got.RetryAfter != 0 {
+		t.Fatalf("复活后冷却应清零，got %d", got.RetryAfter)
+	}
+	if got.AutoRevived {
+		t.Fatalf("复活后防抖标记应重臂，便于网络恢复后再拉起一次")
+	}
+	if app.tasks["p2"].Status != "error" {
+		t.Fatalf("真实失败的任务不得被复活")
+	}
+}
+
 // R4.28：首字节超时必须存在且严格小于常规无进度窗口——
 // 0 字节尝试走快速失败档，收到字节后才切 120s 常规窗口。
 func TestNativeFirstByteTimeoutSane(t *testing.T) {
