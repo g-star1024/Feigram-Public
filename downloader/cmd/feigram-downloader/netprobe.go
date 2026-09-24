@@ -501,7 +501,23 @@ func (a *App) mediaDCCandidates(userID, accountID string, preferred, primaryDC i
 		}
 	}
 	push(primaryDC)
-	return out
+	// R4.40：连续断流的 DC 降级到候选末尾。只降级、不排除——它可能仍是唯一
+	// 可用 DC（且服务端的 FILE_MIGRATE 会把请求指回来），排除它等于自断路径。
+	// 该 DC 重新跑出字节流时计数清零（见 download 循环的 progressSeen 分支）。
+	stalls := a.mediaDCStallCounts(userID, accountID)
+	if len(stalls) == 0 {
+		return out
+	}
+	healthy := make([]int, 0, len(out))
+	degraded := make([]int, 0, len(stalls))
+	for _, dc := range out {
+		if stalls[dc] >= mediaDCStallThreshold {
+			degraded = append(degraded, dc)
+			continue
+		}
+		healthy = append(healthy, dc)
+	}
+	return append(healthy, degraded...)
 }
 
 // probeMediaDCRealRPC 在已切换到的 media DC 上发一次轻量真实 RPC（help.getConfig），

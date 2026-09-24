@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.17"
-export APP_CHANGELOG="会话列表翻页游标修复：messages.getDialogs 的 offset_date 是无条件 TL 字段（官方迭代器每页都带），此前恒发 0 使服务端定位不到上一页末尾、每页从列表开头重发——4 页取回 400 条去重后仅剩 102 条，这才是「群组列表还是不全」的真因；现补齐游标并按服务端上报总数判末尾。另：翻页遇 FLOOD_WAIT 等待后续翻不再直接截断、页间加 200ms 间隔防自造限流、逐页诊断日志、不完整列表显式标注；peer 索引深翻同一缺陷一并修正。"
+export APP_VERSION="2.6.18"
+export APP_CHANGELOG="下载内核改用 gotd 官方 telegram/downloader（并发分片 + 分片级重试）；退避分级让链路断流走短退避并重建连接（不再罚站 2m40s）；同一 DC 反复断流降级、分片自适应缩小；断点续传对官方下载器透明（偏移平移 + 连续前缀防空洞）。"
 export NODE_ENV="production"
 
 is_running() {

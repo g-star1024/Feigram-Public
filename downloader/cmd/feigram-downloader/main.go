@@ -42,6 +42,15 @@ const (
 	// 120 秒零字节意味着媒体路径已挂死（DC 路由异常/代理不放行媒体段/对端无响应），
 	// 必须转为可诊断的瞬态错误，而不是 goroutine 永久悬挂（2.6.2 实测队列冻死的根因）。
 	nativeNoProgressTimeout = 120 * time.Second
+	// R4.41：改用官方 downloader 后，「已开始传输」的无进度窗口需要放宽。
+	// 官方 reader 会在内部按 Telegram 给的秒数**静默等待** FLOOD_WAIT
+	// （telegram/downloader/reader.go:90-106 → tgerr.FloodWait），期间没有任何
+	// 写入；沿用 120s 会把「正在按规矩等限流」误判成挂死，并诱发
+	// 「误杀 → 续传 → 再撞限流」的循环。放宽到 5 分钟以覆盖常规限流窗口；
+	// 更长的等待仍由 stall 瞬态 + 短退避兜底（不会被一票终态）。
+	// 注意首字节窗口（nativeFirstByteTimeout）不放宽——那时还没有任何流量，
+	// 快速失败对「代理没放行媒体段」这类硬故障的检出速度更重要。
+	nativePipelinedStallTimeout = 5 * time.Minute
 
 	// R4.28：首字节超时——本次尝试一个字节都没收到时，30 秒即快速失败。
 	// 媒体路径不通（代理不放行媒体 DC 段）时每次尝试都 0 字节，120s 常规窗口
@@ -317,6 +326,11 @@ type App struct {
 	// mediaProbes 是各账号最近一次媒体 DC 分级探测快照（R4.29），随 /api/state
 	// 进诊断页；读写在 a.mu 下进行（探测的网络 IO 在锁外完成）。
 	mediaProbes map[string]mediaProbeSnapshot
+	// mediaDCStalls 是各账号下「媒体 DC 连续断流次数」（R4.40）。用途：
+	//  ① 候选排序把反复断流的 DC 降级（见 mediaDCCandidates）；
+	//  ② 断流退避走短档并重建连接（见 classifyTransientError / stallRetryDelay）。
+	// 只读写于 a.mu 之下（复核见 stallclass.go）。某 DC 重新跑出字节流即清零。
+	mediaDCStalls map[string]map[int]int
 	// peerResolveMu 保护 peer 解析闸门（R4.35）：账号级 singleflight + 失败冷却，
 	// 防止多个任务并发深翻会话列表、互相加深 Telegram 限流（2.6.12 实测：
 	// 三任务同时深翻 → FLOOD_WAIT(9)/(6) → 5~10s 后再翻，限流被自己喂大）。
@@ -372,6 +386,8 @@ func main() {
 		taskLogs:    map[string]*taskLogState{},
 		mediaConns:  map[string]*mediaConn{},
 		mediaProbes: map[string]mediaProbeSnapshot{},
+		// R4.40：媒体 DC 断流计数（账号 → DC → 连续断流次数）
+		mediaDCStalls: map[string]map[int]int{},
 		// R4.35：peer 解析闸门（singleflight + 冷却）
 		peerResolveInflight:     map[string]*peerResolveCall{},
 		peerResolveCooldown:     map[string]time.Time{},
@@ -977,17 +993,32 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 					log.Printf("task %s failed after %d transient retries: %v", id, nextCount-1, err)
 					return
 				}
+				// R4.40：先分类再退避——限流与链路断流需要的退避方向相反。
+				// 断流（服务端不 ACK / 连接被掐）用短退避并重建连接（2.6.16
+				// 实测每轮只推进 2~9MB 却退避 2m40s，1.5GB 要跑十几小时）；
+				// 限流按 Telegram 秒数精确等待（R4.27）；其余沿用指数退避。
+				class := classifyTransientError(err)
 				delay := retryDelay(nextCount)
-				// R4.27：FLOOD_WAIT 按 Telegram 给出的秒数精确等待，不再套用
-				// 指数退避——限流窗口 1400+ 秒时，5 分钟封顶的退避会让任务
-				// 反复撞墙并加深限流。
 				reason := "媒体源暂不可用"
-				if wait := floodWaitFromError(err); wait > 0 {
-					delay = time.Duration(wait) * time.Second
+				switch class {
+				case classFlood:
+					delay = time.Duration(floodWaitFromError(err)) * time.Second
 					if delay > floodWaitBackoffCap {
 						delay = floodWaitBackoffCap
 					}
 					reason = "Telegram 限流（FLOOD_WAIT）"
+				case classStall:
+					delay = stallRetryDelay(nextCount)
+					reason = "媒体链路断流（服务端未确认）"
+					if task.Transport == "native-mtproto" {
+						if dc := task.NativeFile.DCID; dc > 0 {
+							stalls := a.noteMediaDCStall(task.UserID, task.AccountID, dc)
+							a.taskEventLog(id, fmt.Sprintf(
+								"媒体 DC %d 连续断流 %d 次：下轮重建连接续传（分片自动缩小至 %d KB%s）",
+								dc, stalls, adaptivePartSize(a.currentPartSize(), stalls)/1024,
+								stallDegradeHint(stalls)))
+						}
+					}
 				}
 				a.updateTask(id, func(t *Task) {
 					if !stillCurrent(t) {
@@ -1262,7 +1293,11 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 		_ = os.Remove(task.PartPath)
 		downloaded = 0
 	}
-	file, err := os.OpenFile(task.PartPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	// R4.41：改用 O_RDWR —— 官方 downloader 通过 io.WriterAt 按分片偏移写入，
+	// 而 Go 的 os.File.WriteAt 在 O_APPEND 模式下会直接报错
+	// （append 语义会忽略显式偏移，无法承载并发分片写）。
+	// 续传起点由上方 downloaded = stat.Size() 显式给出，不依赖追加语义。
+	file, err := os.OpenFile(task.PartPath, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return storageErrorHint(err, filepath.Dir(task.FilePath))
 	}
@@ -1337,7 +1372,9 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 			case <-ctx.Done():
 				return
 			case <-watch.C:
-				threshold := nativeNoProgressTimeout
+				// R4.41：已开始传输后的窗口放宽（官方下载器会为 FLOOD_WAIT
+				// 在内部静默等待，120s 会误判成挂死 —— 见常量注释）。
+				threshold := nativePipelinedStallTimeout
 				reason := "媒体路径无进度"
 				if !progressSeen {
 					threshold = firstByteThreshold
@@ -1394,7 +1431,10 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 		// client.DC 走 resolver.Primary → config 的 static 主 DC 地址，与
 		// MTProto 分级探测同一地址类（探测已证实真实可达）；upload.getFile 在
 		// 授权连接上与 MediaOnly 完全等价，授权导出/导入由 gotd 连接池自动完成。
-		invoker, err := client.DC(ctx, dc, 1)
+		// R4.41：连接数上限与并发分片数对齐——每个分片 goroutine 要有一条
+		// 独立连接才能真正并发（单连接会把并发请求串行排队，等于没开并发）。
+		maxConns := int64(mediaDownloadThreadsFor(dc, primaryDC))
+		invoker, err := client.DC(ctx, dc, maxConns)
 		if err != nil {
 			fileAPI = metadataAPI
 			fileDC = 0
@@ -1465,6 +1505,13 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 		fileRefRefreshes := 0
 		// R4.37：DC 迁移预算，防两个 DC 互相踢皮球（授权导入持续被拒）。
 		dcMigrations := 0
+		// R4.40：本尝试内的连续断流计数——驱动分片自适应（adaptivePartSize）
+		// 与媒体连接重建。跨尝试的 DC 级计数在 a.mediaDCStalls 里。
+		stallCount := 0
+		// R4.41：官方 downloader 每轮的续传基址与「已写区间」记录。
+		// base = 本轮开始的连续前缀；intervals 每轮清空（基址会变）。
+		var base int64
+		intervals := newIntervalSet()
 		for {
 			select {
 			case <-ctx.Done():
@@ -1476,24 +1523,120 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 			if task.Size > 0 && downloaded >= task.Size {
 				break
 			}
-			limit := int(a.currentPartSize())
-			if limit <= 0 {
-				limit = defaultPartSize
-			}
-			if task.Size > 0 && downloaded+int64(limit) > task.Size {
-				limit = int(task.Size - downloaded)
-			}
+			// R4.40：分片按本尝试内的断流次数自适应缩小（1MB → 512KB → 256KB）。
+			// 官方 downloader 的默认分片就是 512KB；1MB 分片在丢包链路上
+			// 「断一次就整片重来」，缩小能把损失摊薄。
+			partSize := int(adaptivePartSize(a.currentPartSize(), stallCount))
 			location := &tg.InputDocumentFileLocation{
 				ID:            fileID,
 				AccessHash:    accessHash,
 				FileReference: fileReference,
 			}
-			resp, err := fileAPI.UploadGetFile(ctx, &tg.UploadGetFileRequest{
-				Location: location,
-				Offset:   downloaded,
-				Limit:    limit,
-			})
-			if err != nil {
+			// R4.41：下载交给官方 telegram/downloader —— 并发分片（WithThreads）
+			// 与分片级重试（FLOOD_WAIT 按 Telegram 秒数等待、TIMEOUT 立即重试，
+			// reader.go:90-106）都是它内建的，取代此前「单线程顺序取片、
+			// 整片失败才由外层退避」的手写循环。
+			base = downloaded
+			intervals.Reset()
+			threads := mediaDownloadThreadsFor(fileDC, primaryDC)
+			err := officialDownloadOnce(ctx, fileAPI, file, location, base, partSize, threads,
+				intervals,
+				func(off, n, sessionWritten int64) {
+					// 官方 writeAtLoop 是单 goroutine 串行调用，这里无需加锁。
+					// 并发分片重试会重复写同一区域，sessionWritten 可能超出实际
+					// 剩余量——按声明大小截断，避免 UI 进度超过 100%。
+					// （续传点不依赖它：成功/失败分支都会用 intervals 的连续前缀
+					// 重新收敛，见下方。）
+					current := base + sessionWritten
+					if task.Size > 0 && current > task.Size {
+						current = task.Size
+					}
+					downloaded = current
+					lastProgress = time.Now() // R4.25：喂狗
+					if !progressSeen {
+						progressSeen = true
+						// R4.40：真跑出字节流 → 这条链路可用，清掉该 DC 的断流计数，
+						// 避免把「已恢复的 DC」继续在候选序列里降级。
+						a.clearMediaDCStall(task.UserID, task.AccountID, fileDC)
+					}
+					windowBytes += n
+					if throttleErr := a.throttle(windowBytes, windowStart, cancel); throttleErr != nil {
+						// 限速/取消都通过 ctx 中断官方下载器（它会返回 ctx 错误）。
+						stop(throttleErr)
+						return
+					}
+					if a.config.RateLimitBps > 0 && time.Since(windowStart) >= time.Second {
+						windowStart = time.Now()
+						windowBytes = 0
+					}
+					if time.Since(lastTick) >= time.Second {
+						elapsed := time.Since(lastTick).Seconds()
+						speed := int64(float64(downloaded-lastBytes) / maxFloat(elapsed, 0.001))
+						lastBytes = downloaded
+						lastTick = time.Now()
+						lastSpeed = speed
+						a.updateTask(task.ID, func(t *Task) {
+							t.Downloaded = downloaded
+							t.SpeedBps = speed
+							t.Size = max64(t.Size, task.Size)
+							t.UpdatedAt = now()
+						})
+					}
+					// R4.36-D：周期性进度心跳，填补「长任务在主日志里长时间静默」的
+					// 判读盲区（2.6.13 实测 11:20:43→11:22:46 无任何输出）。
+					if time.Since(lastHeartbeat) >= downloadHeartbeatInterval {
+						lastHeartbeat = time.Now()
+						pct := 0.0
+						if task.Size > 0 {
+							pct = float64(downloaded) / float64(task.Size) * 100
+						}
+						log.Printf("task %s progress: %d/%d bytes (%.1f%%), dc=%d, threads=%d, speed=%.2f MB/s",
+							task.ID, downloaded, task.Size, pct, fileDC, threads, float64(lastSpeed)/(1024*1024))
+					}
+				})
+			if err == nil {
+				// 官方下载器读到文件末尾（空块 / 不满一页）即成功返回。
+				if end := intervals.MaxEnd(); end > 0 {
+					downloaded = max64(downloaded, base+end)
+				}
+				break
+			}
+			{
+				// 官方 downloader 在 ctx 取消时只返回 ctx.Err()（= context.Canceled），
+				// 丢掉了我们的取消原因（用户取消 / 看门狗判挂死 / 限速中断）。
+				// 以 ctx 的 Cause 为准，避免「用户点取消」被误判成终态失败。
+				if ctx.Err() != nil {
+					if cause := context.Cause(ctx); cause != nil {
+						return cause
+					}
+					return ctx.Err()
+				}
+				// 先收敛续传点：并发分片是乱序写入，只能从「从 0 起的连续前缀」
+				// 之后继续——直接拿 os.Stat().Size() 会把中间的洞永久留在文件里。
+				if end := intervals.ContiguousFrom0(); end > 0 {
+					downloaded = base + end
+				}
+				// 把 .part 裁到连续前缀：文件里可能有「已写但超出连续前缀」的尾部块，
+				// 而下次进程启动是用 os.Stat().Size() 推断续传点的——不裁掉这些
+				// 超出部分，续传点就会跳过中间的洞，留下永久损坏的文件。
+				if truncErr := file.Truncate(downloaded); truncErr != nil {
+					return truncErr
+				}
+				a.updateTask(task.ID, func(t *Task) {
+					t.Downloaded = downloaded
+					t.Size = max64(t.Size, task.Size)
+					t.UpdatedAt = now()
+				})
+				// R4.40：链路断流（服务端不 ACK / 连接被掐）→ 立刻弃掉这条媒体
+				// 连接：下次 switchToMediaDC 会重建。此前这里什么都不做，于是
+				// 「换一条链路再试」永远等不到，同一个 DC 被每轮重复选中；
+				// 同时累计断流次数供分片自适应缩小。
+				if transportStallError(err) {
+					stallCount++
+					closeMedia()
+					log.Printf("task %s 媒体链路断流（本尝试第 %d 次）→ 重建连接并以 %d KB 分片续传：%v",
+						task.ID, stallCount, adaptivePartSize(a.currentPartSize(), stallCount)/1024, err)
+				}
 				if isFileReferenceError(err) {
 					// M3.3：刷新次数封顶，避免引用持续过期造成的无限续传。
 					fileRefRefreshes++
@@ -1544,52 +1687,6 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 				}
 				return classifyNativeReadError(err)
 			}
-			chunk, ok := resp.(*tg.UploadFile)
-			if !ok {
-				return fmt.Errorf("Go 原生 MTProto 暂不支持 CDN redirect 响应：%T", resp)
-			}
-			if len(chunk.Bytes) == 0 {
-				break
-			}
-			if _, err := file.Write(chunk.Bytes); err != nil {
-				return err
-			}
-			downloaded += int64(len(chunk.Bytes))
-			lastProgress = time.Now() // R4.25：喂狗——任何真实字节流动都重置无进度计时。
-			progressSeen = true       // R4.28：本次尝试已收到字节，看门狗切到 120s 常规窗口。
-			windowBytes += int64(len(chunk.Bytes))
-			if err := a.throttle(windowBytes, windowStart, cancel); err != nil {
-				return err
-			}
-			if a.config.RateLimitBps > 0 && time.Since(windowStart) >= time.Second {
-				windowStart = time.Now()
-				windowBytes = 0
-			}
-			if time.Since(lastTick) >= time.Second {
-				elapsed := time.Since(lastTick).Seconds()
-				speed := int64(float64(downloaded-lastBytes) / maxFloat(elapsed, 0.001))
-				lastBytes = downloaded
-				lastTick = time.Now()
-				lastSpeed = speed
-				a.updateTask(task.ID, func(t *Task) {
-					t.Downloaded = downloaded
-					t.SpeedBps = speed
-					t.Size = max64(t.Size, task.Size)
-					t.UpdatedAt = now()
-				})
-			}
-			// R4.36-D：周期性进度心跳，填补「长任务在主日志里长时间静默」的
-			// 判读盲区（2.6.13 实测 11:20:43→11:22:46 无任何输出，事后无法
-			// 判断是在低速传还是已挂死）。
-			if time.Since(lastHeartbeat) >= downloadHeartbeatInterval {
-				lastHeartbeat = time.Now()
-				pct := 0.0
-				if task.Size > 0 {
-					pct = float64(downloaded) / float64(task.Size) * 100
-				}
-				log.Printf("task %s progress: %d/%d bytes (%.1f%%), dc=%d, speed=%.2f MB/s",
-					task.ID, downloaded, task.Size, pct, fileDC, float64(lastSpeed)/(1024*1024))
-			}
 		}
 		return nil
 	}
@@ -1604,9 +1701,15 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 	if err != nil {
 		return err
 	}
-	size := max64(task.Size, stat.Size())
-	if !complete(stat.Size(), size) {
-		if stat.Size() == 0 {
+	size := task.Size
+	if size <= 0 {
+		size = stat.Size()
+	}
+	// R4.41：完成判定必须用「从 0 起的连续前缀」（downloaded），不能用
+	// os.Stat().Size()——并发分片是乱序写入，文件尾可能先落盘而中间仍有洞，
+	// 用 Stat 大小会把「有洞的文件」判成完整并改名交付。
+	if !complete(downloaded, size) {
+		if downloaded == 0 {
 			// R4.26：0 字节返回按瞬态处理。实测（2.6.3）中它与「看门狗 stalled」
 			// 成对出现：链路挂死期间 upload.GetFiles 返回空体 → Run 正常返回 →
 			// 0/171931369 → 终态失败 → 被外部复活 → 再挂死，形成紧循环。
@@ -1614,7 +1717,7 @@ func (a *App) downloadNativeMTProto(task *Task, cancel <-chan struct{}) error {
 			// 应走退避续传；下载过一部分后的不完整仍是真异常，维持终态。
 			return fmt.Errorf("媒体源返回空响应（已取 0 / %d 字节）：%w", size, errEmptyMediaResponse)
 		}
-		return fmt.Errorf("file incomplete: %d / %d", stat.Size(), size)
+		return fmt.Errorf("file incomplete: %d / %d", downloaded, size)
 	}
 	return os.Rename(task.PartPath, task.FilePath)
 }
@@ -3892,6 +3995,14 @@ func max64(a, b int64) int64 {
 	return b
 }
 
+// min64 用于「只允许调小」的场景（R4.40 分片自适应）：取两者较小值。
+func min64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func maxFloat(a, b float64) float64 {
 	if a > b {
 		return a
@@ -3971,6 +4082,13 @@ func transientSourceError(err error) bool {
 		// R4.35：peer 解析闸门的账号级冷却——冷却期内失败是「等窗口过去」的瞬态，
 		// 按退避重试，冷却结束后自动续传。
 		"解析在冷却中",
+		// R4.40：断流类瞬态新增的用户可见文案（R4.34 教训：中文文案不能依赖
+		// 英文 marker 匹配，新增即入表）。正常路径下它只写在 Task.Error，
+		// 但一旦被 %w 包进错误链，这里能兜住不被误判成终态。
+		"媒体链路断流",
+		"no route to host",
+		"network is unreachable",
+		"closed network connection",
 	}
 	for _, marker := range markers {
 		if strings.Contains(text, marker) {
