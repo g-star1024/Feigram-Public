@@ -14,6 +14,17 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.37",
+    title: "Feigram 2.6.37 更新",
+    version: "2.6.37",
+    level: "success",
+    createdAt: "2026-09-25T10:25:00.000Z",
+    body: [
+"修复后台缓存提交慢/无结果：批量入队改为复用扫描时已获取的元数据，不再对每个视频重复回源拉取（代理质量差时原实现会整批超时、0 个入队）",
+"提交结果不再只弹几秒的提示——现在持久显示在群信息勾选框下方，扫描条数/新提交/已在队列/失败一眼可查"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.36",
     title: "Feigram 2.6.36 更新",
     version: "2.6.36",

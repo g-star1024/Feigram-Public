@@ -879,7 +879,11 @@ async function ensureGoDownloadTask(userId, accountId, peerId, messageId, option
   // M4.1 子步：原生账号经 Go 原生 MTProto 取消息元数据（nativeMediaMeta），避免 GramJS 的 409。
   const native = await nativeAccountRecord(userId, accountId);
   if (!native) throw reloginError(accountId);
-  const { entity, message } = await nativeMediaMeta(userId, accountId, peerId, messageId);
+  // R4.59：允许调用方传入扫描时已拿到的 { entity, message }——后台缓存批量入队
+  // 每个视频再走一次 nativeMediaMeta（peer 解析 + around 拉取 20 条）会把整批
+  // 拖到分钟级（代理差时必然整体超时、0 个入队），元数据在扫描结果里本来就有。
+  const meta = options.meta || await nativeMediaMeta(userId, accountId, peerId, messageId);
+  const { entity, message } = meta;
   const contentType = message.photo ? "image/jpeg" : message.document?.mimeType || "";
   const kind = mediaKind(message, contentType);
   const size = mediaByteSize(message);
@@ -1056,7 +1060,7 @@ async function deleteGoDownloadTask(userId, taskId) {
   return { ok: true };
 }
 
-async function cacheVideoSilentlyGo(userId, accountId, peerId, message) {
+async function cacheVideoSilentlyGo(userId, accountId, peerId, message, entity = null) {
   const contentType = message.document?.mimeType || "";
   const kind = mediaKind(message, contentType);
   const size = Number(message.file?.size || message.document?.size || 0);
@@ -1079,7 +1083,9 @@ async function cacheVideoSilentlyGo(userId, accountId, peerId, message) {
     source: "auto",
     autoCache: true,
     dedupKey,
-    order: Date.now()
+    order: Date.now(),
+    // R4.59：扫描元数据直传——不再每视频回源拉一遍（见 ensureGoDownloadTask 注释）。
+    meta: entity ? { entity, message } : null
   });
   return "queued";
 }
@@ -1096,6 +1102,10 @@ async function cacheLargeVideosInChatGo(userId, accountId, peerId, io = realtime
       userId, accountId, peer: peerId, limit: 200
     });
     const recent = Array.isArray(items) ? items : [];
+    // R4.59：peer 只解析一次，元数据从扫描结果直传入队——旧实现每个新视频
+    // 各走一次 peer 解析 + around 拉取，代理差时整批必然超时（2026-09-25
+    // 实测：提交显示进行中但 0 个入队）。
+    const entity = await resolveNativePeerEntity(userId, accountId, peerId);
     let queued = 0;
     let duplicates = 0;
     let skipped = 0;
@@ -1104,7 +1114,7 @@ async function cacheLargeVideosInChatGo(userId, accountId, peerId, io = realtime
       if (!item || !item.media || !item.media.hasPreview) continue;
       const message = goMessageToNodeMessage(item);
       try {
-        const status = await cacheVideoSilentlyGo(userId, accountId, peerId, message);
+        const status = await cacheVideoSilentlyGo(userId, accountId, peerId, message, entity);
         if (status === "queued") queued += 1;
         else if (status === "duplicate") duplicates += 1;
         else skipped += 1;

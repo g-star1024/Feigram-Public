@@ -1497,7 +1497,7 @@ function PlaybackModal({ item, playerMode, onClose }) {
   );
 }
 
-function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, autoCacheBusy, mediaLoadingMore, onAutoCacheChange, onClose, onOpenMedia, onLoadMoreMedia }) {
+function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, autoCacheBusy, autoCacheResult, mediaLoadingMore, onAutoCacheChange, onClose, onOpenMedia, onLoadMoreMedia }) {
   const [mediaTab, setMediaTab] = useState("all");
   const contentRef = useRef(null);
   if (!open || !chat) return null;
@@ -1537,6 +1537,9 @@ function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, aut
               <input type="checkbox" checked={Boolean(autoCache)} disabled={autoCacheBusy} onChange={(event) => onAutoCacheChange?.(event.target.checked)} />
               <span>{autoCacheBusy ? "正在提交后台缓存任务" : "后台自动缓存本群大于 100MB 的视频"}</span>
             </label>
+            {/* R4.59：扫描结果持久显示——此前只弹几秒即逝的 toast，用户看到的是
+                「提交后没反应」，无法知道是提交成功/重复/失败。 */}
+            {autoCacheResult && <p className="info-cache-result">{autoCacheResult}</p>}
           </section>
           <section className="chat-info-section">
             <div className="info-resource-head">
@@ -1772,6 +1775,8 @@ function App() {
   const [chatMediaLoadingMore, setChatMediaLoadingMore] = useState(false);
   const [autoCacheChats, setAutoCacheChats] = useState(() => JSON.parse(localStorage.getItem("feigrame.autoCacheChats") || "{}"));
   const [autoCacheBusy, setAutoCacheBusy] = useState(false);
+  // R4.59：后台缓存扫描结果持久显示在勾选框下方（toast 几秒即逝，用户错过就变成「没反应」）。
+  const [autoCacheResult, setAutoCacheResult] = useState(null);
   const [playback, setPlayback] = useState(null);
   const socket = useSocket(token);
   const messagesRef = useRef(null);
@@ -2080,6 +2085,7 @@ function App() {
     activeChatKeyRef.current = chatCacheKey;
     setChatInfoOpen(false);
     setChatDetails(null);
+    setAutoCacheResult(null);
     messageNodeRefs.current.clear();
     const targetMessageId = Number(options.messageId || 0);
     if (targetMessageId) {
@@ -2224,23 +2230,28 @@ function App() {
     localStorage.setItem("feigrame.autoCacheChats", JSON.stringify(next));
     if (!enabled) return;
     setAutoCacheBusy(true);
+    setAutoCacheResult(null);
     try {
       const result = await api(`/api/chats/${encodeURIComponent(accountId)}/${encodeURIComponent(activeChat.id)}/cache-large-videos`, { method: "POST", timeoutMs: 120000 });
       // R4.57：提示带扫描/重复/失败统计——「为什么没新增」不再只能猜。
+      let text;
       if (result.queued > 0) {
         const extra = [];
         if (result.duplicates) extra.push(`${result.duplicates} 个已在队列`);
         if (result.failed) extra.push(`${result.failed} 个失败`);
-        notify(`已提交 ${result.queued} 个后台视频缓存任务（扫描最近 ${result.scanned ?? "?"} 条消息${extra.length ? `，${extra.join("，")}` : ""}）`);
+        text = `已提交 ${result.queued} 个后台视频缓存任务（扫描最近 ${result.scanned ?? "?"} 条消息${extra.length ? `，${extra.join("，")}` : ""}）`;
       } else {
         const reason = result.failed
           ? `${result.failed} 个入队失败`
           : result.duplicates
             ? `${result.duplicates} 个已在队列，无需重复提交`
             : "最近消息里没有大于 100MB 的视频";
-        notify(`扫描最近 ${result.scanned ?? "?"} 条消息，未新增缓存任务：${reason}`);
+        text = `扫描最近 ${result.scanned ?? "?"} 条消息，未新增缓存任务：${reason}`;
       }
+      setAutoCacheResult(text);
+      notify(text);
     } catch (err) {
+      setAutoCacheResult(`提交失败：${err.message}`);
       notify(err.message);
     } finally {
       setAutoCacheBusy(false);
@@ -2758,6 +2769,7 @@ function App() {
         details={chatDetails}
         loading={chatDetailsLoading}
         autoCache={activeChat ? autoCacheChats[`${accountId}:${activeChat.id}`] : false}
+        autoCacheResult={autoCacheResult}
         autoCacheBusy={autoCacheBusy}
         mediaLoadingMore={chatMediaLoadingMore}
         onAutoCacheChange={setChatAutoCache}
