@@ -1735,6 +1735,10 @@ function App() {
   // R4.53：当前会话键（account:peer）。selectChat 里同步更新，用于防止
   // 「先渲染缓存/网络回包」时用户已切走导致跨会话串数据。
   const activeChatKeyRef = useRef("");
+  // R4.55①：会话列表加载去重（借鉴 tdesktop DialogsLoadState 单加载器）。
+  // effect 依赖（accountId/socket/foldersEnabled）变化会重复触发 loadChats，
+  // 2.6.32 实测同 key 并发两遍全量拉取；同 key 在途时直接复用同一 Promise。
+  const chatsLoadRef = useRef(null);
   const [chatStack, setChatStack] = useState([]);
   const [messages, setMessages] = useState([]);
   const [hasOlder, setHasOlder] = useState(false);
@@ -1996,45 +2000,64 @@ function App() {
 
   async function loadChats(nextQuery = query) {
     if (!accountId) return;
-    setBusy(true);
-    setError("");
-    try {
-      const includeArchived = appSettings.foldersShowArchived ? 1 : 0;
-      // R4.52：会话列表上限放开到 2000 后分页页数更多，加 80s 前端超时兜底（与 R4.51 防卡死一致）。
-      const list = await api(`/api/chats?account=${encodeURIComponent(accountId)}&query=${encodeURIComponent(nextQuery)}&includeArchived=${includeArchived}`, { timeoutMs: 80000 });
-      setChats(list);
-      // R4.53：仅在无搜索词时回写缓存——搜索结果是过滤子集，覆盖会污染兜底数据。
-      if (!nextQuery) saveChats(accountId, list);
-      if (appSettings.foldersAutoSelectFirst && !activeChat) {
-        // R4.19 修复「visible is not defined」：R4.0a 重构归档过滤时删掉了局部变量
-        // visible，却留下 visible[0] 引用——开启「自动选第一个会话」的账号一进会话页
-        // 就抛 ReferenceError，被 catch 顶成「加载失败」错误卡（会话实际已拉到）。
-        // 现按当前文件夹对新 list 过滤后取第一个（state 闭包未更新，不能用 visibleChats）。
-        const firstVisible = filterChatsByFolder(list, activeFolder)[0];
-        if (firstVisible) selectChat(firstVisible);
-      }
-    } catch (err) {
-      const message = String(err.message || "");
-      // 当前账号未就绪（failed/needs-relogin）时不要把整个会话页顶成报错卡：
-      // 自动切到第一个就绪账号（accountId 变化会触发 effect 重新加载）。
-      if (message.includes("尚未就绪")) {
-        const fallback = accounts.find((account) => account.id !== accountId && (account.connected || account.goReady));
-        if (fallback) {
-          setAccountId(fallback.id);
-          showToast(`当前账号未就绪，已自动切换到 ${fallback.displayName || fallback.phone || fallback.id}`);
+    // R4.55①：同账号同查询词的在途请求直接复用（effect 因 socket/设置项
+    // 变化重跑时不再并发二遍全量拉取）。
+    const dedupeKey = `${accountId}|${nextQuery}`;
+    if (chatsLoadRef.current?.key === dedupeKey) return chatsLoadRef.current.promise;
+    const promise = (async () => {
+      setBusy(true);
+      setError("");
+      try {
+        // R4.55②：会话列表缓存秒开（借鉴 TDLib「先读本地库、再连网补增量」）。
+        // 首次打开（列表还是空的）先渲染上次缓存的列表，网络刷新后覆盖；
+        // 手动刷新/搜索（chats 已有内容或 nextQuery 非空）不套缓存。
+        if (!nextQuery && !chats.length) {
+          const cachedList = await cachedChats(accountId);
+          if (cachedList?.length) setChats(cachedList);
+        }
+        const includeArchived = appSettings.foldersShowArchived ? 1 : 0;
+        // R4.52：会话列表上限放开到 2000 后分页页数更多，加 80s 前端超时兜底（与 R4.51 防卡死一致）。
+        const list = await api(`/api/chats?account=${encodeURIComponent(accountId)}&query=${encodeURIComponent(nextQuery)}&includeArchived=${includeArchived}`, { timeoutMs: 80000 });
+        setChats(list);
+        // R4.53：仅在无搜索词时回写缓存——搜索结果是过滤子集，覆盖会污染兜底数据。
+        if (!nextQuery) saveChats(accountId, list);
+        if (appSettings.foldersAutoSelectFirst && !activeChat) {
+          // R4.19 修复「visible is not defined」：R4.0a 重构归档过滤时删掉了局部变量
+          // visible，却留下 visible[0] 引用——开启「自动选第一个会话」的账号一进会话页
+          // 就抛 ReferenceError，被 catch 顶成「加载失败」错误卡（会话实际已拉到）。
+          // 现按当前文件夹对新 list 过滤后取第一个（state 闭包未更新，不能用 visibleChats）。
+          const firstVisible = filterChatsByFolder(list, activeFolder)[0];
+          if (firstVisible) selectChat(firstVisible);
+        }
+      } catch (err) {
+        const message = String(err.message || "");
+        // 当前账号未就绪（failed/needs-relogin）时不要把整个会话页顶成报错卡：
+        // 自动切到第一个就绪账号（accountId 变化会触发 effect 重新加载）。
+        if (message.includes("尚未就绪")) {
+          const fallback = accounts.find((account) => account.id !== accountId && (account.connected || account.goReady));
+          if (fallback) {
+            setAccountId(fallback.id);
+            showToast(`当前账号未就绪，已自动切换到 ${fallback.displayName || fallback.phone || fallback.id}`);
+            return;
+          }
+        }
+        // R4.53：网络失败时兜底显示上次缓存的会话列表（若有），不再整页顶成报错卡。
+        const cachedList = await cachedChats(accountId);
+        if (cachedList?.length) {
+          setChats(cachedList);
+          notify(`网络异常，已显示本地缓存的会话列表：${message}`);
           return;
         }
+        setError(message);
+      } finally {
+        setBusy(false);
       }
-      // R4.53：网络失败时兜底显示上次缓存的会话列表（若有），不再整页顶成报错卡。
-      const cachedList = await cachedChats(accountId);
-      if (cachedList?.length) {
-        setChats(cachedList);
-        notify(`网络异常，已显示本地缓存的会话列表：${message}`);
-        return;
-      }
-      setError(message);
+    })();
+    chatsLoadRef.current = { key: dedupeKey, promise };
+    try {
+      await promise;
     } finally {
-      setBusy(false);
+      if (chatsLoadRef.current?.promise === promise) chatsLoadRef.current = null;
     }
   }
 

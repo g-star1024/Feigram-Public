@@ -242,8 +242,11 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+		// R4.55：修复自引用闭包（runner 调 runner = 无限递归）。blob 走
+		// serveNativeMediaBlob 直传 client，此 runner 仅作兜底不被常规路径触达。
+		perRequestRunner := a.runNativeChatQuery
 		runner = func(ctx context.Context, fn func(context.Context, *tg.Client) (any, error)) (any, error) {
-			return runner(ctx, fn)
+			return perRequestRunner(ctx, client, fn)
 		}
 	} else {
 		runner, err = a.pooledChatRunner(account, apiHash)
@@ -271,11 +274,12 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "dialogs":
 		limit := clampChatLimit(query.Get("limit"), defaultChatDialogLimit, maxChatDialogLimit)
-		// R4.0a：默认不显示归档时，没必要每次都额外拉 folder 1（双倍 RPC 开销，
-		// 结果还会被前端过滤掉）。只有调用方显式要归档才拉。
 		includeArchived := query.Get("includeArchived") == "1" || query.Get("includeArchived") == "true"
+		// R4.55①：走 single-flight + 30s TTL 缓存——并发的 /api/chats 与
+		// folders 的全量重拉共享同一次分页拉取（2.6.32 实测一次打开并发 2~3 遍
+		// 全量拉取把列表拖到超时）。
 		items, err := runner(ctx, func(ctx context.Context, api *tg.Client) (any, error) {
-			return a.fetchNativeDialogs(ctx, api, account, limit, query.Get("query"), includeArchived)
+			return a.cachedNativeDialogs(ctx, api, account, limit, query.Get("query"), includeArchived)
 		})
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": compactError(err)})
@@ -900,7 +904,9 @@ func nativeDialogMuted(dialog *tg.Dialog) bool {
 // --- 文件夹 ---------------------------------------------------------------
 
 func (a *App) fetchNativeFolders(ctx context.Context, api *tg.Client, account NativeAccount) ([]map[string]any, error) {
-	chats, err := a.fetchNativeDialogs(ctx, api, account, maxChatDialogLimit, "", true)
+	// R4.55①：走缓存层——folders 请求通常紧跟 /api/chats 到达（前端 250ms 后触发），
+	// 直接复用刚拉好的全量列表，不再重复翻 6 页。
+	chats, err := a.cachedNativeDialogs(ctx, api, account, maxChatDialogLimit, "", true)
 	if err != nil {
 		return nil, err
 	}

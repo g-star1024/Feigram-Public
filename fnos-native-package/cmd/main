@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.32"
-export APP_CHANGELOG="请求分级+媒体排队+聊天连接池：会话加载永远优先，不再被图片预览拖到超时"
+export APP_VERSION="2.6.33"
+export APP_CHANGELOG="会话列表秒开+拉取去重：一次打开只拉一遍全量，30s 内复用；打开即显示本地缓存列表再后台刷新"
 export NODE_ENV="production"
 
 is_running() {

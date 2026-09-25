@@ -360,6 +360,13 @@ type App struct {
 	// 独立锁 chatPoolMu，与 a.mu / mediaMu / peerResolveMu 均无环（池内不做其他锁的 RPC）。
 	chatPoolMu sync.Mutex
 	chatPool   map[string]*pooledChatClient
+	// dialogCache 是会话列表拉取的 single-flight + 短 TTL 缓存（R4.55①，借鉴
+	// tdesktop DialogsLoadState 单加载器）：一次打开前端会并发触发 loadChats 与
+	// folders 两类请求，2.6.32 实测它们各自全量翻 6 页 = 18 个 getDialogs RPC
+	// 打在同一代理上。现在同账号同查询词的并发请求共享一次拉取，30s 内的后续
+	// 请求直接复用结果（folders 的全量 dialog 拉取也走这里）。
+	dialogCacheMu sync.Mutex
+	dialogCache   map[string]*dialogCacheEntry
 	// lastAutoSpawn 记录上次调度后台缓存（auto）任务的时间（R4.29 错峰），
 	// 与手动下载之间保持 autoSpawnMinInterval 的最小间隔。
 	lastAutoSpawn time.Time
