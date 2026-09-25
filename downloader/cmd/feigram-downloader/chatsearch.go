@@ -20,7 +20,6 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 )
 
@@ -141,7 +140,7 @@ func (a *App) fetchNativeSearchMessages(ctx context.Context, api *tg.Client, acc
 
 // handleAccountSearch 处理 /api/accounts/{accountID}/resolve|search，
 // 由 handleAccountAPI 完成账号解析与客户端构建后转交。
-func (a *App) handleAccountSearch(w http.ResponseWriter, r *http.Request, action string, account NativeAccount, client *telegram.Client, query url.Values) {
+func (a *App) handleAccountSearch(w http.ResponseWriter, r *http.Request, action string, account NativeAccount, runner chatRunner, query url.Values) {
 	ctx, cancel := context.WithTimeout(r.Context(), chatQueryTimeout)
 	defer cancel()
 
@@ -153,7 +152,7 @@ func (a *App) handleAccountSearch(w http.ResponseWriter, r *http.Request, action
 			return
 		}
 		messageID := intFromQuery(query.Get("message"))
-		out, err := a.runNativeChatQuery(ctx, client, func(ctx context.Context, api *tg.Client) (any, error) {
+		out, err := runner(ctx, func(ctx context.Context, api *tg.Client) (any, error) {
 			return a.fetchNativeResolveUsername(ctx, api, account, link, messageID)
 		})
 		if err != nil {
@@ -168,7 +167,7 @@ func (a *App) handleAccountSearch(w http.ResponseWriter, r *http.Request, action
 	case "search":
 		searchQuery := query.Get("query")
 		limit := clampChatLimit(query.Get("limit"), 30, maxChatMessageLimit)
-		out, err := a.runNativeChatQuery(ctx, client, func(ctx context.Context, api *tg.Client) (any, error) {
+		out, err := runner(ctx, func(ctx context.Context, api *tg.Client) (any, error) {
 			return a.fetchNativeSearchMessages(ctx, api, account, searchQuery, limit)
 		})
 		if err != nil {

@@ -23,6 +23,10 @@ export async function api(path, options = {}) {
     const response = await fetch(path, {
       ...options,
       signal: controller.signal,
+      // R4.54（方案 C）：会话/API 请求标记高优先级，让浏览器调度器优先分配
+      // 连接与带宽（预览图已统一降为 low 并经 mediaQueue 排队，见方案 A）。
+      // 不支持该提示的实现会忽略此字段，无副作用。
+      priority: "high",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${getToken()}`,

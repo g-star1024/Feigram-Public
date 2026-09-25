@@ -30,7 +30,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 )
 
@@ -331,8 +330,9 @@ func decodeChatWriteBody(r *http.Request) (map[string]any, error) {
 }
 
 // handleAccountWrite 处理 /api/accounts/{accountID}/send|button|details，
-// 由 handleAccountAPI 在完成账号解析与客户端构建后转交。
-func (a *App) handleAccountWrite(w http.ResponseWriter, r *http.Request, action string, account NativeAccount, client *telegram.Client, query url.Values) {
+// 由 handleAccountAPI 在完成账号解析后转交；runner 提供已就绪的连接
+// （R4.54 起为账号常驻池连接）。
+func (a *App) handleAccountWrite(w http.ResponseWriter, r *http.Request, action string, account NativeAccount, runner chatRunner, query url.Values) {
 	ctx, cancel := context.WithTimeout(r.Context(), chatQueryTimeout)
 	defer cancel()
 
@@ -348,7 +348,7 @@ func (a *App) handleAccountWrite(w http.ResponseWriter, r *http.Request, action 
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 peer 参数"})
 			return
 		}
-		out, err := a.runNativeChatQuery(ctx, client, func(ctx context.Context, api *tg.Client) (any, error) {
+		out, err := runner(ctx, func(ctx context.Context, api *tg.Client) (any, error) {
 			return a.fetchNativeSendMessage(ctx, api, account, peer, chatWriteString(body["text"]))
 		})
 		if err != nil {
@@ -368,7 +368,7 @@ func (a *App) handleAccountWrite(w http.ResponseWriter, r *http.Request, action 
 			return
 		}
 		messageID, _ := strconv.Atoi(query.Get("message"))
-		out, err := a.runNativeChatQuery(ctx, client, func(ctx context.Context, api *tg.Client) (any, error) {
+		out, err := runner(ctx, func(ctx context.Context, api *tg.Client) (any, error) {
 			return a.fetchNativeButtonAnswer(ctx, api, account, peer, messageID, chatWriteString(body["data"]))
 		})
 		if err != nil {
@@ -392,7 +392,7 @@ func (a *App) handleAccountWrite(w http.ResponseWriter, r *http.Request, action 
 		if value, err := strconv.Atoi(query.Get("before")); err == nil {
 			before = value
 		}
-		out, err := a.runNativeChatQuery(ctx, client, func(ctx context.Context, api *tg.Client) (any, error) {
+		out, err := runner(ctx, func(ctx context.Context, api *tg.Client) (any, error) {
 			return a.fetchNativeChatDetails(ctx, api, account, peer, limit, before)
 		})
 		if err != nil {

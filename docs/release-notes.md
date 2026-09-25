@@ -1,5 +1,11 @@
 # Feigram Public 发布说明
 
+## 版本 2.6.32
+
+- 会话加载优先（方案 A+C）：图片预览/缩略图/头像统一经并发上限 3 的排队组件加载（`fetchpriority=low`），API 请求默认 `priority=high`——浏览器同源 6 连接不再被图片长流占满，「加载更早消息」不再排队到超时
+- Go 侧聊天查询常驻连接池（方案 B）：新增 `chatpool.go`，dialogs/messages/media/peer/resolve/search/send/button/details/avatar 全部复用账号级常驻 MTProto 连接，免每请求握手；blob 长传输保留独立连接；连接死亡/授权失效自动重建，空闲 10 分钟回收
+- 账号退出与同号去重清理时同步回收常驻聊天连接
+
 ## 版本 2.6.31
 
 - 新增聊天/群组内容本地缓存（IndexedDB）：再次打开会话直接秒开上次内容，后台自动刷新最新消息，网络慢也不再白等

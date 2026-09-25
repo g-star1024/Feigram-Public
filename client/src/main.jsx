@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { api, appLogin, getToken, setToken as saveToken } from "./api";
 import { cachedChats, cachedMessages, saveChats, saveMessages } from "./chatCache";
+import { QueuedImage } from "./mediaQueue.jsx";
 import "./styles/tokens.css";
 import "./styles/app.css";
 import "./styles/shell.css";
@@ -160,7 +161,7 @@ function Avatar({ accountId, peerId, label, size = 40 }) {
   }
   return (
     <span className="avatar avatar-image" style={{ height: size, width: size }}>
-      <img src={avatarUrl(accountId, peerId)} alt={label || "avatar"} loading="lazy" onError={() => setFailed(true)} />
+      <QueuedImage src={avatarUrl(accountId, peerId)} alt={label || "avatar"} onError={() => setFailed(true)} />
     </span>
   );
 }
@@ -260,7 +261,7 @@ function MessageMedia({ accountId, chatId, message, compact = false, onCache, ta
   if (media.kind === "image") {
     return (
       <a className={cx("media-preview image-preview", compact && "compact-media")} href={previewUrl} target="_blank" rel="noreferrer" title="打开原图">
-        <img src={previewUrl} alt={label} loading="lazy" />
+        <QueuedImage src={previewUrl} alt={label} />
       </a>
     );
   }
@@ -290,7 +291,7 @@ function MessageMedia({ accountId, chatId, message, compact = false, onCache, ta
             <Download size={14} />{cacheLabel}
           </button>
           {!active && !failed && playerMode !== "local" ? <button className="video-load-button" type="button" onClick={() => setActive(true)}>
-            <img src={thumbUrl} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} />
+            <QueuedImage src={thumbUrl} alt="" onError={(event) => { event.currentTarget.style.display = "none"; }} />
             <span><Play size={18} />点击播放视频</span>
             {!!media.duration && <b>{formatDuration(media.duration)}</b>}
           </button> : null}
@@ -1544,9 +1545,9 @@ function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, aut
             </div>
             <div className={cx("info-resource-grid", mediaTab === "file" && "files")}>
               {visibleResources.map((file) => <button className={cx("info-resource-item", file.kind)} type="button" key={`${file.id}-${file.fileName}`} onClick={() => onOpenMedia?.(file)}>
-                {file.kind === "image" && <img src={mediaUrl(accountId, chat.id, file.id, true)} alt="" loading="lazy" />}
+                {file.kind === "image" && <QueuedImage src={mediaUrl(accountId, chat.id, file.id, true)} alt="" />}
                 {file.kind === "video" && <>
-                  <img src={thumbnailMediaUrl(accountId, chat.id, file.id)} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} />
+                  <QueuedImage src={thumbnailMediaUrl(accountId, chat.id, file.id)} alt="" onError={(event) => { event.currentTarget.style.display = "none"; }} />
                   <Play size={18} />
                   {!!file.duration && <b>{formatDuration(file.duration)}</b>}
                 </>}

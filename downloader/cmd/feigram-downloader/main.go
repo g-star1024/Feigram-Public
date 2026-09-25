@@ -354,6 +354,12 @@ type App struct {
 	// 升级为可操作终态（peerUnreachableError）。键为 accountKey|peerID。
 	peerResolvePeerCooldown map[string]time.Time
 	peerResolveFailCount    map[string]int
+	// chatPool 是账号级常驻聊天连接池（R4.54）：每账号一条 gotd 连接，
+	// dialogs/messages/media/peer/avatar 等查询类动作全部复用，免去每请求
+	// TCP+握手成本与并发新连接风暴（2.6.30 实测头像/图片并发时消息历史被拖到超时）。
+	// 独立锁 chatPoolMu，与 a.mu / mediaMu / peerResolveMu 均无环（池内不做其他锁的 RPC）。
+	chatPoolMu sync.Mutex
+	chatPool   map[string]*pooledChatClient
 	// lastAutoSpawn 记录上次调度后台缓存（auto）任务的时间（R4.29 错峰），
 	// 与手动下载之间保持 autoSpawnMinInterval 的最小间隔。
 	lastAutoSpawn time.Time
@@ -2247,6 +2253,8 @@ func (a *App) handleNativeAccount(w http.ResponseWriter, r *http.Request) {
 		// R4.29：账号记录已删（登出/清理），常驻媒体连接一并回收，
 		// 避免旧 session 的连接继续占用或在 relogin 后撞 AUTH_KEY 冲突。
 		a.dropMediaConn(nativeAccountKey(userID, accountID))
+		// R4.54：常驻聊天连接一并回收（同 AUTH_KEY 冲突同理）。
+		a.dropChatPool(userID, accountID)
 		log.Printf("已删除 Go 原生账号记录 %s/%s", userID, accountID)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": publicNativeAccount(removed)})
 	case r.Method == http.MethodPost && action == "health":
@@ -3227,11 +3235,13 @@ func (a *App) finalizeNativeAuthorization(userID, accountID string) (NativeAccou
 			// 以 failed/needs-relogin 的样子误导用户（真实环境实证：同号 healthy/failed
 			// 双记录）。授权成功时把同号旧记录一并清理。
 			pruned := 0
+			var prunedAccounts []NativeAccount
 			if account.Phone != "" {
 				for key, other := range a.native {
 					if key != nativeAccountKey(userID, accountID) && other != nil &&
 						other.UserID == userID && other.Phone == account.Phone {
 						delete(a.native, key)
+						prunedAccounts = append(prunedAccounts, *other)
 						pruned++
 					}
 				}
@@ -3240,6 +3250,12 @@ func (a *App) finalizeNativeAuthorization(userID, accountID string) (NativeAccou
 			err := a.saveNativeLocked()
 			a.mu.Unlock()
 			if pruned > 0 {
+				// R4.54：被去重清理的旧账号记录，其常驻聊天/媒体连接一并回收
+				// （旧 session 已被新登录顶掉，连接继续占用只会撞 AUTH_KEY 冲突）。
+				for _, old := range prunedAccounts {
+					a.dropChatPool(old.UserID, old.AccountID)
+					a.dropMediaConn(nativeAccountKey(old.UserID, old.AccountID))
+				}
 				log.Printf("同手机号去重：清理 %d 条旧账号记录（%s/%s）", pruned, userID, accountID)
 			}
 			// R4.1：所有授权成功路径（手机登录/二维码）都收口于此，
