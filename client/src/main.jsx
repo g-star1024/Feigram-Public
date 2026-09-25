@@ -1304,7 +1304,7 @@ function InfoModal({ announcements, about, open, onClose }) {
 /* 后台缓存面板（R4.15）：原管理后台「缓存信息」tab 整块迁入下载模块，
    与下载任务并列成为下载中心的一个子标签；设置项、运行统计、任务列表、
    批量取消与拖拽排序一并搬过来，能力不减。 */
-function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onControl, onCancel }) {
+function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onControl, onCancel, onStart }) {
   const [dragId, setDragId] = useState("");
   const [selectedIds, setSelectedIds] = useState([]);
   const [error, setError] = useState("");
@@ -1388,6 +1388,9 @@ function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onCon
                 <input className="silent-cache-check" type="checkbox" checked={selectedSet.has(task.id)} onChange={(event) => toggleSelection(task.id, event.target.checked)} onClick={(event) => event.stopPropagation()} />
                 <strong title={task.fileName}>{task.fileName || "Telegram 视频"}</strong>
                 <span>{statusText}</span>
+                {(task.status === "error" || task.status === "paused") && onStart && (
+                  <button type="button" title="开始，从断点续传" onClick={() => onStart?.(task)}><Play size={12} /></button>
+                )}
                 {task.status !== "completed" && task.status !== "cancelled" && <button type="button" title="取消缓存" onClick={() => onCancel?.(task)}><X size={12} /></button>}
               </div>
               <div className="silent-cache-meta">
@@ -1406,7 +1409,7 @@ function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onCon
   );
 }
 
-function DownloadCenter({ open, downloads, onStart, onCancel, onClear, onDelete, onPlay, onClose, tab = "tasks", onTabChange, silentCacheState, silentCaches = [], onRefreshSilentCaches, onSilentCacheControl, onCancelSilentCache }) {
+function DownloadCenter({ open, downloads, onStart, onCancel, onClear, onDelete, onPlay, onClose, tab = "tasks", onTabChange, silentCacheState, silentCaches = [], onRefreshSilentCaches, onSilentCacheControl, onCancelSilentCache, onStartSilentCache }) {
   if (!open) return null;
   const active = downloads.filter((item) => ["queued", "downloading"].includes(item.status)).length;
   const cacheActive = silentCaches.filter((item) => ["running", "downloading", "queued"].includes(item.status)).length;
@@ -1442,6 +1445,7 @@ function DownloadCenter({ open, downloads, onStart, onCancel, onClear, onDelete,
           onRefresh={onRefreshSilentCaches}
           onControl={onSilentCacheControl}
           onCancel={onCancelSilentCache}
+          onStart={onStartSilentCache}
         /> : <div className="download-list">
           {deduped.map((item) => {
             const progress = progressFor(item);
@@ -1589,7 +1593,11 @@ function Dashboard({ accounts, downloads, silentCaches, silentCacheState, me, ac
     { icon: <Library size={20} />, tone: "green", value: completed, label: "已完成下载", open: () => onOpenView("downloads", "tasks") },
     { icon: <Folder size={20} />, tone: "red", value: silentCaches.length, label: `缓存任务${silentCacheState?.enabled ? "" : "（已暂停）"}`, open: () => onOpenView("downloads", "cache") }
   ];
-  const recent = downloads.slice(0, 6);
+  // R4.62：近期活动并入后台缓存任务——此前只取 downloads，缓存列表的提交/完成
+  // 在首页完全不可见。合并去重（同媒体手动+自动只留一条）后按更新时间取最近 6 条。
+  const recent = mergeDownloads([...downloads, ...silentCaches])
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+    .slice(0, 6);
   return (
     <div className="fn-dash">
       <div className="fn-stat-grid">
@@ -1619,15 +1627,18 @@ function Dashboard({ accounts, downloads, silentCaches, silentCacheState, me, ac
           </div>
           <div className="fn-card-body">
             <div className="fn-activity-list">
-              {recent.map((item) => <button className="fn-activity-item" key={item.id} onClick={() => onOpenView("downloads")}>
+              {recent.map((item) => {
+                const isCache = Boolean(item.autoCache) || item.source === "auto";
+                return <button className="fn-activity-item" key={item.id} onClick={() => onOpenView("downloads", isCache ? "cache" : "tasks")}>
                 <span className={cx("fn-stat-icon", item.status === "completed" ? "fn-stat-icon--green" : "fn-stat-icon--blue")} style={{ height: 32, width: 32 }}>
                   {item.kind === "video" ? <Play size={15} /> : <Download size={15} />}
                 </span>
                 <span className="fn-activity-copy">
                   <strong>{item.fileName || "未命名文件"}</strong>
-                  <small>{item.status === "completed" ? "已完成" : item.status === "error" ? "失败" : item.status === "downloading" ? `下载中 ${formatBytes(item.downloaded)}/${formatBytes(item.size)}` : "排队中"} · {formatTime(item.updatedAt)}</small>
+                  <small>{item.status === "completed" ? "已完成" : item.status === "error" ? "失败" : item.status === "downloading" || item.status === "running" ? `${isCache ? "缓存中" : "下载中"} ${formatBytes(item.downloaded)}/${formatBytes(item.size)}` : "排队中"} · {isCache ? "后台缓存" : "手动下载"} · {formatTime(item.updatedAt)}</small>
                 </span>
-              </button>)}
+              </button>;
+              })}
               {!recent.length && <div className="fn-empty">
                 <Library size={28} />
                 <h3>还没有下载记录</h3>
@@ -2596,6 +2607,17 @@ function App() {
     }
   }
 
+  async function startSilentCache(task) {
+    try {
+      // 缓存任务与下载任务同一 Go 任务库，复用 start（queueTask）接口断点续传。
+      await api(`/api/downloads/${encodeURIComponent(task.id)}/start`, { method: "POST" });
+      await loadSilentCaches();
+      notify("已开始，从断点续传");
+    } catch (err) {
+      notify(err.message);
+    }
+  }
+
   async function cancelSilentCache(task) {
     try {
       const result = await api(`/api/silent-cache/${encodeURIComponent(task.id)}`, { method: "DELETE" });
@@ -2726,6 +2748,7 @@ function App() {
             onRefreshSilentCaches={loadSilentCaches}
             onSilentCacheControl={updateSilentCacheControl}
             onCancelSilentCache={cancelSilentCache}
+            onStartSilentCache={startSilentCache}
           />}
           {view === "chats" && <div className={cx("app-shell fn-chats", activeChat && "chat-open")}>
       <aside className="sidebar">

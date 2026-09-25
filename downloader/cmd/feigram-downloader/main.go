@@ -435,6 +435,9 @@ func main() {
 	log.Printf("%s", app.proxy.describeProxyConfig())
 	go app.pump()
 	go app.healthLoop()
+	// R4.62：失踪文件清扫——外部（NAS 文件管理器）删除已缓存文件后，任务库
+	// completed 记录仍在，资源库会继续显示「已缓存」。定期 stat 补账。
+	go app.missingFileSweepLoop()
 	// R4.21：启动即对未就绪账号补检，新版诊断信息不再等冷却。
 	go app.bootstrapHealthChecks()
 
@@ -2541,6 +2544,42 @@ func (a *App) accountsSummaryLocked() map[string]any {
 		"failed":   failed,
 		"degraded": degraded,
 		"byStatus": byStatus,
+	}
+}
+
+// missingFileSweepLoop（R4.62）每 60s 清扫一次：外部（NAS 文件管理器等）删除
+// 已缓存文件后，任务库 completed 记录仍在，下载中心/缓存列表/资源库会继续
+// 显示「已缓存」。对完成任务 stat 目标文件，确认已不存在的记录直接移除并落盘，
+// 三个视图随之自动同步。权限/IO 错误不能断定失踪，保守跳过。
+func (a *App) missingFileSweepLoop() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		a.sweepMissingFiles()
+	}
+}
+
+func (a *App) sweepMissingFiles() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	removed := 0
+	for id, task := range a.tasks {
+		if task.Status != "completed" || task.FilePath == "" {
+			continue
+		}
+		if _, err := os.Stat(task.FilePath); err == nil || !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		log.Printf("task %s[%s] file missing, record removed: %s", task.ID, taskSourceTag(task), task.FilePath)
+		delete(a.tasks, id)
+		removed++
+	}
+	if removed > 0 {
+		if err := a.saveLocked(); err != nil {
+			log.Printf("missing-file sweep: save failed: %v", err)
+			return
+		}
+		log.Printf("missing-file sweep: removed %d completed task(s)", removed)
 	}
 }
 
