@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.38"
-export APP_CHANGELOG="后台缓存提交异步化：勾选后立即受理、扫描在后台执行（代理差/盘慢不再顶穿前端超时显示「请求超时」），结果与失败原因轮询显示在勾选框下方；各阶段打点日志"
+export APP_VERSION="2.6.39"
+export APP_CHANGELOG="修复下载任务终态失败的误导文案：断流终态不再显示「稍后自动重试」，改为「已停止自动重试，点开始可从断点续传」；进行中任务的退避等待文案不变"
 export NODE_ENV="production"
 
 is_running() {

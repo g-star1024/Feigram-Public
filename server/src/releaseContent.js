@@ -14,6 +14,17 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.39",
+    title: "Feigram 2.6.39 更新",
+    version: "2.6.39",
+    level: "success",
+    createdAt: "2026-09-25T17:10:00.000Z",
+    body: [
+"修复下载任务终态失败的误导文案：连接断流终态失败时不再显示「连接已中断，稍后自动重试」（它不会自动重试），改为「已停止自动重试，点开始可从断点续传」",
+"进行中任务在退避等待期的「稍后自动重试」提示保持不变——只有真正停止自动重试的终态才改写"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.38",
     title: "Feigram 2.6.38 更新",
     version: "2.6.38",

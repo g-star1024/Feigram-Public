@@ -117,7 +117,7 @@ const ERROR_KEYWORD_MAP = [
   [/flood/i, "触发 Telegram 限流，按提示等待后自动重试"]
 ];
 
-function friendlyTaskError(raw) {
+function friendlyTaskError(raw, status = "") {
   if (!raw) return "";
   const text = String(raw);
   const segments = text.split("：");
@@ -126,11 +126,24 @@ function friendlyTaskError(raw) {
     if (!/[\u4e00-\u9fff]/.test(seg)) break;
     kept.push(seg);
   }
-  if (kept.length) return kept.join("：").trim();
-  for (const [pattern, label] of ERROR_KEYWORD_MAP) {
-    if (pattern.test(text)) return label;
+  let label = text;
+  if (kept.length) {
+    label = kept.join("：").trim();
+  } else {
+    for (const [pattern, mapped] of ERROR_KEYWORD_MAP) {
+      if (pattern.test(text)) {
+        label = mapped;
+        break;
+      }
+    }
   }
-  return text;
+  // R4.61：终态（error）任务不会再自动重试——「稍后自动重试」是文案说谎
+  // （2026-09-26 实测：下载 1.0GB/1.6GB 断流终态失败，卡片却显示「稍后自动重试」，
+  // 用户无从判断要不要手动处理）。终态一律改写为明确的恢复路径。
+  if (status === "error" && /稍后自动重试/.test(label)) {
+    label = label.replace(/\s*稍后自动重试\s*$/, "。已停止自动重试，点「开始」可从断点续传");
+  }
+  return label;
 }
 
 function sortSilentCaches(items) {
@@ -1383,7 +1396,7 @@ function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onCon
                 <span>{formatTime(task.updatedAt)}</span>
               </div>
               <div className="mini-progress"><i style={{ width: `${progress}%` }} /></div>
-              {task.error && <small title={task.error}>{friendlyTaskError(task.error)}</small>}
+              {task.error && <small title={task.error}>{friendlyTaskError(task.error, task.status)}</small>}
             </div>
           );
         })}
@@ -1458,7 +1471,7 @@ function DownloadCenter({ open, downloads, onStart, onCancel, onClear, onDelete,
                   <span>{formatTime(item.updatedAt)}</span>
                 </div>
                 <div className="download-progress"><i style={{ width: `${progress}%` }} /></div>
-                {item.error && <p className="download-error" title={item.error}>{friendlyTaskError(item.error)}</p>}
+                {item.error && <p className="download-error" title={item.error}>{friendlyTaskError(item.error, item.status)}</p>}
                 <div className="download-actions" onClick={(event) => event.stopPropagation()}>
                   {item.status === "completed" && item.kind === "video" && <button onClick={() => onPlay(item)}><Play size={12} />播放</button>}
                   {item.status !== "downloading" && item.status !== "completed" && <button onClick={() => onStart(item)}><Play size={12} />开始</button>}
