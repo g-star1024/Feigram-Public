@@ -1777,6 +1777,10 @@ function App() {
   const [autoCacheBusy, setAutoCacheBusy] = useState(false);
   // R4.59：后台缓存扫描结果持久显示在勾选框下方（toast 几秒即逝，用户错过就变成「没反应」）。
   const [autoCacheResult, setAutoCacheResult] = useState(null);
+  // R4.60：提交改异步受理后，前端轮询状态接口取结果；ref 保存定时器与目标会话，
+  // 切换会话/卸载时停止，防止旧会话的轮询结果串写到新会话。
+  const autoCachePollRef = useRef(null);
+  const autoCachePollKeyRef = useRef("");
   const [playback, setPlayback] = useState(null);
   const socket = useSocket(token);
   const messagesRef = useRef(null);
@@ -2086,6 +2090,7 @@ function App() {
     setChatInfoOpen(false);
     setChatDetails(null);
     setAutoCacheResult(null);
+    stopAutoCachePolling();
     messageNodeRefs.current.clear();
     const targetMessageId = Number(options.messageId || 0);
     if (targetMessageId) {
@@ -2221,6 +2226,88 @@ function App() {
     }
   }
 
+  // R4.60：把扫描统计翻译成用户文案（原 R4.57 逻辑，供轮询完成后复用）。
+  function describeAutoCacheResult(result) {
+    let text;
+    if (result.queued > 0) {
+      const extra = [];
+      if (result.duplicates) extra.push(`${result.duplicates} 个已在队列`);
+      if (result.failed) extra.push(`${result.failed} 个失败`);
+      text = `已提交 ${result.queued} 个后台视频缓存任务（扫描最近 ${result.scanned ?? "?"} 条消息${extra.length ? `，${extra.join("，")}` : ""}）`;
+    } else {
+      const reason = result.failed
+        ? `${result.failed} 个入队失败`
+        : result.duplicates
+          ? `${result.duplicates} 个已在队列，无需重复提交`
+          : "最近消息里没有大于 100MB 的视频";
+      text = `扫描最近 ${result.scanned ?? "?"} 条消息，未新增缓存任务：${reason}`;
+    }
+    return text;
+  }
+
+  function stopAutoCachePolling() {
+    if (autoCachePollRef.current) {
+      clearInterval(autoCachePollRef.current);
+      autoCachePollRef.current = null;
+    }
+    autoCachePollKeyRef.current = "";
+  }
+
+  // R4.60：轮询后台扫描状态直到 done/error；切会话（key 变化）即停，防止串写。
+  function startAutoCachePolling(accId, chatId) {
+    stopAutoCachePolling();
+    const key = `${accId}:${chatId}`;
+    autoCachePollKeyRef.current = key;
+    // 15 分钟兜底：超时后停止轮询但后台扫描仍在跑，提示去缓存列表确认。
+    const deadline = Date.now() + 15 * 60 * 1000;
+    const rollbackCheckbox = () => {
+      setAutoCacheChats((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        try { localStorage.setItem("feigrame.autoCacheChats", JSON.stringify(next)); } catch {}
+        return next;
+      });
+    };
+    autoCachePollRef.current = setInterval(async () => {
+      if (autoCachePollKeyRef.current !== key) {
+        stopAutoCachePolling();
+        return;
+      }
+      try {
+        const state = await api(`/api/chats/${encodeURIComponent(accId)}/${encodeURIComponent(chatId)}/cache-large-videos`, { timeoutMs: 20000 });
+        if (autoCachePollKeyRef.current !== key) return;
+        if (state.status === "done") {
+          const text = describeAutoCacheResult(state.result || {});
+          stopAutoCachePolling();
+          setAutoCacheResult(text);
+          notify(text);
+        } else if (state.status === "error") {
+          const text = `提交失败：${state.error || "未知错误"}（可取消勾选后重新勾选重试）`;
+          stopAutoCachePolling();
+          setAutoCacheResult(text);
+          notify(text);
+          rollbackCheckbox();
+        } else if (state.status === "none") {
+          const text = "后台扫描已中断（应用重启），请重新勾选提交";
+          stopAutoCachePolling();
+          setAutoCacheResult(text);
+          rollbackCheckbox();
+        } else if (Date.now() > deadline) {
+          const text = "后台扫描耗时较长，仍在进行中；可稍后在缓存列表查看结果";
+          stopAutoCachePolling();
+          setAutoCacheResult(text);
+        }
+      } catch {
+        // 单次轮询失败（网络抖动）不终止轮询，直到兜底时限。
+        if (Date.now() > deadline && autoCachePollKeyRef.current === key) {
+          const text = "后台扫描状态查询超时，可稍后在缓存列表查看结果";
+          stopAutoCachePolling();
+          setAutoCacheResult(text);
+        }
+      }
+    }, 2500);
+  }
+
   async function setChatAutoCache(enabled) {
     if (!activeChat) return;
     const key = `${accountId}:${activeChat.id}`;
@@ -2228,35 +2315,37 @@ function App() {
     if (!enabled) delete next[key];
     setAutoCacheChats(next);
     localStorage.setItem("feigrame.autoCacheChats", JSON.stringify(next));
-    if (!enabled) return;
+    if (!enabled) {
+      stopAutoCachePolling();
+      setAutoCacheResult(null);
+      return;
+    }
     setAutoCacheBusy(true);
     setAutoCacheResult(null);
+    const accId = accountId;
+    const chatId = activeChat.id;
     try {
-      const result = await api(`/api/chats/${encodeURIComponent(accountId)}/${encodeURIComponent(activeChat.id)}/cache-large-videos`, { method: "POST", timeoutMs: 120000 });
-      // R4.57：提示带扫描/重复/失败统计——「为什么没新增」不再只能猜。
-      let text;
-      if (result.queued > 0) {
-        const extra = [];
-        if (result.duplicates) extra.push(`${result.duplicates} 个已在队列`);
-        if (result.failed) extra.push(`${result.failed} 个失败`);
-        text = `已提交 ${result.queued} 个后台视频缓存任务（扫描最近 ${result.scanned ?? "?"} 条消息${extra.length ? `，${extra.join("，")}` : ""}）`;
-      } else {
-        const reason = result.failed
-          ? `${result.failed} 个入队失败`
-          : result.duplicates
-            ? `${result.duplicates} 个已在队列，无需重复提交`
-            : "最近消息里没有大于 100MB 的视频";
-        text = `扫描最近 ${result.scanned ?? "?"} 条消息，未新增缓存任务：${reason}`;
-      }
-      setAutoCacheResult(text);
-      notify(text);
+      // R4.60：提交只受理（秒回），扫描在 Node 后台执行——代理差时不再顶穿
+      // 前端超时；结果/失败原因由轮询显示在勾选框下方。
+      await api(`/api/chats/${encodeURIComponent(accId)}/${encodeURIComponent(chatId)}/cache-large-videos`, { method: "POST", timeoutMs: 15000 });
+      setAutoCacheResult("已开始后台扫描本群最近消息，结果出来后显示在这里…");
+      startAutoCachePolling(accId, chatId);
     } catch (err) {
       setAutoCacheResult(`提交失败：${err.message}`);
       notify(err.message);
+      setAutoCacheChats((prev) => {
+        const rolled = { ...prev };
+        delete rolled[key];
+        try { localStorage.setItem("feigrame.autoCacheChats", JSON.stringify(rolled)); } catch {}
+        return rolled;
+      });
     } finally {
       setAutoCacheBusy(false);
     }
   }
+
+  // R4.60：组件卸载时停止后台扫描状态轮询，防泄漏。
+  useEffect(() => () => stopAutoCachePolling(), []);
 
   async function reloadActiveMessages() {
     if (!activeChat) return;
