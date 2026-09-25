@@ -367,6 +367,12 @@ type App struct {
 	// 请求直接复用结果（folders 的全量 dialog 拉取也走这里）。
 	dialogCacheMu sync.Mutex
 	dialogCache   map[string]*dialogCacheEntry
+	// avatarCache 是头像字节缓存（R4.64）：账号+peer 级，TTL 6h + single-flight。
+	// 群消息列表一屏十几个发送者头像此前每次都真实走 MTProto 过代理（零缓存），
+	// 代理差时消息页头像大面积裂图（2026-09-26 实测）。独立锁 avatarCacheMu（无环）。
+	avatarCacheMu  sync.Mutex
+	avatarCache    map[string]*avatarCacheEntry
+	avatarInflight map[string]*avatarInflightCall
 	// lastAutoSpawn 记录上次调度后台缓存（auto）任务的时间（R4.29 错峰），
 	// 与手动下载之间保持 autoSpawnMinInterval 的最小间隔。
 	lastAutoSpawn time.Time

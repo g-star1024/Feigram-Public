@@ -14,6 +14,17 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.42",
+    title: "Feigram 2.6.42 更新",
+    version: "2.6.42",
+    level: "success",
+    createdAt: "2026-09-25T23:40:00.000Z",
+    body: [
+"头像字节缓存根修（2026-09-26 实测：群消息页头像大面积裂图）：此前每次头像请求都真实走 MTProto 过代理（零缓存），代理差时慢/失败",
+"现在账号+会话级缓存 6 小时：命中微秒级返回；同头像并发只拉一次（single-flight）；失败不缓存，保持占位图兜底，代理恢复后自动回到真实头像"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.41",
     title: "Feigram 2.6.41 更新",
     version: "2.6.41",

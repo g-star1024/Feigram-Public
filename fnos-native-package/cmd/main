@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.41"
-export APP_CHANGELOG="首页近期活动视觉重设计：修复裸按钮 UA 灰底外露，改为无边框圆角行+悬浮淡底+状态语义色+进行中细进度条，双主题自适应"
+export APP_VERSION="2.6.42"
+export APP_CHANGELOG="头像字节缓存根修：此前每次头像请求都真实走 MTProto 过代理（零缓存），群消息页头像大面积裂图；现在账号+peer 级缓存 6 小时，命中微秒级返回，同头像并发只拉一次，失败不缓存保持占位图兜底"
 export NODE_ENV="production"
 
 is_running() {
