@@ -2225,8 +2225,21 @@ function App() {
     if (!enabled) return;
     setAutoCacheBusy(true);
     try {
-      const result = await api(`/api/chats/${encodeURIComponent(accountId)}/${encodeURIComponent(activeChat.id)}/cache-large-videos`, { method: "POST" });
-      notify(result.queued ? `已提交 ${result.queued} 个后台视频缓存任务` : "没有需要后台缓存的大视频");
+      const result = await api(`/api/chats/${encodeURIComponent(accountId)}/${encodeURIComponent(activeChat.id)}/cache-large-videos`, { method: "POST", timeoutMs: 120000 });
+      // R4.57：提示带扫描/重复/失败统计——「为什么没新增」不再只能猜。
+      if (result.queued > 0) {
+        const extra = [];
+        if (result.duplicates) extra.push(`${result.duplicates} 个已在队列`);
+        if (result.failed) extra.push(`${result.failed} 个失败`);
+        notify(`已提交 ${result.queued} 个后台视频缓存任务（扫描最近 ${result.scanned ?? "?"} 条消息${extra.length ? `，${extra.join("，")}` : ""}）`);
+      } else {
+        const reason = result.failed
+          ? `${result.failed} 个入队失败`
+          : result.duplicates
+            ? `${result.duplicates} 个已在队列，无需重复提交`
+            : "最近消息里没有大于 100MB 的视频";
+        notify(`扫描最近 ${result.scanned ?? "?"} 条消息，未新增缓存任务：${reason}`);
+      }
     } catch (err) {
       notify(err.message);
     } finally {

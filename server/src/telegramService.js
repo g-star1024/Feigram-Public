@@ -1060,7 +1060,9 @@ async function cacheVideoSilentlyGo(userId, accountId, peerId, message) {
   const contentType = message.document?.mimeType || "";
   const kind = mediaKind(message, contentType);
   const size = Number(message.file?.size || message.document?.size || 0);
-  if (kind !== "video" || size <= VIDEO_CACHE_THRESHOLD) return false;
+  // R4.57：返回可区分状态（queued/duplicate/skip），让调用方统计真实的
+  // 「新增/重复/跳过」，不再把三种情况混成一个 false。
+  if (kind !== "video" || size <= VIDEO_CACHE_THRESHOLD) return "skip";
   const mediaInfo = await mediaFileInfo(userId, accountId, message, contentType, kind);
   const dedupKey = silentDedupKey(userId, accountId, peerId, mediaInfo.fileName, size);
   const tasks = await goAllTasks().catch(() => []);
@@ -1072,14 +1074,14 @@ async function cacheVideoSilentlyGo(userId, accountId, peerId, message) {
     (task.id === goDownloaderTaskId(userId, accountId, peerId, message.id) ||
       silentDedupKey(task.userId, task.accountId, task.peerId, task.fileName, task.size) === dedupKey)
   ));
-  if (duplicate) return false;
+  if (duplicate) return "duplicate";
   await ensureGoDownloadTask(userId, accountId, peerId, message.id, {
     source: "auto",
     autoCache: true,
     dedupKey,
     order: Date.now()
   });
-  return true;
+  return "queued";
 }
 
 async function cacheLargeVideosInChatGo(userId, accountId, peerId, io = realtimeIo) {
@@ -1087,17 +1089,31 @@ async function cacheLargeVideosInChatGo(userId, accountId, peerId, io = realtime
   // M4.1 子步：原生账号不持有 GramJS 客户端（getClient 抛 409），
   // 改经 Go 原生 MTProto 拉取近期消息并筛出大视频静默缓存。
   if (await nativeAccountRecord(userId, accountId)) {
+    // R4.57：扫描窗口 120→200（Go /messages 上限即 200）；扫描失败不再
+    // .catch 静默成「没有大视频」——直接上抛，前端 toast 显示真实原因；
+    // 单个视频入队失败不中断整批（计入 failed）。
     const items = await downloaderSidecar.accountMessages({
-      userId, accountId, peer: peerId, limit: 120
-    }).catch(() => []);
+      userId, accountId, peer: peerId, limit: 200
+    });
     const recent = Array.isArray(items) ? items : [];
     let queued = 0;
+    let duplicates = 0;
+    let skipped = 0;
+    let failed = 0;
     for (const item of recent) {
       if (!item || !item.media || !item.media.hasPreview) continue;
       const message = goMessageToNodeMessage(item);
-      if (await cacheVideoSilentlyGo(userId, accountId, peerId, message)) queued += 1;
+      try {
+        const status = await cacheVideoSilentlyGo(userId, accountId, peerId, message);
+        if (status === "queued") queued += 1;
+        else if (status === "duplicate") duplicates += 1;
+        else skipped += 1;
+      } catch (err) {
+        failed += 1;
+        console.warn(`cache-large-videos: 消息 ${item.id} 入队失败: ${err.message}`);
+      }
     }
-    return { queued };
+    return { queued, scanned: recent.length, duplicates, skipped, failed };
   }
   throw reloginError(accountId);
 }

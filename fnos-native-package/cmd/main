@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.34"
-export APP_CHANGELOG="修复会话列表头像裂图：媒体加载名额改为图片完成后立即释放，不再被常驻列表占死排队"
+export APP_VERSION="2.6.35"
+export APP_CHANGELOG="群信息媒体统计改为服务端真实总数（不再只数最近30条）；后台缓存扫描窗口 120→200 条、失败原因可见化"
 export NODE_ENV="production"
 
 is_running() {
