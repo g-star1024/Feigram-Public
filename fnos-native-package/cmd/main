@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.40"
-export APP_CHANGELOG="缓存列表失败/暂停任务新增「开始」断点续传按钮；外部删除已缓存文件后资源库/列表自动同步（Go 定期清扫失踪文件记录）；首页近期活动并入后台缓存动态"
+export APP_VERSION="2.6.41"
+export APP_CHANGELOG="首页近期活动视觉重设计：修复裸按钮 UA 灰底外露，改为无边框圆角行+悬浮淡底+状态语义色+进行中细进度条，双主题自适应"
 export NODE_ENV="production"
 
 is_running() {

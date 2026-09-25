@@ -418,49 +418,95 @@
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
 }
 
+/* R4.63：近期活动列表重设计。此前条目是裸 <button>，未重置 UA 默认按钮面
+   （color-scheme 下显灰块+边框）、行贴边、hover 全宽生硬。改为无边框圆角行 +
+   悬浮淡底 + 状态语义色 + 进行中细进度条，双主题经 --fn-* token 自适应。 */
 .fn-activity-list {
   display: flex;
   flex-direction: column;
+  gap: 2px;
 }
 
 .fn-activity-item {
+  appearance: none;
   align-items: center;
-  border-bottom: 1px solid var(--fn-border);
+  background: transparent;
+  border: 0;
+  border-radius: var(--fn-radius-sm);
   color: var(--fn-text);
+  cursor: pointer;
   display: flex;
   gap: 12px;
-  padding: 10px 0;
+  padding: 9px 10px;
   text-align: left;
   width: 100%;
-}
-
-.fn-activity-item:last-child {
-  border-bottom: 0;
+  transition: background var(--fn-dur) var(--fn-ease);
 }
 
 .fn-activity-item:hover {
   background: var(--fn-surface-2);
 }
 
+.fn-activity-item:focus-visible {
+  outline: 2px solid var(--fn-primary);
+  outline-offset: -2px;
+}
+
+.fn-activity-icon {
+  align-items: center;
+  border-radius: 10px;
+  display: inline-flex;
+  flex: none;
+  height: 34px;
+  justify-content: center;
+  width: 34px;
+}
+
 .fn-activity-copy {
   display: flex;
   flex-direction: column;
   flex: 1;
-  gap: 2px;
+  gap: 3px;
   min-width: 0;
 }
 
 .fn-activity-copy strong {
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .fn-activity-copy small {
+  align-items: center;
   color: var(--fn-text-3);
+  display: flex;
   font-size: 12px;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.fn-activity-state {
+  color: var(--fn-text-2);
+  flex: none;
+  font-weight: 500;
+}
+
+.fn-activity-state--completed { color: var(--fn-success); }
+.fn-activity-state--error     { color: var(--fn-danger); }
+.fn-activity-state--active    { color: var(--fn-primary); }
+
+.fn-activity-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fn-activity-progress {
+  flex: none;
+  height: 3px;
+  width: 56px;
 }
 
 .fn-quick-actions {

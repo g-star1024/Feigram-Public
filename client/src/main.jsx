@@ -1629,14 +1629,22 @@ function Dashboard({ accounts, downloads, silentCaches, silentCacheState, me, ac
             <div className="fn-activity-list">
               {recent.map((item) => {
                 const isCache = Boolean(item.autoCache) || item.source === "auto";
+                const running = item.status === "downloading" || item.status === "running";
+                const stateClass = item.status === "completed" ? "fn-activity-state--completed" : item.status === "error" ? "fn-activity-state--error" : running ? "fn-activity-state--active" : "";
+                const progress = item.size ? Math.min(100, Math.round((Number(item.downloaded || 0) / Number(item.size)) * 100)) : 0;
                 return <button className="fn-activity-item" key={item.id} onClick={() => onOpenView("downloads", isCache ? "cache" : "tasks")}>
-                <span className={cx("fn-stat-icon", item.status === "completed" ? "fn-stat-icon--green" : "fn-stat-icon--blue")} style={{ height: 32, width: 32 }}>
+                <span className={cx("fn-stat-icon", "fn-activity-icon", item.status === "completed" ? "fn-stat-icon--green" : "fn-stat-icon--blue")}>
                   {item.kind === "video" ? <Play size={15} /> : <Download size={15} />}
                 </span>
                 <span className="fn-activity-copy">
                   <strong>{item.fileName || "未命名文件"}</strong>
-                  <small>{item.status === "completed" ? "已完成" : item.status === "error" ? "失败" : item.status === "downloading" || item.status === "running" ? `${isCache ? "缓存中" : "下载中"} ${formatBytes(item.downloaded)}/${formatBytes(item.size)}` : "排队中"} · {isCache ? "后台缓存" : "手动下载"} · {formatTime(item.updatedAt)}</small>
+                  <small>
+                    <span className={cx("fn-activity-state", stateClass)}>{item.status === "completed" ? "已完成" : item.status === "error" ? "失败" : running ? "进行中" : "排队中"}</span>
+                    {running && <span className="fn-activity-meta">{formatBytes(item.downloaded)}/{formatBytes(item.size)}</span>}
+                    <span className="fn-activity-meta">{isCache ? "后台缓存" : "手动下载"} · {formatTime(item.updatedAt)}</span>
+                  </small>
                 </span>
+                {running && <span className="fn-activity-progress mini-progress"><i style={{ width: `${progress}%` }} /></span>}
               </button>;
               })}
               {!recent.length && <div className="fn-empty">

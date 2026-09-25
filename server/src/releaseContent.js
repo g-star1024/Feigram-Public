@@ -14,6 +14,17 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.41",
+    title: "Feigram 2.6.41 更新",
+    version: "2.6.41",
+    level: "success",
+    createdAt: "2026-09-25T23:25:00.000Z",
+    body: [
+"首页「近期活动」视觉重设计：修复条目露出浏览器原生灰色按钮底与边框导致的「灰块贴边」观感",
+"新样式：无边框圆角行 + 悬浮淡底 + 状态语义色（已完成绿/失败红/进行中蓝）+ 进行中任务右侧细进度条，深浅主题自适应"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.40",
     title: "Feigram 2.6.40 更新",
     version: "2.6.40",
