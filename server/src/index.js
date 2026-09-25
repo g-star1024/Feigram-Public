@@ -280,6 +280,11 @@ app.post("/api/chats/:account/:peer/cache-large-videos", asyncRoute(async (req, 
   res.json(await tg.cacheLargeVideosInChat(req.user.id, req.params.account, req.params.peer, io));
 }));
 
+// R4.60：后台缓存扫描状态查询（提交已改异步受理，前端轮询此接口取结果）。
+app.get("/api/chats/:account/:peer/cache-large-videos", asyncRoute(async (req, res) => {
+  res.json(tg.cacheLargeVideosStatus(req.user.id, req.params.account, req.params.peer));
+}));
+
 app.get("/api/folders", asyncRoute(async (req, res) => {
   res.json(await tg.listFolders(req.user.id, req.query.account));
 }));

@@ -1136,6 +1136,15 @@ textarea {
   width: 16px;
 }
 
+/* R4.59：后台缓存扫描结果持久显示在勾选框下方（替代几秒即逝的 toast）。 */
+.info-cache-result {
+  color: var(--fn-text-secondary, #8a8f98);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 6px 0 0;
+  word-break: break-all;
+}
+
 .info-resource-head {
   align-items: center;
   display: flex;

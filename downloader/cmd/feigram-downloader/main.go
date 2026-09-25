@@ -354,6 +354,19 @@ type App struct {
 	// 升级为可操作终态（peerUnreachableError）。键为 accountKey|peerID。
 	peerResolvePeerCooldown map[string]time.Time
 	peerResolveFailCount    map[string]int
+	// chatPool 是账号级常驻聊天连接池（R4.54）：每账号一条 gotd 连接，
+	// dialogs/messages/media/peer/avatar 等查询类动作全部复用，免去每请求
+	// TCP+握手成本与并发新连接风暴（2.6.30 实测头像/图片并发时消息历史被拖到超时）。
+	// 独立锁 chatPoolMu，与 a.mu / mediaMu / peerResolveMu 均无环（池内不做其他锁的 RPC）。
+	chatPoolMu sync.Mutex
+	chatPool   map[string]*pooledChatClient
+	// dialogCache 是会话列表拉取的 single-flight + 短 TTL 缓存（R4.55①，借鉴
+	// tdesktop DialogsLoadState 单加载器）：一次打开前端会并发触发 loadChats 与
+	// folders 两类请求，2.6.32 实测它们各自全量翻 6 页 = 18 个 getDialogs RPC
+	// 打在同一代理上。现在同账号同查询词的并发请求共享一次拉取，30s 内的后续
+	// 请求直接复用结果（folders 的全量 dialog 拉取也走这里）。
+	dialogCacheMu sync.Mutex
+	dialogCache   map[string]*dialogCacheEntry
 	// lastAutoSpawn 记录上次调度后台缓存（auto）任务的时间（R4.29 错峰），
 	// 与手动下载之间保持 autoSpawnMinInterval 的最小间隔。
 	lastAutoSpawn time.Time
@@ -422,6 +435,9 @@ func main() {
 	log.Printf("%s", app.proxy.describeProxyConfig())
 	go app.pump()
 	go app.healthLoop()
+	// R4.62：失踪文件清扫——外部（NAS 文件管理器）删除已缓存文件后，任务库
+	// completed 记录仍在，资源库会继续显示「已缓存」。定期 stat 补账。
+	go app.missingFileSweepLoop()
 	// R4.21：启动即对未就绪账号补检，新版诊断信息不再等冷却。
 	go app.bootstrapHealthChecks()
 
@@ -945,7 +961,10 @@ func (a *App) pumpOnce() bool {
 		started = true
 		// R4.25：任务启动必须留日志。此前启动无日志、失败才有日志，
 		// 「任务到底有没有被调度」在用户日志里无从判断（2.6.2 排障盲区）。
-		log.Printf("task %s start: transport=%s offset=%d/%d file=%s", task.ID, transport, task.Downloaded, task.Size, task.FilePath)
+		// R4.58：启动日志带来源标签（[auto-cache]/[manual]）——此前 auto 与手动
+		// 任务在日志里无法区分，用户取消手动任务后看到持续请求无法判断来源
+		// （2026-09-25 实测排障）。
+		log.Printf("task %s[%s] start: transport=%s offset=%d/%d file=%s", task.ID, taskSourceTag(&task), transport, task.Downloaded, task.Size, task.FilePath)
 		if isAutoCache(task) {
 			a.lastAutoSpawn = time.Now()
 			autoRunning++
@@ -1066,7 +1085,7 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 					t.Error = fmt.Sprintf("%s，%s 后自动续传：%s", reason, formatDuration(delay), compactError(err))
 					t.UpdatedAt = now()
 				})
-				a.taskEventLog(id, fmt.Sprintf("transient failure, retry in %s: %v", delay, err))
+				a.taskEventLog(id, fmt.Sprintf("[%s] transient failure, retry in %s: %v", taskSourceTag(task), delay, err))
 				return
 			}
 			a.updateTask(id, func(t *Task) {
@@ -2247,6 +2266,8 @@ func (a *App) handleNativeAccount(w http.ResponseWriter, r *http.Request) {
 		// R4.29：账号记录已删（登出/清理），常驻媒体连接一并回收，
 		// 避免旧 session 的连接继续占用或在 relogin 后撞 AUTH_KEY 冲突。
 		a.dropMediaConn(nativeAccountKey(userID, accountID))
+		// R4.54：常驻聊天连接一并回收（同 AUTH_KEY 冲突同理）。
+		a.dropChatPool(userID, accountID)
 		log.Printf("已删除 Go 原生账号记录 %s/%s", userID, accountID)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": publicNativeAccount(removed)})
 	case r.Method == http.MethodPost && action == "health":
@@ -2523,6 +2544,42 @@ func (a *App) accountsSummaryLocked() map[string]any {
 		"failed":   failed,
 		"degraded": degraded,
 		"byStatus": byStatus,
+	}
+}
+
+// missingFileSweepLoop（R4.62）每 60s 清扫一次：外部（NAS 文件管理器等）删除
+// 已缓存文件后，任务库 completed 记录仍在，下载中心/缓存列表/资源库会继续
+// 显示「已缓存」。对完成任务 stat 目标文件，确认已不存在的记录直接移除并落盘，
+// 三个视图随之自动同步。权限/IO 错误不能断定失踪，保守跳过。
+func (a *App) missingFileSweepLoop() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		a.sweepMissingFiles()
+	}
+}
+
+func (a *App) sweepMissingFiles() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	removed := 0
+	for id, task := range a.tasks {
+		if task.Status != "completed" || task.FilePath == "" {
+			continue
+		}
+		if _, err := os.Stat(task.FilePath); err == nil || !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		log.Printf("task %s[%s] file missing, record removed: %s", task.ID, taskSourceTag(task), task.FilePath)
+		delete(a.tasks, id)
+		removed++
+	}
+	if removed > 0 {
+		if err := a.saveLocked(); err != nil {
+			log.Printf("missing-file sweep: save failed: %v", err)
+			return
+		}
+		log.Printf("missing-file sweep: removed %d completed task(s)", removed)
 	}
 }
 
@@ -3227,11 +3284,13 @@ func (a *App) finalizeNativeAuthorization(userID, accountID string) (NativeAccou
 			// 以 failed/needs-relogin 的样子误导用户（真实环境实证：同号 healthy/failed
 			// 双记录）。授权成功时把同号旧记录一并清理。
 			pruned := 0
+			var prunedAccounts []NativeAccount
 			if account.Phone != "" {
 				for key, other := range a.native {
 					if key != nativeAccountKey(userID, accountID) && other != nil &&
 						other.UserID == userID && other.Phone == account.Phone {
 						delete(a.native, key)
+						prunedAccounts = append(prunedAccounts, *other)
 						pruned++
 					}
 				}
@@ -3240,6 +3299,12 @@ func (a *App) finalizeNativeAuthorization(userID, accountID string) (NativeAccou
 			err := a.saveNativeLocked()
 			a.mu.Unlock()
 			if pruned > 0 {
+				// R4.54：被去重清理的旧账号记录，其常驻聊天/媒体连接一并回收
+				// （旧 session 已被新登录顶掉，连接继续占用只会撞 AUTH_KEY 冲突）。
+				for _, old := range prunedAccounts {
+					a.dropChatPool(old.UserID, old.AccountID)
+					a.dropMediaConn(nativeAccountKey(old.UserID, old.AccountID))
+				}
 				log.Printf("同手机号去重：清理 %d 条旧账号记录（%s/%s）", pruned, userID, accountID)
 			}
 			// R4.1：所有授权成功路径（手机登录/二维码）都收口于此，
@@ -4234,6 +4299,15 @@ func transientSourceError(err error) bool {
 		}
 	}
 	return false
+}
+
+// taskSourceTag 返回任务的来源标签，用于日志一眼区分后台缓存与手动任务
+// （R4.58：2026-09-25 用户取消手动任务后无法判断日志中持续请求的来源）。
+func taskSourceTag(t *Task) string {
+	if t.AutoCache || t.Source == "auto" {
+		return "auto-cache"
+	}
+	return "manual"
 }
 
 // maxTransientRetries 瞬态失败（媒体源不可达/网络抖动等）的自动重试上限。

@@ -620,7 +620,7 @@ function silentDedupKey(userId, accountId, peerId, fileName, size) {
 // 因此原生下载元数据不能走 mediaMessage（GramJS），必须改经 Go 原生 MTProto（/messages + /peer）获取。
 // 这里复用 M4.2 的 resolveNativePeerEntity（内部用 syntheticNativeEntity 合成 entity），
 // 再用 nativeMediaAdapter 把 Go 序列化消息映射为与 mediaMessage 兼容的 { entity, message } 形状，
-// 供 ensureGoDownloadTask / mediaNativeMetadata / cacheLargeVideosInChatGo 直接消费。
+// 供 ensureGoDownloadTask / mediaNativeMetadata / runAutoCacheScan 直接消费。
 async function nativeMediaMeta(userId, accountId, peerId, messageId) {
   const entity = await resolveNativePeerEntity(userId, accountId, peerId);
   const items = await downloaderSidecar.accountMessages({
@@ -879,7 +879,11 @@ async function ensureGoDownloadTask(userId, accountId, peerId, messageId, option
   // M4.1 子步：原生账号经 Go 原生 MTProto 取消息元数据（nativeMediaMeta），避免 GramJS 的 409。
   const native = await nativeAccountRecord(userId, accountId);
   if (!native) throw reloginError(accountId);
-  const { entity, message } = await nativeMediaMeta(userId, accountId, peerId, messageId);
+  // R4.59：允许调用方传入扫描时已拿到的 { entity, message }——后台缓存批量入队
+  // 每个视频再走一次 nativeMediaMeta（peer 解析 + around 拉取 20 条）会把整批
+  // 拖到分钟级（代理差时必然整体超时、0 个入队），元数据在扫描结果里本来就有。
+  const meta = options.meta || await nativeMediaMeta(userId, accountId, peerId, messageId);
+  const { entity, message } = meta;
   const contentType = message.photo ? "image/jpeg" : message.document?.mimeType || "";
   const kind = mediaKind(message, contentType);
   const size = mediaByteSize(message);
@@ -1056,11 +1060,13 @@ async function deleteGoDownloadTask(userId, taskId) {
   return { ok: true };
 }
 
-async function cacheVideoSilentlyGo(userId, accountId, peerId, message) {
+async function cacheVideoSilentlyGo(userId, accountId, peerId, message, entity = null) {
   const contentType = message.document?.mimeType || "";
   const kind = mediaKind(message, contentType);
   const size = Number(message.file?.size || message.document?.size || 0);
-  if (kind !== "video" || size <= VIDEO_CACHE_THRESHOLD) return false;
+  // R4.57：返回可区分状态（queued/duplicate/skip），让调用方统计真实的
+  // 「新增/重复/跳过」，不再把三种情况混成一个 false。
+  if (kind !== "video" || size <= VIDEO_CACHE_THRESHOLD) return "skip";
   const mediaInfo = await mediaFileInfo(userId, accountId, message, contentType, kind);
   const dedupKey = silentDedupKey(userId, accountId, peerId, mediaInfo.fileName, size);
   const tasks = await goAllTasks().catch(() => []);
@@ -1072,34 +1078,101 @@ async function cacheVideoSilentlyGo(userId, accountId, peerId, message) {
     (task.id === goDownloaderTaskId(userId, accountId, peerId, message.id) ||
       silentDedupKey(task.userId, task.accountId, task.peerId, task.fileName, task.size) === dedupKey)
   ));
-  if (duplicate) return false;
+  if (duplicate) return "duplicate";
   await ensureGoDownloadTask(userId, accountId, peerId, message.id, {
     source: "auto",
     autoCache: true,
     dedupKey,
-    order: Date.now()
+    order: Date.now(),
+    // R4.59：扫描元数据直传——不再每视频回源拉一遍（见 ensureGoDownloadTask 注释）。
+    meta: entity ? { entity, message } : null
   });
-  return true;
+  return "queued";
 }
 
-async function cacheLargeVideosInChatGo(userId, accountId, peerId, io = realtimeIo) {
+// R4.60：后台缓存扫描改异步作业。旧实现把「扫描 200 条 + 逐视频入队」整条链路
+// 塞在一个同步 HTTP 请求里，代理差/盘慢时任何一环慢都会顶穿前端 120s 超时
+// （2026-09-25 实测：勾选后显示「请求超时」，但 Node 后台其实还在跑，结果不可见）。
+// 现在提交即受理（秒回 { started:true }），扫描在后台执行，结果经同路径 GET
+// 状态接口轮询取回；各阶段打点日志，失败原因记入 job.error 不静默。
+const autoCacheJobs = new Map();
+
+function autoCacheJobKey(userId, accountId, peerId) {
+  return `${userId}|${accountId}|${peerId}`;
+}
+
+function autoCacheJobSnapshot(job) {
+  if (!job) return { status: "none" };
+  return {
+    status: job.status,
+    startedAt: job.startedAt,
+    result: job.result,
+    error: job.error || ""
+  };
+}
+
+function cacheLargeVideosStatus(userId, accountId, peerId) {
+  return autoCacheJobSnapshot(autoCacheJobs.get(autoCacheJobKey(userId, accountId, peerId)));
+}
+
+function startAutoCacheScan(userId, accountId, peerId, io = realtimeIo) {
   realtimeIo = io || realtimeIo;
-  // M4.1 子步：原生账号不持有 GramJS 客户端（getClient 抛 409），
-  // 改经 Go 原生 MTProto 拉取近期消息并筛出大视频静默缓存。
-  if (await nativeAccountRecord(userId, accountId)) {
+  const key = autoCacheJobKey(userId, accountId, peerId);
+  const existing = autoCacheJobs.get(key);
+  // 防重入：同一会话已有扫描在跑时直接告知，前端继续轮询同一个 job。
+  if (existing && existing.status === "running") {
+    return { started: false, alreadyRunning: true };
+  }
+  const job = { status: "running", startedAt: new Date().toISOString(), result: null, error: "" };
+  autoCacheJobs.set(key, job);
+  runAutoCacheScan(userId, accountId, peerId, job, key).catch((err) => {
+    // 兜底：runAutoCacheScan 内部已把错误写进 job，这里只防意外同步抛出。
+    job.status = "error";
+    job.error = err.message || String(err);
+    console.warn(`[auto-cache] ${key} 扫描异常: ${job.error}`);
+  });
+  return { started: true };
+}
+
+async function runAutoCacheScan(userId, accountId, peerId, job, key) {
+  const startedMs = Date.now();
+  try {
+    if (!(await nativeAccountRecord(userId, accountId))) throw reloginError(accountId);
+    // R4.57：扫描窗口 120→200（Go /messages 上限即 200）；扫描失败直接进
+    // job.error（不再静默成「没有大视频」）；单个视频入队失败不中断整批。
+    const scanStart = Date.now();
     const items = await downloaderSidecar.accountMessages({
-      userId, accountId, peer: peerId, limit: 120
-    }).catch(() => []);
+      userId, accountId, peer: peerId, limit: 200
+    });
     const recent = Array.isArray(items) ? items : [];
+    const peerStart = Date.now();
+    const entity = await resolveNativePeerEntity(userId, accountId, peerId);
+    console.log(`[auto-cache] ${key} 扫描 ${recent.length} 条耗时 ${peerStart - scanStart}ms，peer 解析 ${Date.now() - peerStart}ms`);
     let queued = 0;
+    let duplicates = 0;
+    let skipped = 0;
+    let failed = 0;
     for (const item of recent) {
       if (!item || !item.media || !item.media.hasPreview) continue;
       const message = goMessageToNodeMessage(item);
-      if (await cacheVideoSilentlyGo(userId, accountId, peerId, message)) queued += 1;
+      try {
+        const status = await cacheVideoSilentlyGo(userId, accountId, peerId, message, entity);
+        if (status === "queued") queued += 1;
+        else if (status === "duplicate") duplicates += 1;
+        else skipped += 1;
+      } catch (err) {
+        failed += 1;
+        console.warn(`[auto-cache] ${key} 消息 ${item.id} 入队失败: ${err.message}`);
+      }
     }
-    return { queued };
+    job.result = { queued, scanned: recent.length, duplicates, skipped, failed };
+    job.status = "done";
+    console.log(`[auto-cache] ${key} 完成：新增 ${queued}/重复 ${duplicates}/跳过 ${skipped}/失败 ${failed}，总耗时 ${Date.now() - startedMs}ms`);
+  } catch (err) {
+    job.status = "error";
+    job.error = err.message || String(err);
+    console.warn(`[auto-cache] ${key} 扫描失败（${Date.now() - startedMs}ms）: ${job.error}`);
   }
-  throw reloginError(accountId);
 }
 
 async function goSilentCacheSpeedDiagnostics(userId) {
@@ -1292,7 +1365,8 @@ module.exports = {
   completeCode,
   completePassword,
   cacheMedia,
-  cacheLargeVideosInChat: cacheLargeVideosInChatGo,
+  cacheLargeVideosInChat: startAutoCacheScan,
+  cacheLargeVideosStatus,
   cancelDownloadTask: cancelGoDownloadTask,
   chatDetails,
   chatMedia,

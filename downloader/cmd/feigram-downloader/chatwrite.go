@@ -30,7 +30,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 )
 
@@ -241,6 +240,14 @@ func (a *App) fetchNativeChatDetails(ctx context.Context, api *tg.Client, accoun
 			summary["files"] = chatInt(summary["files"]) + 1
 		}
 	}
+	// R4.57：媒体统计不再只数扫描窗口——旧实现 details 默认只扫 30 条消息，
+	// 千人大群实际几百个视频却显示「30」。改用 messages.search 官方过滤器
+	// （photos/video/document）拿服务端权威 Count；任一查询失败回退窗口计数。
+	if peer, peerErr := nativeInputPeerFromInfo(info); peerErr == nil {
+		if totals := a.fetchNativeMediaTotals(ctx, api, peer); totals != nil {
+			summary = totals
+		}
+	}
 	nextBefore := 0
 	for _, item := range files {
 		if id := chatInt(item["id"]); id > 0 && (nextBefore == 0 || id < nextBefore) {
@@ -260,6 +267,54 @@ func (a *App) fetchNativeChatDetails(ctx context.Context, api *tg.Client, accoun
 		"nextMediaBefore":   nextBefore,
 		"hasMoreMedia":      len(files) >= limit,
 	}, nil
+}
+
+// fetchNativeMediaTotals 用 messages.search 按官方过滤器（photos/video/document）
+// 拿各类型媒体的真实总数——响应里的 Count 是服务端权威值，与官方客户端
+// 「文件与媒体」页签同源。任一查询失败返回 nil，调用方回退窗口计数。
+// 注意 document 过滤器涵盖视频/音乐等一切文件，故 files = document - video
+// 与旧「窗口内非图非视频」语义对齐。
+func (a *App) fetchNativeMediaTotals(ctx context.Context, api *tg.Client, peer tg.InputPeerClass) map[string]any {
+	countOf := func(filter tg.MessagesFilterClass) (int, error) {
+		resp, err := api.MessagesSearch(ctx, &tg.MessagesSearchRequest{
+			Peer:   peer,
+			Q:      "",
+			Filter: filter,
+			Limit:  1,
+		})
+		if err != nil {
+			return 0, err
+		}
+		switch typed := resp.(type) {
+		case *tg.MessagesChannelMessages:
+			return typed.Count, nil
+		case *tg.MessagesMessagesSlice:
+			return typed.Count, nil
+		}
+		return 0, nil
+	}
+	photos, err := countOf(&tg.InputMessagesFilterPhotos{})
+	if err != nil {
+		return nil
+	}
+	videos, err := countOf(&tg.InputMessagesFilterVideo{})
+	if err != nil {
+		return nil
+	}
+	documents, err := countOf(&tg.InputMessagesFilterDocument{})
+	if err != nil {
+		return nil
+	}
+	files := documents - videos
+	if files < 0 {
+		files = 0
+	}
+	return map[string]any{
+		"images": photos,
+		"videos": videos,
+		"files":  files,
+		"total":  true,
+	}
 }
 
 // fetchNativeChatFull 读取会话简介与成员数；失败时返回零值而不是让整页报错，
@@ -331,8 +386,9 @@ func decodeChatWriteBody(r *http.Request) (map[string]any, error) {
 }
 
 // handleAccountWrite 处理 /api/accounts/{accountID}/send|button|details，
-// 由 handleAccountAPI 在完成账号解析与客户端构建后转交。
-func (a *App) handleAccountWrite(w http.ResponseWriter, r *http.Request, action string, account NativeAccount, client *telegram.Client, query url.Values) {
+// 由 handleAccountAPI 在完成账号解析后转交；runner 提供已就绪的连接
+// （R4.54 起为账号常驻池连接）。
+func (a *App) handleAccountWrite(w http.ResponseWriter, r *http.Request, action string, account NativeAccount, runner chatRunner, query url.Values) {
 	ctx, cancel := context.WithTimeout(r.Context(), chatQueryTimeout)
 	defer cancel()
 
@@ -348,7 +404,7 @@ func (a *App) handleAccountWrite(w http.ResponseWriter, r *http.Request, action 
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 peer 参数"})
 			return
 		}
-		out, err := a.runNativeChatQuery(ctx, client, func(ctx context.Context, api *tg.Client) (any, error) {
+		out, err := runner(ctx, func(ctx context.Context, api *tg.Client) (any, error) {
 			return a.fetchNativeSendMessage(ctx, api, account, peer, chatWriteString(body["text"]))
 		})
 		if err != nil {
@@ -368,7 +424,7 @@ func (a *App) handleAccountWrite(w http.ResponseWriter, r *http.Request, action 
 			return
 		}
 		messageID, _ := strconv.Atoi(query.Get("message"))
-		out, err := a.runNativeChatQuery(ctx, client, func(ctx context.Context, api *tg.Client) (any, error) {
+		out, err := runner(ctx, func(ctx context.Context, api *tg.Client) (any, error) {
 			return a.fetchNativeButtonAnswer(ctx, api, account, peer, messageID, chatWriteString(body["data"]))
 		})
 		if err != nil {
@@ -392,7 +448,7 @@ func (a *App) handleAccountWrite(w http.ResponseWriter, r *http.Request, action 
 		if value, err := strconv.Atoi(query.Get("before")); err == nil {
 			before = value
 		}
-		out, err := a.runNativeChatQuery(ctx, client, func(ctx context.Context, api *tg.Client) (any, error) {
+		out, err := runner(ctx, func(ctx context.Context, api *tg.Client) (any, error) {
 			return a.fetchNativeChatDetails(ctx, api, account, peer, limit, before)
 		})
 		if err != nil {

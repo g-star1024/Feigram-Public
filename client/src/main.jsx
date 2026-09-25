@@ -29,6 +29,8 @@ import {
   X
 } from "lucide-react";
 import { api, appLogin, getToken, setToken as saveToken } from "./api";
+import { cachedChats, cachedMessages, saveChats, saveMessages } from "./chatCache";
+import { QueuedImage } from "./mediaQueue.jsx";
 import "./styles/tokens.css";
 import "./styles/app.css";
 import "./styles/shell.css";
@@ -36,6 +38,11 @@ import "./styles/screens.css";
 
 function cx(...items) {
   return items.filter(Boolean).join(" ");
+}
+
+// R4.53：会话缓存键（与 chatCache.js 的 cacheKey 保持一致：account:peer）。
+function cacheKeyOf(accountId, peerId) {
+  return `${accountId}:${peerId}`;
 }
 
 /*
@@ -110,7 +117,7 @@ const ERROR_KEYWORD_MAP = [
   [/flood/i, "触发 Telegram 限流，按提示等待后自动重试"]
 ];
 
-function friendlyTaskError(raw) {
+function friendlyTaskError(raw, status = "") {
   if (!raw) return "";
   const text = String(raw);
   const segments = text.split("：");
@@ -119,11 +126,24 @@ function friendlyTaskError(raw) {
     if (!/[\u4e00-\u9fff]/.test(seg)) break;
     kept.push(seg);
   }
-  if (kept.length) return kept.join("：").trim();
-  for (const [pattern, label] of ERROR_KEYWORD_MAP) {
-    if (pattern.test(text)) return label;
+  let label = text;
+  if (kept.length) {
+    label = kept.join("：").trim();
+  } else {
+    for (const [pattern, mapped] of ERROR_KEYWORD_MAP) {
+      if (pattern.test(text)) {
+        label = mapped;
+        break;
+      }
+    }
   }
-  return text;
+  // R4.61：终态（error）任务不会再自动重试——「稍后自动重试」是文案说谎
+  // （2026-09-26 实测：下载 1.0GB/1.6GB 断流终态失败，卡片却显示「稍后自动重试」，
+  // 用户无从判断要不要手动处理）。终态一律改写为明确的恢复路径。
+  if (status === "error" && /稍后自动重试/.test(label)) {
+    label = label.replace(/\s*稍后自动重试\s*$/, "。已停止自动重试，点「开始」可从断点续传");
+  }
+  return label;
 }
 
 function sortSilentCaches(items) {
@@ -154,7 +174,7 @@ function Avatar({ accountId, peerId, label, size = 40 }) {
   }
   return (
     <span className="avatar avatar-image" style={{ height: size, width: size }}>
-      <img src={avatarUrl(accountId, peerId)} alt={label || "avatar"} loading="lazy" onError={() => setFailed(true)} />
+      <QueuedImage src={avatarUrl(accountId, peerId)} alt={label || "avatar"} onError={() => setFailed(true)} />
     </span>
   );
 }
@@ -254,7 +274,7 @@ function MessageMedia({ accountId, chatId, message, compact = false, onCache, ta
   if (media.kind === "image") {
     return (
       <a className={cx("media-preview image-preview", compact && "compact-media")} href={previewUrl} target="_blank" rel="noreferrer" title="打开原图">
-        <img src={previewUrl} alt={label} loading="lazy" />
+        <QueuedImage src={previewUrl} alt={label} />
       </a>
     );
   }
@@ -284,7 +304,7 @@ function MessageMedia({ accountId, chatId, message, compact = false, onCache, ta
             <Download size={14} />{cacheLabel}
           </button>
           {!active && !failed && playerMode !== "local" ? <button className="video-load-button" type="button" onClick={() => setActive(true)}>
-            <img src={thumbUrl} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} />
+            <QueuedImage src={thumbUrl} alt="" onError={(event) => { event.currentTarget.style.display = "none"; }} />
             <span><Play size={18} />点击播放视频</span>
             {!!media.duration && <b>{formatDuration(media.duration)}</b>}
           </button> : null}
@@ -1284,7 +1304,7 @@ function InfoModal({ announcements, about, open, onClose }) {
 /* 后台缓存面板（R4.15）：原管理后台「缓存信息」tab 整块迁入下载模块，
    与下载任务并列成为下载中心的一个子标签；设置项、运行统计、任务列表、
    批量取消与拖拽排序一并搬过来，能力不减。 */
-function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onControl, onCancel }) {
+function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onControl, onCancel, onStart }) {
   const [dragId, setDragId] = useState("");
   const [selectedIds, setSelectedIds] = useState([]);
   const [error, setError] = useState("");
@@ -1368,6 +1388,9 @@ function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onCon
                 <input className="silent-cache-check" type="checkbox" checked={selectedSet.has(task.id)} onChange={(event) => toggleSelection(task.id, event.target.checked)} onClick={(event) => event.stopPropagation()} />
                 <strong title={task.fileName}>{task.fileName || "Telegram 视频"}</strong>
                 <span>{statusText}</span>
+                {(task.status === "error" || task.status === "paused") && onStart && (
+                  <button type="button" title="开始，从断点续传" onClick={() => onStart?.(task)}><Play size={12} /></button>
+                )}
                 {task.status !== "completed" && task.status !== "cancelled" && <button type="button" title="取消缓存" onClick={() => onCancel?.(task)}><X size={12} /></button>}
               </div>
               <div className="silent-cache-meta">
@@ -1376,7 +1399,7 @@ function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onCon
                 <span>{formatTime(task.updatedAt)}</span>
               </div>
               <div className="mini-progress"><i style={{ width: `${progress}%` }} /></div>
-              {task.error && <small title={task.error}>{friendlyTaskError(task.error)}</small>}
+              {task.error && <small title={task.error}>{friendlyTaskError(task.error, task.status)}</small>}
             </div>
           );
         })}
@@ -1386,7 +1409,7 @@ function CachePanel({ silentCacheState = {}, silentCaches = [], onRefresh, onCon
   );
 }
 
-function DownloadCenter({ open, downloads, onStart, onCancel, onClear, onDelete, onPlay, onClose, tab = "tasks", onTabChange, silentCacheState, silentCaches = [], onRefreshSilentCaches, onSilentCacheControl, onCancelSilentCache }) {
+function DownloadCenter({ open, downloads, onStart, onCancel, onClear, onDelete, onPlay, onClose, tab = "tasks", onTabChange, silentCacheState, silentCaches = [], onRefreshSilentCaches, onSilentCacheControl, onCancelSilentCache, onStartSilentCache }) {
   if (!open) return null;
   const active = downloads.filter((item) => ["queued", "downloading"].includes(item.status)).length;
   const cacheActive = silentCaches.filter((item) => ["running", "downloading", "queued"].includes(item.status)).length;
@@ -1422,6 +1445,7 @@ function DownloadCenter({ open, downloads, onStart, onCancel, onClear, onDelete,
           onRefresh={onRefreshSilentCaches}
           onControl={onSilentCacheControl}
           onCancel={onCancelSilentCache}
+          onStart={onStartSilentCache}
         /> : <div className="download-list">
           {deduped.map((item) => {
             const progress = progressFor(item);
@@ -1451,7 +1475,7 @@ function DownloadCenter({ open, downloads, onStart, onCancel, onClear, onDelete,
                   <span>{formatTime(item.updatedAt)}</span>
                 </div>
                 <div className="download-progress"><i style={{ width: `${progress}%` }} /></div>
-                {item.error && <p className="download-error" title={item.error}>{friendlyTaskError(item.error)}</p>}
+                {item.error && <p className="download-error" title={item.error}>{friendlyTaskError(item.error, item.status)}</p>}
                 <div className="download-actions" onClick={(event) => event.stopPropagation()}>
                   {item.status === "completed" && item.kind === "video" && <button onClick={() => onPlay(item)}><Play size={12} />播放</button>}
                   {item.status !== "downloading" && item.status !== "completed" && <button onClick={() => onStart(item)}><Play size={12} />开始</button>}
@@ -1490,7 +1514,7 @@ function PlaybackModal({ item, playerMode, onClose }) {
   );
 }
 
-function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, autoCacheBusy, mediaLoadingMore, onAutoCacheChange, onClose, onOpenMedia, onLoadMoreMedia }) {
+function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, autoCacheBusy, autoCacheResult, mediaLoadingMore, onAutoCacheChange, onClose, onOpenMedia, onLoadMoreMedia }) {
   const [mediaTab, setMediaTab] = useState("all");
   const contentRef = useRef(null);
   if (!open || !chat) return null;
@@ -1530,6 +1554,9 @@ function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, aut
               <input type="checkbox" checked={Boolean(autoCache)} disabled={autoCacheBusy} onChange={(event) => onAutoCacheChange?.(event.target.checked)} />
               <span>{autoCacheBusy ? "正在提交后台缓存任务" : "后台自动缓存本群大于 100MB 的视频"}</span>
             </label>
+            {/* R4.59：扫描结果持久显示——此前只弹几秒即逝的 toast，用户看到的是
+                「提交后没反应」，无法知道是提交成功/重复/失败。 */}
+            {autoCacheResult && <p className="info-cache-result">{autoCacheResult}</p>}
           </section>
           <section className="chat-info-section">
             <div className="info-resource-head">
@@ -1538,9 +1565,9 @@ function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, aut
             </div>
             <div className={cx("info-resource-grid", mediaTab === "file" && "files")}>
               {visibleResources.map((file) => <button className={cx("info-resource-item", file.kind)} type="button" key={`${file.id}-${file.fileName}`} onClick={() => onOpenMedia?.(file)}>
-                {file.kind === "image" && <img src={mediaUrl(accountId, chat.id, file.id, true)} alt="" loading="lazy" />}
+                {file.kind === "image" && <QueuedImage src={mediaUrl(accountId, chat.id, file.id, true)} alt="" />}
                 {file.kind === "video" && <>
-                  <img src={thumbnailMediaUrl(accountId, chat.id, file.id)} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} />
+                  <QueuedImage src={thumbnailMediaUrl(accountId, chat.id, file.id)} alt="" onError={(event) => { event.currentTarget.style.display = "none"; }} />
                   <Play size={18} />
                   {!!file.duration && <b>{formatDuration(file.duration)}</b>}
                 </>}
@@ -1566,7 +1593,11 @@ function Dashboard({ accounts, downloads, silentCaches, silentCacheState, me, ac
     { icon: <Library size={20} />, tone: "green", value: completed, label: "已完成下载", open: () => onOpenView("downloads", "tasks") },
     { icon: <Folder size={20} />, tone: "red", value: silentCaches.length, label: `缓存任务${silentCacheState?.enabled ? "" : "（已暂停）"}`, open: () => onOpenView("downloads", "cache") }
   ];
-  const recent = downloads.slice(0, 6);
+  // R4.62：近期活动并入后台缓存任务——此前只取 downloads，缓存列表的提交/完成
+  // 在首页完全不可见。合并去重（同媒体手动+自动只留一条）后按更新时间取最近 6 条。
+  const recent = mergeDownloads([...downloads, ...silentCaches])
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+    .slice(0, 6);
   return (
     <div className="fn-dash">
       <div className="fn-stat-grid">
@@ -1596,15 +1627,26 @@ function Dashboard({ accounts, downloads, silentCaches, silentCacheState, me, ac
           </div>
           <div className="fn-card-body">
             <div className="fn-activity-list">
-              {recent.map((item) => <button className="fn-activity-item" key={item.id} onClick={() => onOpenView("downloads")}>
-                <span className={cx("fn-stat-icon", item.status === "completed" ? "fn-stat-icon--green" : "fn-stat-icon--blue")} style={{ height: 32, width: 32 }}>
+              {recent.map((item) => {
+                const isCache = Boolean(item.autoCache) || item.source === "auto";
+                const running = item.status === "downloading" || item.status === "running";
+                const stateClass = item.status === "completed" ? "fn-activity-state--completed" : item.status === "error" ? "fn-activity-state--error" : running ? "fn-activity-state--active" : "";
+                const progress = item.size ? Math.min(100, Math.round((Number(item.downloaded || 0) / Number(item.size)) * 100)) : 0;
+                return <button className="fn-activity-item" key={item.id} onClick={() => onOpenView("downloads", isCache ? "cache" : "tasks")}>
+                <span className={cx("fn-stat-icon", "fn-activity-icon", item.status === "completed" ? "fn-stat-icon--green" : "fn-stat-icon--blue")}>
                   {item.kind === "video" ? <Play size={15} /> : <Download size={15} />}
                 </span>
                 <span className="fn-activity-copy">
                   <strong>{item.fileName || "未命名文件"}</strong>
-                  <small>{item.status === "completed" ? "已完成" : item.status === "error" ? "失败" : item.status === "downloading" ? `下载中 ${formatBytes(item.downloaded)}/${formatBytes(item.size)}` : "排队中"} · {formatTime(item.updatedAt)}</small>
+                  <small>
+                    <span className={cx("fn-activity-state", stateClass)}>{item.status === "completed" ? "已完成" : item.status === "error" ? "失败" : running ? "进行中" : "排队中"}</span>
+                    {running && <span className="fn-activity-meta">{formatBytes(item.downloaded)}/{formatBytes(item.size)}</span>}
+                    <span className="fn-activity-meta">{isCache ? "后台缓存" : "手动下载"} · {formatTime(item.updatedAt)}</span>
+                  </small>
                 </span>
-              </button>)}
+                {running && <span className="fn-activity-progress mini-progress"><i style={{ width: `${progress}%` }} /></span>}
+              </button>;
+              })}
               {!recent.length && <div className="fn-empty">
                 <Library size={28} />
                 <h3>还没有下载记录</h3>
@@ -1725,6 +1767,13 @@ function App() {
     return next;
   });
   const [activeChat, setActiveChat] = useState(null);
+  // R4.53：当前会话键（account:peer）。selectChat 里同步更新，用于防止
+  // 「先渲染缓存/网络回包」时用户已切走导致跨会话串数据。
+  const activeChatKeyRef = useRef("");
+  // R4.55①：会话列表加载去重（借鉴 tdesktop DialogsLoadState 单加载器）。
+  // effect 依赖（accountId/socket/foldersEnabled）变化会重复触发 loadChats，
+  // 2.6.32 实测同 key 并发两遍全量拉取；同 key 在途时直接复用同一 Promise。
+  const chatsLoadRef = useRef(null);
   const [chatStack, setChatStack] = useState([]);
   const [messages, setMessages] = useState([]);
   const [hasOlder, setHasOlder] = useState(false);
@@ -1758,6 +1807,12 @@ function App() {
   const [chatMediaLoadingMore, setChatMediaLoadingMore] = useState(false);
   const [autoCacheChats, setAutoCacheChats] = useState(() => JSON.parse(localStorage.getItem("feigrame.autoCacheChats") || "{}"));
   const [autoCacheBusy, setAutoCacheBusy] = useState(false);
+  // R4.59：后台缓存扫描结果持久显示在勾选框下方（toast 几秒即逝，用户错过就变成「没反应」）。
+  const [autoCacheResult, setAutoCacheResult] = useState(null);
+  // R4.60：提交改异步受理后，前端轮询状态接口取结果；ref 保存定时器与目标会话，
+  // 切换会话/卸载时停止，防止旧会话的轮询结果串写到新会话。
+  const autoCachePollRef = useRef(null);
+  const autoCachePollKeyRef = useRef("");
   const [playback, setPlayback] = useState(null);
   const socket = useSocket(token);
   const messagesRef = useRef(null);
@@ -1856,7 +1911,11 @@ function App() {
         new Notification("Feigram 新消息", { body: appSettings.notificationPreview ? message.text.slice(0, 120) : "收到一条新消息" });
       }
       shouldScrollBottomRef.current = stick;
-      setMessages((current) => [...current, message]);
+      setMessages((current) => {
+        // R4.53：实时新消息也同步进本地缓存（保持缓存与最新窗口一致，幂等去重）。
+        if (activeChat) saveMessages(accountId, activeChat.id, [...current, message], false);
+        return [...current, message];
+      });
     };
     socket.on("message:new", handler);
     return () => socket.off("message:new", handler);
@@ -1982,36 +2041,64 @@ function App() {
 
   async function loadChats(nextQuery = query) {
     if (!accountId) return;
-    setBusy(true);
-    setError("");
-    try {
-      const includeArchived = appSettings.foldersShowArchived ? 1 : 0;
-      // R4.52：会话列表上限放开到 2000 后分页页数更多，加 80s 前端超时兜底（与 R4.51 防卡死一致）。
-      const list = await api(`/api/chats?account=${encodeURIComponent(accountId)}&query=${encodeURIComponent(nextQuery)}&includeArchived=${includeArchived}`, { timeoutMs: 80000 });
-      setChats(list);
-      if (appSettings.foldersAutoSelectFirst && !activeChat) {
-        // R4.19 修复「visible is not defined」：R4.0a 重构归档过滤时删掉了局部变量
-        // visible，却留下 visible[0] 引用——开启「自动选第一个会话」的账号一进会话页
-        // 就抛 ReferenceError，被 catch 顶成「加载失败」错误卡（会话实际已拉到）。
-        // 现按当前文件夹对新 list 过滤后取第一个（state 闭包未更新，不能用 visibleChats）。
-        const firstVisible = filterChatsByFolder(list, activeFolder)[0];
-        if (firstVisible) selectChat(firstVisible);
-      }
-    } catch (err) {
-      const message = String(err.message || "");
-      // 当前账号未就绪（failed/needs-relogin）时不要把整个会话页顶成报错卡：
-      // 自动切到第一个就绪账号（accountId 变化会触发 effect 重新加载）。
-      if (message.includes("尚未就绪")) {
-        const fallback = accounts.find((account) => account.id !== accountId && (account.connected || account.goReady));
-        if (fallback) {
-          setAccountId(fallback.id);
-          showToast(`当前账号未就绪，已自动切换到 ${fallback.displayName || fallback.phone || fallback.id}`);
+    // R4.55①：同账号同查询词的在途请求直接复用（effect 因 socket/设置项
+    // 变化重跑时不再并发二遍全量拉取）。
+    const dedupeKey = `${accountId}|${nextQuery}`;
+    if (chatsLoadRef.current?.key === dedupeKey) return chatsLoadRef.current.promise;
+    const promise = (async () => {
+      setBusy(true);
+      setError("");
+      try {
+        // R4.55②：会话列表缓存秒开（借鉴 TDLib「先读本地库、再连网补增量」）。
+        // 首次打开（列表还是空的）先渲染上次缓存的列表，网络刷新后覆盖；
+        // 手动刷新/搜索（chats 已有内容或 nextQuery 非空）不套缓存。
+        if (!nextQuery && !chats.length) {
+          const cachedList = await cachedChats(accountId);
+          if (cachedList?.length) setChats(cachedList);
+        }
+        const includeArchived = appSettings.foldersShowArchived ? 1 : 0;
+        // R4.52：会话列表上限放开到 2000 后分页页数更多，加 80s 前端超时兜底（与 R4.51 防卡死一致）。
+        const list = await api(`/api/chats?account=${encodeURIComponent(accountId)}&query=${encodeURIComponent(nextQuery)}&includeArchived=${includeArchived}`, { timeoutMs: 80000 });
+        setChats(list);
+        // R4.53：仅在无搜索词时回写缓存——搜索结果是过滤子集，覆盖会污染兜底数据。
+        if (!nextQuery) saveChats(accountId, list);
+        if (appSettings.foldersAutoSelectFirst && !activeChat) {
+          // R4.19 修复「visible is not defined」：R4.0a 重构归档过滤时删掉了局部变量
+          // visible，却留下 visible[0] 引用——开启「自动选第一个会话」的账号一进会话页
+          // 就抛 ReferenceError，被 catch 顶成「加载失败」错误卡（会话实际已拉到）。
+          // 现按当前文件夹对新 list 过滤后取第一个（state 闭包未更新，不能用 visibleChats）。
+          const firstVisible = filterChatsByFolder(list, activeFolder)[0];
+          if (firstVisible) selectChat(firstVisible);
+        }
+      } catch (err) {
+        const message = String(err.message || "");
+        // 当前账号未就绪（failed/needs-relogin）时不要把整个会话页顶成报错卡：
+        // 自动切到第一个就绪账号（accountId 变化会触发 effect 重新加载）。
+        if (message.includes("尚未就绪")) {
+          const fallback = accounts.find((account) => account.id !== accountId && (account.connected || account.goReady));
+          if (fallback) {
+            setAccountId(fallback.id);
+            showToast(`当前账号未就绪，已自动切换到 ${fallback.displayName || fallback.phone || fallback.id}`);
+            return;
+          }
+        }
+        // R4.53：网络失败时兜底显示上次缓存的会话列表（若有），不再整页顶成报错卡。
+        const cachedList = await cachedChats(accountId);
+        if (cachedList?.length) {
+          setChats(cachedList);
+          notify(`网络异常，已显示本地缓存的会话列表：${message}`);
           return;
         }
+        setError(message);
+      } finally {
+        setBusy(false);
       }
-      setError(message);
+    })();
+    chatsLoadRef.current = { key: dedupeKey, promise };
+    try {
+      await promise;
     } finally {
-      setBusy(false);
+      if (chatsLoadRef.current?.promise === promise) chatsLoadRef.current = null;
     }
   }
 
@@ -2029,8 +2116,13 @@ function App() {
 
   async function selectChat(chat, options = {}) {
     setActiveChat(chat);
+    // R4.53：同步记录目标会话键，缓存秒开与网络回包都以此判断「是否仍是当前会话」。
+    const chatCacheKey = cacheKeyOf(accountId, chat.id);
+    activeChatKeyRef.current = chatCacheKey;
     setChatInfoOpen(false);
     setChatDetails(null);
+    setAutoCacheResult(null);
+    stopAutoCachePolling();
     messageNodeRefs.current.clear();
     const targetMessageId = Number(options.messageId || 0);
     if (targetMessageId) {
@@ -2045,19 +2137,36 @@ function App() {
     }
     setBusy(true);
     setLoadingOlder(false);
+    // R4.53：普通打开时先用本地缓存秒开（跳转定位/恢复滚动位置的场景不套缓存，
+    // 避免缓存先渲染干扰滚动定位），网络回包后覆盖界面并回写缓存。
+    let renderedFromCache = false;
+    if (!targetMessageId && !Number.isFinite(options.restoreScrollTop)) {
+      const cached = await cachedMessages(accountId, chat.id);
+      if (cached && activeChatKeyRef.current === chatCacheKey) {
+        renderedFromCache = true;
+        setMessages(cached.items);
+        setHasOlder(!cached.reachedEnd);
+        setBusy(false);
+      }
+    }
     try {
       const around = targetMessageId ? `&around=${encodeURIComponent(targetMessageId)}` : "";
       const list = await api(`/api/messages?account=${encodeURIComponent(accountId)}&peer=${encodeURIComponent(chat.id)}&limit=80${around}`, { timeoutMs: 80000 });
+      if (activeChatKeyRef.current !== chatCacheKey) return;
       setMessages(list);
       setHasOlder(list.length >= 80);
+      saveMessages(accountId, chat.id, list, false);
       if (targetMessageId && !list.some((message) => Number(message.id) === targetMessageId)) {
         pendingScrollRef.current = null;
         notify("你要访问的内容已被删除");
       }
     } catch (err) {
-      setError(err.message);
+      if (activeChatKeyRef.current !== chatCacheKey) return;
+      // R4.53：缓存已渲染时网络失败只轻提示，不把整个会话页顶成报错卡。
+      if (renderedFromCache) notify(`刷新失败，正在显示本地缓存：${err.message}`);
+      else setError(err.message);
     } finally {
-      setBusy(false);
+      if (activeChatKeyRef.current === chatCacheKey) setBusy(false);
     }
   }
 
@@ -2149,6 +2258,88 @@ function App() {
     }
   }
 
+  // R4.60：把扫描统计翻译成用户文案（原 R4.57 逻辑，供轮询完成后复用）。
+  function describeAutoCacheResult(result) {
+    let text;
+    if (result.queued > 0) {
+      const extra = [];
+      if (result.duplicates) extra.push(`${result.duplicates} 个已在队列`);
+      if (result.failed) extra.push(`${result.failed} 个失败`);
+      text = `已提交 ${result.queued} 个后台视频缓存任务（扫描最近 ${result.scanned ?? "?"} 条消息${extra.length ? `，${extra.join("，")}` : ""}）`;
+    } else {
+      const reason = result.failed
+        ? `${result.failed} 个入队失败`
+        : result.duplicates
+          ? `${result.duplicates} 个已在队列，无需重复提交`
+          : "最近消息里没有大于 100MB 的视频";
+      text = `扫描最近 ${result.scanned ?? "?"} 条消息，未新增缓存任务：${reason}`;
+    }
+    return text;
+  }
+
+  function stopAutoCachePolling() {
+    if (autoCachePollRef.current) {
+      clearInterval(autoCachePollRef.current);
+      autoCachePollRef.current = null;
+    }
+    autoCachePollKeyRef.current = "";
+  }
+
+  // R4.60：轮询后台扫描状态直到 done/error；切会话（key 变化）即停，防止串写。
+  function startAutoCachePolling(accId, chatId) {
+    stopAutoCachePolling();
+    const key = `${accId}:${chatId}`;
+    autoCachePollKeyRef.current = key;
+    // 15 分钟兜底：超时后停止轮询但后台扫描仍在跑，提示去缓存列表确认。
+    const deadline = Date.now() + 15 * 60 * 1000;
+    const rollbackCheckbox = () => {
+      setAutoCacheChats((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        try { localStorage.setItem("feigrame.autoCacheChats", JSON.stringify(next)); } catch {}
+        return next;
+      });
+    };
+    autoCachePollRef.current = setInterval(async () => {
+      if (autoCachePollKeyRef.current !== key) {
+        stopAutoCachePolling();
+        return;
+      }
+      try {
+        const state = await api(`/api/chats/${encodeURIComponent(accId)}/${encodeURIComponent(chatId)}/cache-large-videos`, { timeoutMs: 20000 });
+        if (autoCachePollKeyRef.current !== key) return;
+        if (state.status === "done") {
+          const text = describeAutoCacheResult(state.result || {});
+          stopAutoCachePolling();
+          setAutoCacheResult(text);
+          notify(text);
+        } else if (state.status === "error") {
+          const text = `提交失败：${state.error || "未知错误"}（可取消勾选后重新勾选重试）`;
+          stopAutoCachePolling();
+          setAutoCacheResult(text);
+          notify(text);
+          rollbackCheckbox();
+        } else if (state.status === "none") {
+          const text = "后台扫描已中断（应用重启），请重新勾选提交";
+          stopAutoCachePolling();
+          setAutoCacheResult(text);
+          rollbackCheckbox();
+        } else if (Date.now() > deadline) {
+          const text = "后台扫描耗时较长，仍在进行中；可稍后在缓存列表查看结果";
+          stopAutoCachePolling();
+          setAutoCacheResult(text);
+        }
+      } catch {
+        // 单次轮询失败（网络抖动）不终止轮询，直到兜底时限。
+        if (Date.now() > deadline && autoCachePollKeyRef.current === key) {
+          const text = "后台扫描状态查询超时，可稍后在缓存列表查看结果";
+          stopAutoCachePolling();
+          setAutoCacheResult(text);
+        }
+      }
+    }, 2500);
+  }
+
   async function setChatAutoCache(enabled) {
     if (!activeChat) return;
     const key = `${accountId}:${activeChat.id}`;
@@ -2156,17 +2347,37 @@ function App() {
     if (!enabled) delete next[key];
     setAutoCacheChats(next);
     localStorage.setItem("feigrame.autoCacheChats", JSON.stringify(next));
-    if (!enabled) return;
+    if (!enabled) {
+      stopAutoCachePolling();
+      setAutoCacheResult(null);
+      return;
+    }
     setAutoCacheBusy(true);
+    setAutoCacheResult(null);
+    const accId = accountId;
+    const chatId = activeChat.id;
     try {
-      const result = await api(`/api/chats/${encodeURIComponent(accountId)}/${encodeURIComponent(activeChat.id)}/cache-large-videos`, { method: "POST" });
-      notify(result.queued ? `已提交 ${result.queued} 个后台视频缓存任务` : "没有需要后台缓存的大视频");
+      // R4.60：提交只受理（秒回），扫描在 Node 后台执行——代理差时不再顶穿
+      // 前端超时；结果/失败原因由轮询显示在勾选框下方。
+      await api(`/api/chats/${encodeURIComponent(accId)}/${encodeURIComponent(chatId)}/cache-large-videos`, { method: "POST", timeoutMs: 15000 });
+      setAutoCacheResult("已开始后台扫描本群最近消息，结果出来后显示在这里…");
+      startAutoCachePolling(accId, chatId);
     } catch (err) {
+      setAutoCacheResult(`提交失败：${err.message}`);
       notify(err.message);
+      setAutoCacheChats((prev) => {
+        const rolled = { ...prev };
+        delete rolled[key];
+        try { localStorage.setItem("feigrame.autoCacheChats", JSON.stringify(rolled)); } catch {}
+        return rolled;
+      });
     } finally {
       setAutoCacheBusy(false);
     }
   }
+
+  // R4.60：组件卸载时停止后台扫描状态轮询，防泄漏。
+  useEffect(() => () => stopAutoCachePolling(), []);
 
   async function reloadActiveMessages() {
     if (!activeChat) return;
@@ -2175,6 +2386,8 @@ function App() {
     const list = await api(`/api/messages?account=${encodeURIComponent(accountId)}&peer=${encodeURIComponent(activeChat.id)}&limit=80`, { timeoutMs: 80000 });
     setMessages(list);
     setHasOlder(list.length >= 80);
+    // R4.53：刷新结果回写本地缓存。
+    saveMessages(accountId, activeChat.id, list, false);
     requestAnimationFrame(() => {
       if (element) element.scrollTop = top;
     });
@@ -2192,10 +2405,16 @@ function App() {
       // R4.51：空页说明已到历史尽头，收起按钮而不是反复可点。
       if (!older.length) {
         setHasOlder(false);
+        // R4.53：已到历史尽头，缓存里记录 reachedEnd，下次秒开时不再显示「加载更早消息」。
+        saveMessages(accountId, activeChat.id, messages, true);
         notify("没有更早的消息了");
         return;
       }
-      setMessages((current) => [...older, ...current]);
+      setMessages((current) => {
+        // R4.53：合并结果回写本地缓存（saveMessages 内部按 id 去重，重复调用幂等）。
+        saveMessages(accountId, activeChat.id, [...older, ...current], false);
+        return [...older, ...current];
+      });
       setHasOlder(older.length >= 80);
       requestAnimationFrame(() => {
         if (element) element.scrollTop = element.scrollHeight - previousHeight;
@@ -2305,7 +2524,11 @@ function App() {
     try {
       const sent = await api("/api/messages", { method: "POST", body: JSON.stringify({ account: accountId, peer: activeChat.id, text }) });
       shouldScrollBottomRef.current = true;
-      setMessages((current) => [...current, sent]);
+      setMessages((current) => {
+        // R4.53：发出的消息同步进本地缓存（saveMessages 内部幂等去重）。
+        saveMessages(accountId, activeChat.id, [...current, sent], false);
+        return [...current, sent];
+      });
     } catch (err) {
       setError(err.message);
       setDraft(text);
@@ -2387,6 +2610,17 @@ function App() {
       const result = await api("/api/silent-cache/control", { method: "PUT", body: JSON.stringify(patch) });
       setSilentCacheState({ enabled: result.enabled !== false, rateLimitBps: Number(result.rateLimitBps || 0), concurrency: Number(result.concurrency || 1), mode: result.mode || "conservative" });
       setSilentCaches(sortSilentCaches(result.tasks || []));
+    } catch (err) {
+      notify(err.message);
+    }
+  }
+
+  async function startSilentCache(task) {
+    try {
+      // 缓存任务与下载任务同一 Go 任务库，复用 start（queueTask）接口断点续传。
+      await api(`/api/downloads/${encodeURIComponent(task.id)}/start`, { method: "POST" });
+      await loadSilentCaches();
+      notify("已开始，从断点续传");
     } catch (err) {
       notify(err.message);
     }
@@ -2522,6 +2756,7 @@ function App() {
             onRefreshSilentCaches={loadSilentCaches}
             onSilentCacheControl={updateSilentCacheControl}
             onCancelSilentCache={cancelSilentCache}
+            onStartSilentCache={startSilentCache}
           />}
           {view === "chats" && <div className={cx("app-shell fn-chats", activeChat && "chat-open")}>
       <aside className="sidebar">
@@ -2667,6 +2902,7 @@ function App() {
         details={chatDetails}
         loading={chatDetailsLoading}
         autoCache={activeChat ? autoCacheChats[`${accountId}:${activeChat.id}`] : false}
+        autoCacheResult={autoCacheResult}
         autoCacheBusy={autoCacheBusy}
         mediaLoadingMore={chatMediaLoadingMore}
         onAutoCacheChange={setChatAutoCache}

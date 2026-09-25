@@ -230,21 +230,41 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	client, err := a.newTelegramClient(account, apiHash)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+
+	// R4.54：JSON 查询类动作（含 send/button/details/avatar）全部复用账号常驻连接，
+	// 免去每请求 TCP+握手与并发新连接风暴；blob 长传输保留每请求独立连接，
+	// 避免大流量挤占共享连接。
+	var client *telegram.Client
+	var runner chatRunner
+	if action == "blob" {
+		client, err = a.newTelegramClient(account, apiHash)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		// R4.55：修复自引用闭包（runner 调 runner = 无限递归）。blob 走
+		// serveNativeMediaBlob 直传 client，此 runner 仅作兜底不被常规路径触达。
+		perRequestRunner := a.runNativeChatQuery
+		runner = func(ctx context.Context, fn func(context.Context, *tg.Client) (any, error)) (any, error) {
+			return perRequestRunner(ctx, client, fn)
+		}
+	} else {
+		runner, err = a.pooledChatRunner(account, apiHash)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": compactError(err)})
+			return
+		}
 	}
 
 	// M4.3：写路径（send/button）与会话详情（details）转交 chatwrite.go，
 	// 它自带超时控制与 JSON body 解析，避免在此处重复分支。
 	// M4.4：链接解析（resolve）与全局搜索（search）转交 chatsearch.go。
 	if action == "send" || action == "button" || action == "details" {
-		a.handleAccountWrite(w, r, action, account, client, r.URL.Query())
+		a.handleAccountWrite(w, r, action, account, runner, r.URL.Query())
 		return
 	}
 	if action == "resolve" || action == "search" {
-		a.handleAccountSearch(w, r, action, account, client, r.URL.Query())
+		a.handleAccountSearch(w, r, action, account, runner, r.URL.Query())
 		return
 	}
 
@@ -254,11 +274,12 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "dialogs":
 		limit := clampChatLimit(query.Get("limit"), defaultChatDialogLimit, maxChatDialogLimit)
-		// R4.0a：默认不显示归档时，没必要每次都额外拉 folder 1（双倍 RPC 开销，
-		// 结果还会被前端过滤掉）。只有调用方显式要归档才拉。
 		includeArchived := query.Get("includeArchived") == "1" || query.Get("includeArchived") == "true"
-		items, err := a.runNativeChatQuery(ctx, client, func(ctx context.Context, api *tg.Client) (any, error) {
-			return a.fetchNativeDialogs(ctx, api, account, limit, query.Get("query"), includeArchived)
+		// R4.55①：走 single-flight + 30s TTL 缓存——并发的 /api/chats 与
+		// folders 的全量重拉共享同一次分页拉取（2.6.32 实测一次打开并发 2~3 遍
+		// 全量拉取把列表拖到超时）。
+		items, err := runner(ctx, func(ctx context.Context, api *tg.Client) (any, error) {
+			return a.cachedNativeDialogs(ctx, api, account, limit, query.Get("query"), includeArchived)
 		})
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": compactError(err)})
@@ -266,7 +287,7 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, items)
 	case "folders":
-		items, err := a.runNativeChatQuery(ctx, client, func(ctx context.Context, api *tg.Client) (any, error) {
+		items, err := runner(ctx, func(ctx context.Context, api *tg.Client) (any, error) {
 			return a.fetchNativeFolders(ctx, api, account)
 		})
 		if err != nil {
@@ -283,7 +304,7 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 		limit := clampChatLimit(query.Get("limit"), defaultChatMessageLimit, maxChatMessageLimit)
 		before := intFromQuery(query.Get("before"))
 		around := intFromQuery(query.Get("around"))
-		items, err := a.runNativeChatQuery(ctx, client, func(ctx context.Context, api *tg.Client) (any, error) {
+		items, err := runner(ctx, func(ctx context.Context, api *tg.Client) (any, error) {
 			return a.fetchNativeMessages(ctx, api, account, peer, limit, before, around)
 		})
 		if err != nil {
@@ -303,7 +324,7 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		limit := clampChatLimit(query.Get("limit"), 30, maxChatMessageLimit/4)
 		before := intFromQuery(query.Get("before"))
-		items, err := a.runNativeChatQuery(ctx, client, func(ctx context.Context, api *tg.Client) (any, error) {
+		items, err := runner(ctx, func(ctx context.Context, api *tg.Client) (any, error) {
 			return a.fetchNativeMedia(ctx, api, account, peer, limit, before)
 		})
 		if err != nil {
@@ -321,7 +342,7 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少 peer 参数"})
 			return
 		}
-		info, err := a.runNativeChatQuery(ctx, client, func(ctx context.Context, api *tg.Client) (any, error) {
+		info, err := runner(ctx, func(ctx context.Context, api *tg.Client) (any, error) {
 			return a.resolveNativePeer(ctx, api, account, peer)
 		})
 		if err != nil {
@@ -330,7 +351,7 @@ func (a *App) handleAccountAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, info)
 	case "avatar":
-		data, err := a.fetchNativeAvatar(ctx, client, account, query.Get("peer"))
+		data, err := a.pooledChatAvatar(ctx, account, apiHash, query.Get("peer"))
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": compactError(err)})
 			return
@@ -883,7 +904,9 @@ func nativeDialogMuted(dialog *tg.Dialog) bool {
 // --- 文件夹 ---------------------------------------------------------------
 
 func (a *App) fetchNativeFolders(ctx context.Context, api *tg.Client, account NativeAccount) ([]map[string]any, error) {
-	chats, err := a.fetchNativeDialogs(ctx, api, account, maxChatDialogLimit, "", true)
+	// R4.55①：走缓存层——folders 请求通常紧跟 /api/chats 到达（前端 250ms 后触发），
+	// 直接复用刚拉好的全量列表，不再重复翻 6 页。
+	chats, err := a.cachedNativeDialogs(ctx, api, account, maxChatDialogLimit, "", true)
 	if err != nil {
 		return nil, err
 	}
@@ -1871,40 +1894,38 @@ func peerIDFromPeerClass(peer tg.PeerClass) string {
 
 // --- 头像 -----------------------------------------------------------------
 
-func (a *App) fetchNativeAvatar(ctx context.Context, client *telegram.Client, account NativeAccount, peerID string) ([]byte, error) {
+// fetchNativeAvatarOnAPI 在已就绪的连接上拉取头像字节（R4.54：由调用方提供
+// 常驻池连接或独立连接，本函数不再自行 client.Run）。
+func (a *App) fetchNativeAvatarOnAPI(ctx context.Context, api *tg.Client, client *telegram.Client, account NativeAccount, peerID string) ([]byte, error) {
 	var (
 		data []byte
 		err  error
 	)
-	runErr := client.Run(ctx, func(ctx context.Context) error {
-		api := client.API()
-		info := nativePeerInfo{PeerID: peerID}
-		if peerID == "" || peerID == "__self" {
-			self, selfErr := a.nativeSelfInfo(ctx, api)
-			if selfErr != nil {
-				return selfErr
-			}
-			info = self
-		} else {
-			resolved, resolveErr := a.resolveNativePeer(ctx, api, account, peerID)
-			if resolveErr != nil {
-				return resolveErr
-			}
-			info = resolved
+	info := nativePeerInfo{PeerID: peerID}
+	if peerID == "" || peerID == "__self" {
+		self, selfErr := a.nativeSelfInfo(ctx, api)
+		if selfErr != nil {
+			return nil, selfErr
 		}
-		if !info.HasPhoto || info.PhotoID == 0 {
-			return errors.New("暂无头像")
+		info = self
+	} else {
+		resolved, resolveErr := a.resolveNativePeer(ctx, api, account, peerID)
+		if resolveErr != nil {
+			return nil, resolveErr
 		}
-		peer, peerErr := nativeInputPeerFromInfo(info)
-		if peerErr != nil {
-			return peerErr
-		}
-		location := &tg.InputPeerPhotoFileLocation{Peer: peer, PhotoID: info.PhotoID}
-		data, err = downloadNativeFile(ctx, client, location)
-		return err
-	})
-	if runErr != nil {
-		return nil, runErr
+		info = resolved
+	}
+	if !info.HasPhoto || info.PhotoID == 0 {
+		return nil, errors.New("暂无头像")
+	}
+	peer, peerErr := nativeInputPeerFromInfo(info)
+	if peerErr != nil {
+		return nil, peerErr
+	}
+	location := &tg.InputPeerPhotoFileLocation{Peer: peer, PhotoID: info.PhotoID}
+	data, err = downloadNativeFile(ctx, client, location)
+	if err != nil {
+		return nil, err
 	}
 	if len(data) == 0 {
 		return nil, errors.New("暂无头像")
