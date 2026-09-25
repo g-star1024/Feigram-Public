@@ -14,6 +14,16 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.36",
+    title: "Feigram 2.6.36 更新",
+    version: "2.6.36",
+    level: "success",
+    createdAt: "2026-09-25T10:00:00.000Z",
+    body: [
+"任务日志加来源标签：后台缓存与手动下载任务在日志中以 [auto-cache] / [manual] 区分（任务启动与自动重试日志均生效），排障时一眼可辨请求来源"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.35",
     title: "Feigram 2.6.35 更新",
     version: "2.6.35",

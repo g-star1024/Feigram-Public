@@ -958,7 +958,10 @@ func (a *App) pumpOnce() bool {
 		started = true
 		// R4.25：任务启动必须留日志。此前启动无日志、失败才有日志，
 		// 「任务到底有没有被调度」在用户日志里无从判断（2.6.2 排障盲区）。
-		log.Printf("task %s start: transport=%s offset=%d/%d file=%s", task.ID, transport, task.Downloaded, task.Size, task.FilePath)
+		// R4.58：启动日志带来源标签（[auto-cache]/[manual]）——此前 auto 与手动
+		// 任务在日志里无法区分，用户取消手动任务后看到持续请求无法判断来源
+		// （2026-09-25 实测排障）。
+		log.Printf("task %s[%s] start: transport=%s offset=%d/%d file=%s", task.ID, taskSourceTag(&task), transport, task.Downloaded, task.Size, task.FilePath)
 		if isAutoCache(task) {
 			a.lastAutoSpawn = time.Now()
 			autoRunning++
@@ -1079,7 +1082,7 @@ func (a *App) runTask(id string, cancel <-chan struct{}) {
 					t.Error = fmt.Sprintf("%s，%s 后自动续传：%s", reason, formatDuration(delay), compactError(err))
 					t.UpdatedAt = now()
 				})
-				a.taskEventLog(id, fmt.Sprintf("transient failure, retry in %s: %v", delay, err))
+				a.taskEventLog(id, fmt.Sprintf("[%s] transient failure, retry in %s: %v", taskSourceTag(task), delay, err))
 				return
 			}
 			a.updateTask(id, func(t *Task) {
@@ -4257,6 +4260,15 @@ func transientSourceError(err error) bool {
 		}
 	}
 	return false
+}
+
+// taskSourceTag 返回任务的来源标签，用于日志一眼区分后台缓存与手动任务
+// （R4.58：2026-09-25 用户取消手动任务后无法判断日志中持续请求的来源）。
+func taskSourceTag(t *Task) string {
+	if t.AutoCache || t.Source == "auto" {
+		return "auto-cache"
+	}
+	return "manual"
 }
 
 // maxTransientRetries 瞬态失败（媒体源不可达/网络抖动等）的自动重试上限。
