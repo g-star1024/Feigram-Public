@@ -46,7 +46,9 @@ const IDLE_SPEED_RESET_MS = 20 * 1000;
 // 会话列表总量上限。R4.36：Go 侧此前只发一次 messages.getDialogs，而 MTProto
 // 单页硬上限是 100——用户会话数超过 100 时列表就显示不全（第 100 条之后的群组
 // 永不出现）。Go 侧已改为真分页累加，此上限现在才真正生效。
-const DIALOG_FETCH_LIMIT = 500;
+// R4.52：500 → 2000，与 Go 侧 maxChatDialogLimit 对齐——用户实测 545 条会话
+// 只显示 500 条，分页深翻能力（30 轮×100）本就足够，此前是总量上限卡住了。
+const DIALOG_FETCH_LIMIT = 2000;
 
 function stableId(prefix, ...parts) {
   return `${prefix}_${crypto.createHash("sha1").update(parts.map((part) => String(part ?? "")).join("|")).digest("hex").slice(0, 24)}`;

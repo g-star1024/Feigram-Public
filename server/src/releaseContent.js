@@ -14,6 +14,17 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.30",
+    title: "Feigram 2.6.30 更新",
+    version: "2.6.30",
+    level: "success",
+    createdAt: "2026-09-25T00:30:42.000Z",
+    body: [
+"修复群组列表加载不全：会话列表扫描上限从 500 放开到 2000（此前服务端有 545+ 会话只显示 500 条，分组里缺的会话就是这个截断导致）",
+      "会话列表前端请求同步加 80 秒超时兜底，列表变大后也不会出现永久加载"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.29",
     title: "Feigram 2.6.29 更新",
     version: "2.6.29",
@@ -56,16 +67,6 @@ const announcements = [
     createdAt: "2026-09-24T22:08:26.000Z",
     body: [
 "资源库「已缓存」徽标改为绿色，与「缓存中」（黄色）状态明确区分"
-    ].join("\n")
-  },
-  {
-    id: "release-2.6.25",
-    title: "Feigram 2.6.25 更新",
-    version: "2.6.25",
-    level: "success",
-    createdAt: "2026-09-24T21:59:20.000Z",
-    body: [
-"桌面图标显示名称「feigram」改为首字母大写的「Feigram」"
     ].join("\n")
   },
 ];

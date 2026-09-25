@@ -1986,7 +1986,8 @@ function App() {
     setError("");
     try {
       const includeArchived = appSettings.foldersShowArchived ? 1 : 0;
-      const list = await api(`/api/chats?account=${encodeURIComponent(accountId)}&query=${encodeURIComponent(nextQuery)}&includeArchived=${includeArchived}`);
+      // R4.52：会话列表上限放开到 2000 后分页页数更多，加 80s 前端超时兜底（与 R4.51 防卡死一致）。
+      const list = await api(`/api/chats?account=${encodeURIComponent(accountId)}&query=${encodeURIComponent(nextQuery)}&includeArchived=${includeArchived}`, { timeoutMs: 80000 });
       setChats(list);
       if (appSettings.foldersAutoSelectFirst && !activeChat) {
         // R4.19 修复「visible is not defined」：R4.0a 重构归档过滤时删掉了局部变量
