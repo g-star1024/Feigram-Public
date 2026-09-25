@@ -1514,13 +1514,15 @@ function PlaybackModal({ item, playerMode, onClose }) {
   );
 }
 
-function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, autoCacheBusy, autoCacheResult, mediaLoadingMore, onAutoCacheChange, onClose, onOpenMedia, onLoadMoreMedia }) {
+function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, autoCacheBusy, autoCacheResult, mediaLoadingMore, cachedKeys, onAutoCacheChange, onClose, onOpenMedia, onLoadMoreMedia }) {
   const [mediaTab, setMediaTab] = useState("all");
   const contentRef = useRef(null);
   if (!open || !chat) return null;
   const info = details || chat;
   const resources = info.files || [];
   const visibleResources = mediaTab === "all" ? resources : resources.filter((file) => file.kind === mediaTab);
+  // R4.65：已提交/已缓存的视频标 ✅（下载中/排队/已完成都算；已取消不算）。
+  const isCached = (file) => Boolean(cachedKeys?.has(`${chat.id}:${file.id}`));
   return (
     <aside className="chat-info-panel">
       <header>
@@ -1565,6 +1567,7 @@ function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, aut
             </div>
             <div className={cx("info-resource-grid", mediaTab === "file" && "files")}>
               {visibleResources.map((file) => <button className={cx("info-resource-item", file.kind)} type="button" key={`${file.id}-${file.fileName}`} onClick={() => onOpenMedia?.(file)}>
+                {isCached(file) && <b className="info-resource-cached" title="已在缓存队列或已完成">✓</b>}
                 {file.kind === "image" && <QueuedImage src={mediaUrl(accountId, chat.id, file.id, true)} alt="" />}
                 {file.kind === "video" && <>
                   <QueuedImage src={thumbnailMediaUrl(accountId, chat.id, file.id)} alt="" onError={(event) => { event.currentTarget.style.display = "none"; }} />
@@ -1813,6 +1816,16 @@ function App() {
   // 切换会话/卸载时停止，防止旧会话的轮询结果串写到新会话。
   const autoCachePollRef = useRef(null);
   const autoCachePollKeyRef = useRef("");
+  // R4.65：已提交/已缓存媒体的 key 集合（peerId:messageId），供群信息面板视频
+  // 列表标 ✅——下载中/排队/已完成都算已提交；已取消/已清除的不算。
+  const cachedMediaKeys = useMemo(() => {
+    const keys = new Set();
+    for (const task of mergeDownloads([...downloads, ...silentCaches])) {
+      if (!["queued", "downloading", "running", "completed"].includes(task.status)) continue;
+      if (task.peerId && task.messageId) keys.add(`${task.peerId}:${task.messageId}`);
+    }
+    return keys;
+  }, [downloads, silentCaches]);
   const [playback, setPlayback] = useState(null);
   const socket = useSocket(token);
   const messagesRef = useRef(null);
@@ -2260,11 +2273,13 @@ function App() {
 
   // R4.60：把扫描统计翻译成用户文案（原 R4.57 逻辑，供轮询完成后复用）。
   function describeAutoCacheResult(result) {
+    // R4.65：单次提交上限 30——大群超出部分计「跳过」，重新勾选会跳过已提交的继续补。
     let text;
     if (result.queued > 0) {
       const extra = [];
       if (result.duplicates) extra.push(`${result.duplicates} 个已在队列`);
       if (result.failed) extra.push(`${result.failed} 个失败`);
+      if (result.capped) extra.push("已达单次上限 30");
       text = `已提交 ${result.queued} 个后台视频缓存任务（扫描最近 ${result.scanned ?? "?"} 条消息${extra.length ? `，${extra.join("，")}` : ""}）`;
     } else {
       const reason = result.failed
@@ -2358,8 +2373,10 @@ function App() {
     const chatId = activeChat.id;
     try {
       // R4.60：提交只受理（秒回），扫描在 Node 后台执行——代理差时不再顶穿
-      // 前端超时；结果/失败原因由轮询显示在勾选框下方。
-      await api(`/api/chats/${encodeURIComponent(accId)}/${encodeURIComponent(chatId)}/cache-large-videos`, { method: "POST", timeoutMs: 15000 });
+      // 前端超时；结果/失败原因由轮询显示在勾选框下方。R4.65：受理超时放宽
+      // 30s——浏览器 6 连接被媒体占满时 POST 也可能在内部排队（R4.64 头像
+      // 缓存上线后此场景大幅减少）。
+      await api(`/api/chats/${encodeURIComponent(accId)}/${encodeURIComponent(chatId)}/cache-large-videos`, { method: "POST", timeoutMs: 30000 });
       setAutoCacheResult("已开始后台扫描本群最近消息，结果出来后显示在这里…");
       startAutoCachePolling(accId, chatId);
     } catch (err) {
@@ -2905,6 +2922,7 @@ function App() {
         autoCacheResult={autoCacheResult}
         autoCacheBusy={autoCacheBusy}
         mediaLoadingMore={chatMediaLoadingMore}
+        cachedKeys={cachedMediaKeys}
         onAutoCacheChange={setChatAutoCache}
         onLoadMoreMedia={loadMoreChatMedia}
         onOpenMedia={openInfoMedia}

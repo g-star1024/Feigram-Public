@@ -1096,6 +1096,8 @@ async function cacheVideoSilentlyGo(userId, accountId, peerId, message, entity =
 // 现在提交即受理（秒回 { started:true }），扫描在后台执行，结果经同路径 GET
 // 状态接口轮询取回；各阶段打点日志，失败原因记入 job.error 不静默。
 const autoCacheJobs = new Map();
+// R4.65：单次后台缓存提交上限——大群几百个视频不再一次性全部入队。
+const AUTO_CACHE_SUBMIT_CAP = 30;
 
 function autoCacheJobKey(userId, accountId, peerId) {
   return `${userId}|${accountId}|${peerId}`;
@@ -1152,8 +1154,11 @@ async function runAutoCacheScan(userId, accountId, peerId, job, key) {
     let duplicates = 0;
     let skipped = 0;
     let failed = 0;
+    // R4.65：单次提交上限 30——大群几百个视频不再一次性全部入队挤占
+    // 并发与磁盘；超出部分计 skipped，下一轮勾选会按重复跳过已提交的继续补。
     for (const item of recent) {
       if (!item || !item.media || !item.media.hasPreview) continue;
+      if (queued >= AUTO_CACHE_SUBMIT_CAP) { skipped += 1; continue; }
       const message = goMessageToNodeMessage(item);
       try {
         const status = await cacheVideoSilentlyGo(userId, accountId, peerId, message, entity);
@@ -1165,7 +1170,7 @@ async function runAutoCacheScan(userId, accountId, peerId, job, key) {
         console.warn(`[auto-cache] ${key} 消息 ${item.id} 入队失败: ${err.message}`);
       }
     }
-    job.result = { queued, scanned: recent.length, duplicates, skipped, failed };
+    job.result = { queued, scanned: recent.length, duplicates, skipped, failed, capped: queued >= AUTO_CACHE_SUBMIT_CAP };
     job.status = "done";
     console.log(`[auto-cache] ${key} 完成：新增 ${queued}/重复 ${duplicates}/跳过 ${skipped}/失败 ${failed}，总耗时 ${Date.now() - startedMs}ms`);
   } catch (err) {
