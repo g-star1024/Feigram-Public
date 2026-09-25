@@ -29,6 +29,7 @@ import {
   X
 } from "lucide-react";
 import { api, appLogin, getToken, setToken as saveToken } from "./api";
+import { cachedChats, cachedMessages, saveChats, saveMessages } from "./chatCache";
 import "./styles/tokens.css";
 import "./styles/app.css";
 import "./styles/shell.css";
@@ -36,6 +37,11 @@ import "./styles/screens.css";
 
 function cx(...items) {
   return items.filter(Boolean).join(" ");
+}
+
+// R4.53：会话缓存键（与 chatCache.js 的 cacheKey 保持一致：account:peer）。
+function cacheKeyOf(accountId, peerId) {
+  return `${accountId}:${peerId}`;
 }
 
 /*
@@ -1725,6 +1731,9 @@ function App() {
     return next;
   });
   const [activeChat, setActiveChat] = useState(null);
+  // R4.53：当前会话键（account:peer）。selectChat 里同步更新，用于防止
+  // 「先渲染缓存/网络回包」时用户已切走导致跨会话串数据。
+  const activeChatKeyRef = useRef("");
   const [chatStack, setChatStack] = useState([]);
   const [messages, setMessages] = useState([]);
   const [hasOlder, setHasOlder] = useState(false);
@@ -1856,7 +1865,11 @@ function App() {
         new Notification("Feigram 新消息", { body: appSettings.notificationPreview ? message.text.slice(0, 120) : "收到一条新消息" });
       }
       shouldScrollBottomRef.current = stick;
-      setMessages((current) => [...current, message]);
+      setMessages((current) => {
+        // R4.53：实时新消息也同步进本地缓存（保持缓存与最新窗口一致，幂等去重）。
+        if (activeChat) saveMessages(accountId, activeChat.id, [...current, message], false);
+        return [...current, message];
+      });
     };
     socket.on("message:new", handler);
     return () => socket.off("message:new", handler);
@@ -1989,6 +2002,8 @@ function App() {
       // R4.52：会话列表上限放开到 2000 后分页页数更多，加 80s 前端超时兜底（与 R4.51 防卡死一致）。
       const list = await api(`/api/chats?account=${encodeURIComponent(accountId)}&query=${encodeURIComponent(nextQuery)}&includeArchived=${includeArchived}`, { timeoutMs: 80000 });
       setChats(list);
+      // R4.53：仅在无搜索词时回写缓存——搜索结果是过滤子集，覆盖会污染兜底数据。
+      if (!nextQuery) saveChats(accountId, list);
       if (appSettings.foldersAutoSelectFirst && !activeChat) {
         // R4.19 修复「visible is not defined」：R4.0a 重构归档过滤时删掉了局部变量
         // visible，却留下 visible[0] 引用——开启「自动选第一个会话」的账号一进会话页
@@ -2008,6 +2023,13 @@ function App() {
           showToast(`当前账号未就绪，已自动切换到 ${fallback.displayName || fallback.phone || fallback.id}`);
           return;
         }
+      }
+      // R4.53：网络失败时兜底显示上次缓存的会话列表（若有），不再整页顶成报错卡。
+      const cachedList = await cachedChats(accountId);
+      if (cachedList?.length) {
+        setChats(cachedList);
+        notify(`网络异常，已显示本地缓存的会话列表：${message}`);
+        return;
       }
       setError(message);
     } finally {
@@ -2029,6 +2051,9 @@ function App() {
 
   async function selectChat(chat, options = {}) {
     setActiveChat(chat);
+    // R4.53：同步记录目标会话键，缓存秒开与网络回包都以此判断「是否仍是当前会话」。
+    const chatCacheKey = cacheKeyOf(accountId, chat.id);
+    activeChatKeyRef.current = chatCacheKey;
     setChatInfoOpen(false);
     setChatDetails(null);
     messageNodeRefs.current.clear();
@@ -2045,19 +2070,36 @@ function App() {
     }
     setBusy(true);
     setLoadingOlder(false);
+    // R4.53：普通打开时先用本地缓存秒开（跳转定位/恢复滚动位置的场景不套缓存，
+    // 避免缓存先渲染干扰滚动定位），网络回包后覆盖界面并回写缓存。
+    let renderedFromCache = false;
+    if (!targetMessageId && !Number.isFinite(options.restoreScrollTop)) {
+      const cached = await cachedMessages(accountId, chat.id);
+      if (cached && activeChatKeyRef.current === chatCacheKey) {
+        renderedFromCache = true;
+        setMessages(cached.items);
+        setHasOlder(!cached.reachedEnd);
+        setBusy(false);
+      }
+    }
     try {
       const around = targetMessageId ? `&around=${encodeURIComponent(targetMessageId)}` : "";
       const list = await api(`/api/messages?account=${encodeURIComponent(accountId)}&peer=${encodeURIComponent(chat.id)}&limit=80${around}`, { timeoutMs: 80000 });
+      if (activeChatKeyRef.current !== chatCacheKey) return;
       setMessages(list);
       setHasOlder(list.length >= 80);
+      saveMessages(accountId, chat.id, list, false);
       if (targetMessageId && !list.some((message) => Number(message.id) === targetMessageId)) {
         pendingScrollRef.current = null;
         notify("你要访问的内容已被删除");
       }
     } catch (err) {
-      setError(err.message);
+      if (activeChatKeyRef.current !== chatCacheKey) return;
+      // R4.53：缓存已渲染时网络失败只轻提示，不把整个会话页顶成报错卡。
+      if (renderedFromCache) notify(`刷新失败，正在显示本地缓存：${err.message}`);
+      else setError(err.message);
     } finally {
-      setBusy(false);
+      if (activeChatKeyRef.current === chatCacheKey) setBusy(false);
     }
   }
 
@@ -2175,6 +2217,8 @@ function App() {
     const list = await api(`/api/messages?account=${encodeURIComponent(accountId)}&peer=${encodeURIComponent(activeChat.id)}&limit=80`, { timeoutMs: 80000 });
     setMessages(list);
     setHasOlder(list.length >= 80);
+    // R4.53：刷新结果回写本地缓存。
+    saveMessages(accountId, activeChat.id, list, false);
     requestAnimationFrame(() => {
       if (element) element.scrollTop = top;
     });
@@ -2192,10 +2236,16 @@ function App() {
       // R4.51：空页说明已到历史尽头，收起按钮而不是反复可点。
       if (!older.length) {
         setHasOlder(false);
+        // R4.53：已到历史尽头，缓存里记录 reachedEnd，下次秒开时不再显示「加载更早消息」。
+        saveMessages(accountId, activeChat.id, messages, true);
         notify("没有更早的消息了");
         return;
       }
-      setMessages((current) => [...older, ...current]);
+      setMessages((current) => {
+        // R4.53：合并结果回写本地缓存（saveMessages 内部按 id 去重，重复调用幂等）。
+        saveMessages(accountId, activeChat.id, [...older, ...current], false);
+        return [...older, ...current];
+      });
       setHasOlder(older.length >= 80);
       requestAnimationFrame(() => {
         if (element) element.scrollTop = element.scrollHeight - previousHeight;
@@ -2305,7 +2355,11 @@ function App() {
     try {
       const sent = await api("/api/messages", { method: "POST", body: JSON.stringify({ account: accountId, peer: activeChat.id, text }) });
       shouldScrollBottomRef.current = true;
-      setMessages((current) => [...current, sent]);
+      setMessages((current) => {
+        // R4.53：发出的消息同步进本地缓存（saveMessages 内部幂等去重）。
+        saveMessages(accountId, activeChat.id, [...current, sent], false);
+        return [...current, sent];
+      });
     } catch (err) {
       setError(err.message);
       setDraft(text);
