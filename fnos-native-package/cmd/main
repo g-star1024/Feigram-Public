@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.43"
-export APP_CHANGELOG="群信息视频列表标 ✓ 已缓存/已提交（重复勾选自动跳过）；单次后台缓存提交上限 30 条（大群不再一次性全量入队，重新勾选继续补）；缓存提交受理超时放宽 30s 兜底"
+export APP_VERSION="2.6.44"
+export APP_CHANGELOG="修复群信息勾选缓存仍报「请求超时」：受理改走 WebSocket 长连接（不再受浏览器 6 连接被媒体占满限制），断连自动回退 HTTP；✓ 缓存徽标改绿色圆标并移到左上角不再遮挡时长；群组信息面板本地缓存（秒显成员数/媒体统计/最近资源，刷新后台更新）"
 export NODE_ENV="production"
 
 is_running() {

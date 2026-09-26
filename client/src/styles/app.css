@@ -1181,8 +1181,12 @@ textarea {
   text-align: left;
 }
 
-/* R4.65：已提交/已缓存视频的 ✅ 徽标（右上角，不遮挡缩略图主体）。 */
-.info-resource-cached {
+/* R4.65：已提交/已缓存视频的 ✅ 徽标。
+   R4.66：.info-resource-item.video b（时长胶囊）特异性更高且在后面，把本徽标
+   覆盖成黑底白字且与时长同位重叠——升级选择器特异性压回，绿底白勾，放左上角
+   避开右上角时长。 */
+.info-resource-item b.info-resource-cached,
+.info-resource-item.video b.info-resource-cached {
   align-items: center;
   background: var(--fn-success, #1faa6b);
   border-radius: 999px;
@@ -1192,9 +1196,11 @@ textarea {
   font-weight: 700;
   height: 18px;
   justify-content: center;
+  left: 6px;
   line-height: 1;
+  padding: 0;
   position: absolute;
-  right: 6px;
+  right: auto;
   top: 6px;
   width: 18px;
   z-index: 2;

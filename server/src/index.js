@@ -476,6 +476,20 @@ io.on("connection", (socket) => {
     }
   });
 
+  // R4.66：后台缓存受理改走 WebSocket——受理本身同步秒回，但大群信息面板
+  // 打开时浏览器同源 6 连接被媒体缩略图占满，HTTP POST 在浏览器内排队可超
+  // 30s（2.6.43 实测仍报「提交失败：请求超时」）。复用已建立的长连接彻底
+  // 绕开连接池竞争；socket 断开/未连接时前端自动回退 HTTP POST。
+  socket.on("cache-large-videos:start", async (payload, reply) => {
+    try {
+      const { account, peer } = payload || {};
+      if (!account || !peer) throw Object.assign(new Error("缺少 account/peer"), { status: 400 });
+      reply({ ok: true, data: await tg.cacheLargeVideosInChat(socket.user.id, account, peer, io) });
+    } catch (error) {
+      reply({ ok: false, error: error.message });
+    }
+  });
+
   // M2.4：一键迁移到 Go（路径 A）。
   // 失败时回传 needsRelogin，前端据此降级为「路径 B：重新登录」。
   socket.on("account:migrate", async (payload, reply) => {

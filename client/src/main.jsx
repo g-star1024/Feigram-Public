@@ -29,7 +29,7 @@ import {
   X
 } from "lucide-react";
 import { api, appLogin, getToken, setToken as saveToken } from "./api";
-import { cachedChats, cachedMessages, saveChats, saveMessages } from "./chatCache";
+import { cachedChats, cachedMessages, cachedChatDetails, saveChats, saveMessages, saveChatDetails } from "./chatCache";
 import { QueuedImage } from "./mediaQueue.jsx";
 import "./styles/tokens.css";
 import "./styles/app.css";
@@ -2193,15 +2193,29 @@ function App() {
   async function openChatInfo() {
     if (!activeChat) return;
     setChatInfoOpen(true);
-    setChatDetailsLoading(true);
     setChatMediaLoadingMore(false);
+    // R4.66：群组信息也走本地缓存（SWR）——先缓存秒显（成员数/媒体统计/最近资源），
+    // 网络刷新后覆盖界面并回写；刷新失败时已显示缓存只轻提示，不再白等报错。
+    const infoChatKey = cacheKeyOf(accountId, activeChat.id);
+    const cached = await cachedChatDetails(accountId, activeChat.id);
+    let renderedFromCache = false;
+    if (cached && activeChatKeyRef.current === infoChatKey) {
+      renderedFromCache = true;
+      setChatDetails(cached.info);
+      setChatDetailsLoading(false);
+    } else {
+      setChatDetailsLoading(true);
+    }
     try {
       const info = await api(`/api/chats/${encodeURIComponent(accountId)}/${encodeURIComponent(activeChat.id)}/details`, { timeoutMs: 80000 });
+      if (activeChatKeyRef.current !== infoChatKey) return;
       setChatDetails(info);
+      saveChatDetails(accountId, activeChat.id, info);
     } catch (err) {
-      notify(err.message);
+      if (activeChatKeyRef.current !== infoChatKey) return;
+      notify(renderedFromCache ? `刷新失败，正在显示本地缓存：${err.message}` : err.message);
     } finally {
-      setChatDetailsLoading(false);
+      if (activeChatKeyRef.current === infoChatKey) setChatDetailsLoading(false);
     }
   }
 
@@ -2211,6 +2225,7 @@ function App() {
     try {
       const before = chatDetails.nextMediaBefore || 0;
       const page = await api(`/api/chats/${encodeURIComponent(accountId)}/${encodeURIComponent(activeChat.id)}/media?before=${encodeURIComponent(before)}&limit=30`, { timeoutMs: 80000 });
+      let merged = null;
       setChatDetails((current) => {
         if (!current) return current;
         const seen = new Set((current.files || []).map((file) => String(file.id)));
@@ -2218,13 +2233,16 @@ function App() {
           ...(current.files || []),
           ...(page.files || []).filter((file) => !seen.has(String(file.id)))
         ];
-        return {
+        merged = {
           ...current,
           files,
           nextMediaBefore: page.nextBefore || current.nextMediaBefore,
           hasMoreMedia: Boolean(page.hasMore)
         };
+        return merged;
       });
+      // R4.66：分页合并结果同步回写群信息缓存，下次秒显即含已加载的媒体。
+      if (merged) saveChatDetails(accountId, activeChat.id, merged);
     } catch (err) {
       notify(err.message);
     } finally {
@@ -2373,10 +2391,28 @@ function App() {
     const chatId = activeChat.id;
     try {
       // R4.60：提交只受理（秒回），扫描在 Node 后台执行——代理差时不再顶穿
-      // 前端超时；结果/失败原因由轮询显示在勾选框下方。R4.65：受理超时放宽
-      // 30s——浏览器 6 连接被媒体占满时 POST 也可能在内部排队（R4.64 头像
-      // 缓存上线后此场景大幅减少）。
-      await api(`/api/chats/${encodeURIComponent(accId)}/${encodeURIComponent(chatId)}/cache-large-videos`, { method: "POST", timeoutMs: 30000 });
+      // 前端超时；结果/失败原因由轮询显示在勾选框下方。
+      // R4.66：优先走 WebSocket 受理——受理本身同步秒回，但大群信息面板打开时
+      // 浏览器同源 6 连接被媒体缩略图占满，HTTP POST 在浏览器内排队可超 30s
+      // （2.6.43 实测仍报「请求超时」）；socket 长连接不受连接池限制。断连时回退 HTTP。
+      const submit = await (async () => {
+        if (socket?.connected) {
+          return await new Promise((resolve) => {
+            socket.timeout(15000).emit("cache-large-videos:start", { account: accId, peer: chatId }, (err, reply) => {
+              if (err) resolve({ ok: false, error: err?.message || "连接超时" });
+              else if (reply?.ok) resolve({ ok: true });
+              else resolve({ ok: false, error: reply?.error || "受理失败" });
+            });
+          });
+        }
+        try {
+          await api(`/api/chats/${encodeURIComponent(accId)}/${encodeURIComponent(chatId)}/cache-large-videos`, { method: "POST", timeoutMs: 30000 });
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err.message };
+        }
+      })();
+      if (!submit.ok) throw new Error(submit.error);
       setAutoCacheResult("已开始后台扫描本群最近消息，结果出来后显示在这里…");
       startAutoCachePolling(accId, chatId);
     } catch (err) {

@@ -10,9 +10,11 @@
  */
 
 const DB_NAME = "feigrame-cache";
-const DB_VERSION = 1;
+// R4.66：+1 建 details store（群组信息面板缓存）。
+const DB_VERSION = 2;
 const STORE_CHATS = "chats";
 const STORE_MESSAGES = "messages";
+const STORE_DETAILS = "details";
 const MAX_CACHED_MESSAGES = 600;
 const MAX_CACHED_CHATS = 2000;
 
@@ -30,6 +32,7 @@ function openCacheDb() {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_CHATS)) db.createObjectStore(STORE_CHATS);
       if (!db.objectStoreNames.contains(STORE_MESSAGES)) db.createObjectStore(STORE_MESSAGES);
+      if (!db.objectStoreNames.contains(STORE_DETAILS)) db.createObjectStore(STORE_DETAILS);
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error || new Error("indexedDB open failed"));
@@ -121,6 +124,25 @@ export async function saveChats(accountId, list) {
   if (!accountId || !Array.isArray(list) || !list.length) return;
   await withReadwriteStore(STORE_CHATS, accountId, () => ({
     items: list.slice(0, MAX_CACHED_CHATS),
+    savedAt: Date.now()
+  }));
+}
+
+// R4.66：群组信息面板缓存（成员数/媒体统计/最近资源列表）。
+// 返回 { info, savedAt } 或 null。
+export async function cachedChatDetails(accountId, peerId) {
+  if (!accountId || !peerId) return null;
+  const entry = await withReadStore(STORE_DETAILS, cacheKey(accountId, peerId));
+  if (!entry || !entry.info) return null;
+  return { info: entry.info, savedAt: Number(entry.savedAt) || 0 };
+}
+
+// details：/details 接口完整返回（含 files 分页字段）；
+// loadMore 追加媒体后由调用方合并好再存（这里只整体覆盖）。
+export async function saveChatDetails(accountId, peerId, info) {
+  if (!accountId || !peerId || !info || typeof info !== "object") return;
+  await withReadwriteStore(STORE_DETAILS, cacheKey(accountId, peerId), () => ({
+    info,
     savedAt: Date.now()
   }));
 }
