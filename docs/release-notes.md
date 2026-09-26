@@ -1,5 +1,12 @@
 # Feigram Public 发布说明
 
+## 版本 2.6.46
+
+- 新增 Docker 部署：官方多架构镜像（amd64 / arm64）发布到 `ghcr.io/g-star1024/feigram`，其他 NAS（群晖/威联通/极空间等）与服务器 docker run / docker compose 即可部署。
+- 单容器架构（Go 下载器 + Node 网关 + 前端），数据全部持久化在 `/data` 单卷；常用环境变量与 FPK 同名约定（DATA_DIR / DOWNLOAD_DIR 等）。
+- GitHub Actions 在推送 Feigram* 标签时自动构建并发布镜像（buildx 多架构 + GHA 缓存），本地也可 `docker build` 源码构建。
+- README 重写：同步最新功能说明（Go 原生 MTProto 下载引擎、群组信息面板、后台自动缓存深度扫描等），移除开发元信息，修正过时的 GramJS / 并发数描述。
+
 ## 版本 2.6.45
 
 - 修复群信息面板绿勾只对首屏内容有效（2026-09-26 实测反馈）：后台缓存扫描此前只覆盖最近 200 条消息，下拉加载出的更早视频从未入队、永远没有绿勾（绿勾 = 任务已在队列/已完成，逻辑本身无 bug）。
