@@ -29,7 +29,7 @@ import {
   X
 } from "lucide-react";
 import { api, appLogin, getToken, setToken as saveToken } from "./api";
-import { cachedChats, cachedMessages, saveChats, saveMessages } from "./chatCache";
+import { cachedChats, cachedMessages, cachedChatDetails, saveChats, saveMessages, saveChatDetails } from "./chatCache";
 import { QueuedImage } from "./mediaQueue.jsx";
 import "./styles/tokens.css";
 import "./styles/app.css";
@@ -1514,13 +1514,15 @@ function PlaybackModal({ item, playerMode, onClose }) {
   );
 }
 
-function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, autoCacheBusy, autoCacheResult, mediaLoadingMore, onAutoCacheChange, onClose, onOpenMedia, onLoadMoreMedia }) {
+function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, autoCacheBusy, autoCacheResult, mediaLoadingMore, cachedKeys, onAutoCacheChange, onClose, onOpenMedia, onLoadMoreMedia }) {
   const [mediaTab, setMediaTab] = useState("all");
   const contentRef = useRef(null);
   if (!open || !chat) return null;
   const info = details || chat;
   const resources = info.files || [];
   const visibleResources = mediaTab === "all" ? resources : resources.filter((file) => file.kind === mediaTab);
+  // R4.65：已提交/已缓存的视频标 ✅（下载中/排队/已完成都算；已取消不算）。
+  const isCached = (file) => Boolean(cachedKeys?.has(`${chat.id}:${file.id}`));
   return (
     <aside className="chat-info-panel">
       <header>
@@ -1565,6 +1567,7 @@ function ChatInfoPanel({ open, accountId, chat, details, loading, autoCache, aut
             </div>
             <div className={cx("info-resource-grid", mediaTab === "file" && "files")}>
               {visibleResources.map((file) => <button className={cx("info-resource-item", file.kind)} type="button" key={`${file.id}-${file.fileName}`} onClick={() => onOpenMedia?.(file)}>
+                {isCached(file) && <b className="info-resource-cached" title="已在缓存队列或已完成">✓</b>}
                 {file.kind === "image" && <QueuedImage src={mediaUrl(accountId, chat.id, file.id, true)} alt="" />}
                 {file.kind === "video" && <>
                   <QueuedImage src={thumbnailMediaUrl(accountId, chat.id, file.id)} alt="" onError={(event) => { event.currentTarget.style.display = "none"; }} />
@@ -1813,6 +1816,16 @@ function App() {
   // 切换会话/卸载时停止，防止旧会话的轮询结果串写到新会话。
   const autoCachePollRef = useRef(null);
   const autoCachePollKeyRef = useRef("");
+  // R4.65：已提交/已缓存媒体的 key 集合（peerId:messageId），供群信息面板视频
+  // 列表标 ✅——下载中/排队/已完成都算已提交；已取消/已清除的不算。
+  const cachedMediaKeys = useMemo(() => {
+    const keys = new Set();
+    for (const task of mergeDownloads([...downloads, ...silentCaches])) {
+      if (!["queued", "downloading", "running", "completed"].includes(task.status)) continue;
+      if (task.peerId && task.messageId) keys.add(`${task.peerId}:${task.messageId}`);
+    }
+    return keys;
+  }, [downloads, silentCaches]);
   const [playback, setPlayback] = useState(null);
   const socket = useSocket(token);
   const messagesRef = useRef(null);
@@ -2180,15 +2193,29 @@ function App() {
   async function openChatInfo() {
     if (!activeChat) return;
     setChatInfoOpen(true);
-    setChatDetailsLoading(true);
     setChatMediaLoadingMore(false);
+    // R4.66：群组信息也走本地缓存（SWR）——先缓存秒显（成员数/媒体统计/最近资源），
+    // 网络刷新后覆盖界面并回写；刷新失败时已显示缓存只轻提示，不再白等报错。
+    const infoChatKey = cacheKeyOf(accountId, activeChat.id);
+    const cached = await cachedChatDetails(accountId, activeChat.id);
+    let renderedFromCache = false;
+    if (cached && activeChatKeyRef.current === infoChatKey) {
+      renderedFromCache = true;
+      setChatDetails(cached.info);
+      setChatDetailsLoading(false);
+    } else {
+      setChatDetailsLoading(true);
+    }
     try {
       const info = await api(`/api/chats/${encodeURIComponent(accountId)}/${encodeURIComponent(activeChat.id)}/details`, { timeoutMs: 80000 });
+      if (activeChatKeyRef.current !== infoChatKey) return;
       setChatDetails(info);
+      saveChatDetails(accountId, activeChat.id, info);
     } catch (err) {
-      notify(err.message);
+      if (activeChatKeyRef.current !== infoChatKey) return;
+      notify(renderedFromCache ? `刷新失败，正在显示本地缓存：${err.message}` : err.message);
     } finally {
-      setChatDetailsLoading(false);
+      if (activeChatKeyRef.current === infoChatKey) setChatDetailsLoading(false);
     }
   }
 
@@ -2198,6 +2225,7 @@ function App() {
     try {
       const before = chatDetails.nextMediaBefore || 0;
       const page = await api(`/api/chats/${encodeURIComponent(accountId)}/${encodeURIComponent(activeChat.id)}/media?before=${encodeURIComponent(before)}&limit=30`, { timeoutMs: 80000 });
+      let merged = null;
       setChatDetails((current) => {
         if (!current) return current;
         const seen = new Set((current.files || []).map((file) => String(file.id)));
@@ -2205,13 +2233,16 @@ function App() {
           ...(current.files || []),
           ...(page.files || []).filter((file) => !seen.has(String(file.id)))
         ];
-        return {
+        merged = {
           ...current,
           files,
           nextMediaBefore: page.nextBefore || current.nextMediaBefore,
           hasMoreMedia: Boolean(page.hasMore)
         };
+        return merged;
       });
+      // R4.66：分页合并结果同步回写群信息缓存，下次秒显即含已加载的媒体。
+      if (merged) saveChatDetails(accountId, activeChat.id, merged);
     } catch (err) {
       notify(err.message);
     } finally {
@@ -2259,20 +2290,26 @@ function App() {
   }
 
   // R4.60：把扫描统计翻译成用户文案（原 R4.57 逻辑，供轮询完成后复用）。
+  // R4.67：扫描改深度翻页（最多 15 页 ≈ 3000 条），文案带翻页深度；
+  // 达单次上限或未扫到尽头时提示「重新勾选可继续向更早补齐」。
   function describeAutoCacheResult(result) {
+    const depth = `扫描 ${result.pages ?? "?"} 页共 ${result.scanned ?? "?"} 条消息${result.reachedEnd ? "（已到历史尽头）" : ""}`;
     let text;
     if (result.queued > 0) {
       const extra = [];
       if (result.duplicates) extra.push(`${result.duplicates} 个已在队列`);
       if (result.failed) extra.push(`${result.failed} 个失败`);
-      text = `已提交 ${result.queued} 个后台视频缓存任务（扫描最近 ${result.scanned ?? "?"} 条消息${extra.length ? `，${extra.join("，")}` : ""}）`;
+      if (result.capped) extra.push("已达单次上限 30，重新勾选可继续向更早的视频补齐");
+      else if (!result.reachedEnd) extra.push("重新勾选可继续向更早的视频补齐");
+      text = `已提交 ${result.queued} 个后台视频缓存任务（${depth}${extra.length ? `，${extra.join("，")}` : ""}）`;
     } else {
       const reason = result.failed
         ? `${result.failed} 个入队失败`
         : result.duplicates
           ? `${result.duplicates} 个已在队列，无需重复提交`
-          : "最近消息里没有大于 100MB 的视频";
-      text = `扫描最近 ${result.scanned ?? "?"} 条消息，未新增缓存任务：${reason}`;
+          : "扫描范围内没有大于 100MB 的未提交视频";
+      const tail = !result.reachedEnd ? "；重新勾选可继续向更早的视频补齐" : "";
+      text = `${depth}，未新增缓存任务：${reason}${tail}`;
     }
     return text;
   }
@@ -2359,8 +2396,28 @@ function App() {
     try {
       // R4.60：提交只受理（秒回），扫描在 Node 后台执行——代理差时不再顶穿
       // 前端超时；结果/失败原因由轮询显示在勾选框下方。
-      await api(`/api/chats/${encodeURIComponent(accId)}/${encodeURIComponent(chatId)}/cache-large-videos`, { method: "POST", timeoutMs: 15000 });
-      setAutoCacheResult("已开始后台扫描本群最近消息，结果出来后显示在这里…");
+      // R4.66：优先走 WebSocket 受理——受理本身同步秒回，但大群信息面板打开时
+      // 浏览器同源 6 连接被媒体缩略图占满，HTTP POST 在浏览器内排队可超 30s
+      // （2.6.43 实测仍报「请求超时」）；socket 长连接不受连接池限制。断连时回退 HTTP。
+      const submit = await (async () => {
+        if (socket?.connected) {
+          return await new Promise((resolve) => {
+            socket.timeout(15000).emit("cache-large-videos:start", { account: accId, peer: chatId }, (err, reply) => {
+              if (err) resolve({ ok: false, error: err?.message || "连接超时" });
+              else if (reply?.ok) resolve({ ok: true });
+              else resolve({ ok: false, error: reply?.error || "受理失败" });
+            });
+          });
+        }
+        try {
+          await api(`/api/chats/${encodeURIComponent(accId)}/${encodeURIComponent(chatId)}/cache-large-videos`, { method: "POST", timeoutMs: 30000 });
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err.message };
+        }
+      })();
+      if (!submit.ok) throw new Error(submit.error);
+      setAutoCacheResult("已开始后台扫描本群视频（深度翻页，较久，结果出来后显示在这里）…");
       startAutoCachePolling(accId, chatId);
     } catch (err) {
       setAutoCacheResult(`提交失败：${err.message}`);
@@ -2905,6 +2962,7 @@ function App() {
         autoCacheResult={autoCacheResult}
         autoCacheBusy={autoCacheBusy}
         mediaLoadingMore={chatMediaLoadingMore}
+        cachedKeys={cachedMediaKeys}
         onAutoCacheChange={setChatAutoCache}
         onLoadMoreMedia={loadMoreChatMedia}
         onOpenMedia={openInfoMedia}

@@ -1096,6 +1096,14 @@ async function cacheVideoSilentlyGo(userId, accountId, peerId, message, entity =
 // 现在提交即受理（秒回 { started:true }），扫描在后台执行，结果经同路径 GET
 // 状态接口轮询取回；各阶段打点日志，失败原因记入 job.error 不静默。
 const autoCacheJobs = new Map();
+// R4.65：单次后台缓存提交上限——大群几百个视频不再一次性全部入队。
+const AUTO_CACHE_SUBMIT_CAP = 30;
+// R4.67：扫描深度翻页——R4.57 的「只扫最近 200 条」让下拉加载出的更早视频永远
+// 没机会入队（用户实测：绿勾只出现在首屏内容）。改为按 before 游标循环翻页，
+// 预算 15 页 × 200 ≈ 3000 条消息；已入队的按重复跳过且不占 30 名额，
+// 因此重复勾选会逐轮向更早的历史补齐，几轮即可覆盖全群媒体。
+const AUTO_CACHE_SCAN_PAGES = 15;
+const AUTO_CACHE_SCAN_PAGE_SIZE = 200;
 
 function autoCacheJobKey(userId, accountId, peerId) {
   return `${userId}|${accountId}|${peerId}`;
@@ -1138,36 +1146,58 @@ async function runAutoCacheScan(userId, accountId, peerId, job, key) {
   const startedMs = Date.now();
   try {
     if (!(await nativeAccountRecord(userId, accountId))) throw reloginError(accountId);
-    // R4.57：扫描窗口 120→200（Go /messages 上限即 200）；扫描失败直接进
-    // job.error（不再静默成「没有大视频」）；单个视频入队失败不中断整批。
-    const scanStart = Date.now();
-    const items = await downloaderSidecar.accountMessages({
-      userId, accountId, peer: peerId, limit: 200
-    });
-    const recent = Array.isArray(items) ? items : [];
-    const peerStart = Date.now();
+    // R4.67：深度翻页扫描。单页上限仍是 Go /messages 的 200（R4.36 教训：页大小
+    // 不得超过服务端硬上限），用 before 游标（OffsetID 语义）向更早历史翻页，
+    // 预算 AUTO_CACHE_SCAN_PAGES 页。扫描失败直接进 job.error；单个视频入队
+    // 失败不中断整批。
     const entity = await resolveNativePeerEntity(userId, accountId, peerId);
-    console.log(`[auto-cache] ${key} 扫描 ${recent.length} 条耗时 ${peerStart - scanStart}ms，peer 解析 ${Date.now() - peerStart}ms`);
     let queued = 0;
     let duplicates = 0;
     let skipped = 0;
     let failed = 0;
-    for (const item of recent) {
-      if (!item || !item.media || !item.media.hasPreview) continue;
-      const message = goMessageToNodeMessage(item);
-      try {
-        const status = await cacheVideoSilentlyGo(userId, accountId, peerId, message, entity);
-        if (status === "queued") queued += 1;
-        else if (status === "duplicate") duplicates += 1;
-        else skipped += 1;
-      } catch (err) {
-        failed += 1;
-        console.warn(`[auto-cache] ${key} 消息 ${item.id} 入队失败: ${err.message}`);
+    let scanned = 0;
+    let pages = 0;
+    let reachedEnd = false;
+    let before = 0;
+    // R4.65：单次提交上限 30——大群几百个视频不再一次性全部入队挤占
+    // 并发与磁盘；达到上限即停止翻页（不再像旧实现那样把剩余消息逐条计
+    // skipped），重复勾选时已入队的按重复跳过、不占名额，继续向更早历史补。
+    pageLoop: for (let page = 0; page < AUTO_CACHE_SCAN_PAGES; page += 1) {
+      const items = await downloaderSidecar.accountMessages({
+        userId, accountId, peer: peerId, limit: AUTO_CACHE_SCAN_PAGE_SIZE, before
+      });
+      const recent = Array.isArray(items) ? items : [];
+      pages += 1;
+      scanned += recent.length;
+      if (!recent.length) { reachedEnd = true; break; }
+      let oldestId = 0;
+      for (const item of recent) {
+        const itemId = Number(item?.id || 0);
+        if (itemId > 0 && (oldestId === 0 || itemId < oldestId)) oldestId = itemId;
+        if (!item || !item.media || !item.media.hasPreview) continue;
+        if (queued >= AUTO_CACHE_SUBMIT_CAP) break pageLoop;
+        const message = goMessageToNodeMessage(item);
+        try {
+          const status = await cacheVideoSilentlyGo(userId, accountId, peerId, message, entity);
+          if (status === "queued") queued += 1;
+          else if (status === "duplicate") duplicates += 1;
+          else skipped += 1;
+        } catch (err) {
+          failed += 1;
+          console.warn(`[auto-cache] ${key} 消息 ${item.id} 入队失败: ${err.message}`);
+        }
       }
+      // 本页不足一页说明已到历史尽头；否则以本页最小消息 ID 作为下一页游标。
+      if (recent.length < AUTO_CACHE_SCAN_PAGE_SIZE || !oldestId) { reachedEnd = true; break; }
+      before = oldestId;
     }
-    job.result = { queued, scanned: recent.length, duplicates, skipped, failed };
+    job.result = {
+      queued, scanned, pages, duplicates, skipped, failed,
+      capped: queued >= AUTO_CACHE_SUBMIT_CAP,
+      reachedEnd
+    };
     job.status = "done";
-    console.log(`[auto-cache] ${key} 完成：新增 ${queued}/重复 ${duplicates}/跳过 ${skipped}/失败 ${failed}，总耗时 ${Date.now() - startedMs}ms`);
+    console.log(`[auto-cache] ${key} 完成：新增 ${queued}/重复 ${duplicates}/跳过 ${skipped}/失败 ${failed}，扫描 ${pages} 页 ${scanned} 条${reachedEnd ? "（已到历史尽头）" : ""}，总耗时 ${Date.now() - startedMs}ms`);
   } catch (err) {
     job.status = "error";
     job.error = err.message || String(err);

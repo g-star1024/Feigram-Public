@@ -177,18 +177,23 @@ func (a *App) pooledChatRunner(account NativeAccount, apiHash string) (chatRunne
 }
 
 // pooledChatAvatar 在常驻连接上拉取头像字节（保留 MediaOnly 迁移回退）。
+// R4.64：外层套头像字节缓存 + single-flight——群消息列表一屏十几个发送者
+// 头像此前每次请求都真实走 MTProto 过代理（零缓存），代理差时消息页头像
+// 大面积裂图；命中缓存微秒级返回，未命中同 key 并发只拉一次。
 func (a *App) pooledChatAvatar(ctx context.Context, account NativeAccount, apiHash, peerID string) ([]byte, error) {
-	entry, err := a.pooledChatEntry(account, apiHash)
-	if err != nil {
-		return nil, err
-	}
-	entry.lastUsed.Store(time.Now().UnixNano())
-	data, err := a.fetchNativeAvatarOnAPI(ctx, entry.api, entry.client, account, peerID)
-	entry.lastUsed.Store(time.Now().UnixNano())
-	if err != nil && chatPoolFatal(err) {
-		a.dropChatPoolEntry(nativeAccountKey(account.UserID, account.AccountID), entry)
-	}
-	return data, err
+	return a.avatarWithCache(ctx, nativeAccountKey(account.UserID, account.AccountID)+"|"+peerID, func(fetchCtx context.Context) ([]byte, error) {
+		entry, err := a.pooledChatEntry(account, apiHash)
+		if err != nil {
+			return nil, err
+		}
+		entry.lastUsed.Store(time.Now().UnixNano())
+		data, err := a.fetchNativeAvatarOnAPI(fetchCtx, entry.api, entry.client, account, peerID)
+		entry.lastUsed.Store(time.Now().UnixNano())
+		if err != nil && chatPoolFatal(err) {
+			a.dropChatPoolEntry(nativeAccountKey(account.UserID, account.AccountID), entry)
+		}
+		return data, err
+	})
 }
 
 // chatPoolFatal 判断错误是否意味着这条常驻连接不可再用（需要丢弃重建），
