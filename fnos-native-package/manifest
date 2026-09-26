@@ -1,5 +1,5 @@
 appname=feigrampub
-version=2.6.44
+version=2.6.45
 display_name=Feigram
 desc="""<p><strong>Feigram 2.0 fnOS Client Edition</strong> 是第三方开发的非官方 Telegram 客户端，支持管理员后台、飞牛账户隔离、加密 Telegram session、Telegram 文件夹、媒体预览、后台任务恢复、运行诊断和更新检测。</p><p>仅适用于 x86_64 / amd64 飞牛 OS 设备。</p>"""
 platform=all
@@ -12,4 +12,4 @@ desktop_uidir=ui
 desktop_applaunchname=feigrampub.proxy.Application
 service_port=3088
 checkport=true
-changelog=修复群信息勾选缓存仍报「请求超时」：受理改走 WebSocket 长连接（不再受浏览器 6 连接被媒体占满限制），断连自动回退 HTTP；✓ 缓存徽标改绿色圆标并移到左上角不再遮挡时长；群组信息面板本地缓存（秒显成员数/媒体统计/最近资源，刷新后台更新）
+changelog=修复群信息面板绿勾只对首屏内容有效：后台缓存扫描改深度翻页（最多约 3000 条消息，单次仍限 30 个），重复勾选会逐轮向更早的历史补齐，下拉加载出的老视频也能入队标绿勾

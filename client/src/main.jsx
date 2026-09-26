@@ -2290,22 +2290,26 @@ function App() {
   }
 
   // R4.60：把扫描统计翻译成用户文案（原 R4.57 逻辑，供轮询完成后复用）。
+  // R4.67：扫描改深度翻页（最多 15 页 ≈ 3000 条），文案带翻页深度；
+  // 达单次上限或未扫到尽头时提示「重新勾选可继续向更早补齐」。
   function describeAutoCacheResult(result) {
-    // R4.65：单次提交上限 30——大群超出部分计「跳过」，重新勾选会跳过已提交的继续补。
+    const depth = `扫描 ${result.pages ?? "?"} 页共 ${result.scanned ?? "?"} 条消息${result.reachedEnd ? "（已到历史尽头）" : ""}`;
     let text;
     if (result.queued > 0) {
       const extra = [];
       if (result.duplicates) extra.push(`${result.duplicates} 个已在队列`);
       if (result.failed) extra.push(`${result.failed} 个失败`);
-      if (result.capped) extra.push("已达单次上限 30");
-      text = `已提交 ${result.queued} 个后台视频缓存任务（扫描最近 ${result.scanned ?? "?"} 条消息${extra.length ? `，${extra.join("，")}` : ""}）`;
+      if (result.capped) extra.push("已达单次上限 30，重新勾选可继续向更早的视频补齐");
+      else if (!result.reachedEnd) extra.push("重新勾选可继续向更早的视频补齐");
+      text = `已提交 ${result.queued} 个后台视频缓存任务（${depth}${extra.length ? `，${extra.join("，")}` : ""}）`;
     } else {
       const reason = result.failed
         ? `${result.failed} 个入队失败`
         : result.duplicates
           ? `${result.duplicates} 个已在队列，无需重复提交`
-          : "最近消息里没有大于 100MB 的视频";
-      text = `扫描最近 ${result.scanned ?? "?"} 条消息，未新增缓存任务：${reason}`;
+          : "扫描范围内没有大于 100MB 的未提交视频";
+      const tail = !result.reachedEnd ? "；重新勾选可继续向更早的视频补齐" : "";
+      text = `${depth}，未新增缓存任务：${reason}${tail}`;
     }
     return text;
   }
@@ -2413,7 +2417,7 @@ function App() {
         }
       })();
       if (!submit.ok) throw new Error(submit.error);
-      setAutoCacheResult("已开始后台扫描本群最近消息，结果出来后显示在这里…");
+      setAutoCacheResult("已开始后台扫描本群视频（深度翻页，较久，结果出来后显示在这里）…");
       startAutoCachePolling(accId, chatId);
     } catch (err) {
       setAutoCacheResult(`提交失败：${err.message}`);
