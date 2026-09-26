@@ -14,6 +14,19 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.46",
+    title: "Feigram 2.6.46 更新",
+    version: "2.6.46",
+    level: "success",
+    createdAt: "2026-09-26T03:40:00.000Z",
+    body: [
+"新增 Docker 部署：官方多架构镜像（amd64 / arm64）发布到 ghcr.io/g-star1024/feigram",
+"其他 NAS（群晖/威联通/极空间等）与服务器 docker run 或 docker compose 即可部署，无需飞牛 OS",
+"单容器架构（Go 下载器 + Node 网关 + 前端），全部数据持久化在 /data 单卷，升级镜像只需保留数据卷",
+"README 重写：同步最新功能说明与 Docker 部署指南，修正过时的架构描述"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.45",
     title: "Feigram 2.6.45 更新",
     version: "2.6.45",

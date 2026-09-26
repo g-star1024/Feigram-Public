@@ -1,0 +1,16 @@
+# Feigram Docker Compose 示例
+# 用法：docker compose up -d，然后访问 http://NAS_IP:3088
+services:
+  feigram:
+    image: ghcr.io/g-star1024/feigram:latest
+    container_name: feigram
+    restart: unless-stopped
+    ports:
+      - "3088:3088"
+    environment:
+      - TZ=Asia/Shanghai
+      # 如需改端口/目录，可覆盖以下变量（与飞牛 FPK 同名约定）：
+      # - DATA_DIR=/data
+      # - DOWNLOAD_DIR=/data/downloads
+    volumes:
+      - ./data:/data
