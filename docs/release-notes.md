@@ -1,5 +1,10 @@
 # Feigram Public 发布说明
 
+## 版本 2.6.47
+
+- Docker 运行层注入 APP_VERSION：修复容器内应用自报版本显示为 0.1.0/dev 的问题
+- 修复诊断页「版本」显示 dev 与更新检查恒报「有新版本」的误报（此前版本参照恒为 dev）
+
 ## 版本 2.6.46
 
 - 新增 Docker 部署：官方多架构镜像（amd64 / arm64）发布到 `ghcr.io/g-star1024/feigram`，其他 NAS（群晖/威联通/极空间等）与服务器 docker run / docker compose 即可部署。
