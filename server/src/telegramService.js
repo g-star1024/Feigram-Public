@@ -1087,11 +1087,45 @@ const autoCacheJobs = new Map();
 // R4.65：单次后台缓存提交上限——大群几百个视频不再一次性全部入队。
 const AUTO_CACHE_SUBMIT_CAP = 30;
 // R4.67：扫描深度翻页——R4.57 的「只扫最近 200 条」让下拉加载出的更早视频永远
-// 没机会入队（用户实测：绿勾只出现在首屏内容）。改为按 before 游标循环翻页，
-// 预算 15 页 × 200 ≈ 3000 条消息；已入队的按重复跳过且不占 30 名额，
-// 因此重复勾选会逐轮向更早的历史补齐，几轮即可覆盖全群媒体。
-const AUTO_CACHE_SCAN_PAGES = 15;
-const AUTO_CACHE_SCAN_PAGE_SIZE = 200;
+// 没机会入队（用户实测：绿勾只出现在首屏内容）。改为按 before 游标循环翻页；
+// 已入队的按重复跳过且不占 30 名额，因此重复勾选会逐轮向更早的历史补齐。
+//
+// R4.71 修正：页大小必须 ≤ Go /messages 的单次 RPC 硬上限（messages.getHistory
+// 的 limit 上限为 100，见 Telegram 官方 offsets 文档「typically between 1 and 100」）。
+// 此前设为 200 —— 服务端只回 100 条，而「本页不满一页 = 已到历史尽头」的判定因此
+// 在**第 1 页**就误判（用户实测 2.6.47：35328 个视频的群永远只扫 1 页 100 条消息、
+// 重复点击零新增）。与 R4.36 的会话列表单页上限同源，属同一类根因的第二次出现：
+// 「单页上限 ≠ 总量上限」。页大小变更前必须回到本条注释核对一次。
+const AUTO_CACHE_SCAN_PAGES = 20;
+const AUTO_CACHE_SCAN_PAGE_SIZE = 100;
+// 页间小间隔：连发 getHistory 会自造限流（R4.36 教训：5 页连发触发过 FLOOD_WAIT(24)）。
+const AUTO_CACHE_SCAN_PAGE_GAP = 150;
+
+// R4.71：扫描翻页的「下一页怎么走」判定。抽成纯函数是为了让本 bug 的核心可离线单测
+// ——2.6.47 因「本页不满一页即判已到历史尽头」在第 1 页就收工，而该判定此前零覆盖。
+// 返回：
+//   reachedEnd  服务端返回**空页**——唯一可靠的「已到历史尽头」信号
+//   stop        游标无法推进（本页无消息 ID / 服务端未按游标前进）→ 停止，但不等于到尽头
+//   nextBefore  下一页的 before 游标（本页最小消息 ID）
+//   oldestId    本页最小消息 ID（0 表示没有可用 ID），供日志用
+function autoCachePagePlan(recent, before) {
+  const list = Array.isArray(recent) ? recent : [];
+  if (!list.length) {
+    return { reachedEnd: true, stop: false, nextBefore: before, oldestId: 0 };
+  }
+  let oldestId = 0;
+  for (const item of list) {
+    const itemId = Number(item?.id || 0);
+    if (itemId > 0 && (oldestId === 0 || itemId < oldestId)) oldestId = itemId;
+  }
+  if (!oldestId) {
+    return { reachedEnd: false, stop: true, nextBefore: before, oldestId: 0 };
+  }
+  if (before > 0 && oldestId >= before) {
+    return { reachedEnd: false, stop: true, nextBefore: before, oldestId };
+  }
+  return { reachedEnd: false, stop: false, nextBefore: oldestId, oldestId };
+}
 
 function autoCacheJobKey(userId, accountId, peerId) {
   return `${userId}|${accountId}|${peerId}`;
@@ -1134,10 +1168,11 @@ async function runAutoCacheScan(userId, accountId, peerId, job, key) {
   const startedMs = Date.now();
   try {
     if (!(await nativeAccountRecord(userId, accountId))) throw reloginError(accountId);
-    // R4.67：深度翻页扫描。单页上限仍是 Go /messages 的 200（R4.36 教训：页大小
-    // 不得超过服务端硬上限），用 before 游标（OffsetID 语义）向更早历史翻页，
-    // 预算 AUTO_CACHE_SCAN_PAGES 页。扫描失败直接进 job.error；单个视频入队
-    // 失败不中断整批。
+    // R4.67 引入、R4.71 修正的深度翻页扫描：用 before 游标（OffsetID 语义）向更早
+    // 历史翻页，预算 AUTO_CACHE_SCAN_PAGES 页。页大小锁在 messages.getHistory 的
+    // 服务端硬上限（100）之内——**这是本函数的硬约束，改动前先看常量处注释**；
+    // Go 侧 /messages 亦会按同一上限内部真分页，把请求量如实兑现。
+    // 扫描失败直接进 job.error；单个视频入队失败不中断整批。
     const entity = await resolveNativePeerEntity(userId, accountId, peerId);
     let queued = 0;
     let duplicates = 0;
@@ -1157,11 +1192,14 @@ async function runAutoCacheScan(userId, accountId, peerId, job, key) {
       const recent = Array.isArray(items) ? items : [];
       pages += 1;
       scanned += recent.length;
-      if (!recent.length) { reachedEnd = true; break; }
-      let oldestId = 0;
+      // R4.71：翻页决策交给纯函数（可单测）。要点：**空页才是唯一可靠的
+      // 「已到历史尽头」信号**——曾用「本页不满一页」判尽头，页大小一旦超过
+      // 服务端硬上限（100）就每页都「不满」，于是第 1 页即误判收工；
+      // 且一页里可能含服务消息，序列化后天然少于请求量。代价仅真尽头多 1 次 RPC。
+      const plan = autoCachePagePlan(recent, before);
+      console.log(`[auto-cache] ${key} 第 ${pages} 页：请求 ${AUTO_CACHE_SCAN_PAGE_SIZE} 条 / 返回 ${recent.length} 条 / 累计 ${scanned} 条 / 已入队 ${queued}${plan.reachedEnd ? "（空页，确认已到历史尽头）" : ""}`);
+      if (plan.reachedEnd) { reachedEnd = true; break; }
       for (const item of recent) {
-        const itemId = Number(item?.id || 0);
-        if (itemId > 0 && (oldestId === 0 || itemId < oldestId)) oldestId = itemId;
         if (!item || !item.media || !item.media.hasPreview) continue;
         if (queued >= AUTO_CACHE_SUBMIT_CAP) break pageLoop;
         const message = goMessageToNodeMessage(item);
@@ -1175,9 +1213,16 @@ async function runAutoCacheScan(userId, accountId, peerId, job, key) {
           console.warn(`[auto-cache] ${key} 消息 ${item.id} 入队失败: ${err.message}`);
         }
       }
-      // 本页不足一页说明已到历史尽头；否则以本页最小消息 ID 作为下一页游标。
-      if (recent.length < AUTO_CACHE_SCAN_PAGE_SIZE || !oldestId) { reachedEnd = true; break; }
-      before = oldestId;
+      if (plan.stop) {
+        // 游标无法推进（本页无消息 ID，或服务端返回了 ≥ 游标的消息）：再翻只会
+        // 原地打转。不标记 reachedEnd —— 更早的历史还在，重新勾选可继续补齐。
+        console.warn(`[auto-cache] ${key} 游标无法前进（before=${before}，本页最小 id=${plan.oldestId}），停止翻页`);
+        break;
+      }
+      before = plan.nextBefore;
+      if (page + 1 < AUTO_CACHE_SCAN_PAGES) {
+        await new Promise((resolve) => setTimeout(resolve, AUTO_CACHE_SCAN_PAGE_GAP));
+      }
     }
     job.result = {
       queued, scanned, pages, duplicates, skipped, failed,
@@ -1385,6 +1430,11 @@ module.exports = {
   cacheMedia,
   cacheLargeVideosInChat: startAutoCacheScan,
   cacheLargeVideosStatus,
+  // R4.71：以下三项仅供单测断言（守卫扫描页大小 ≤ 服务端硬上限、验证翻页决策），
+  // 不参与运行时业务逻辑；生产代码一律走模块内部引用。
+  autoCachePagePlan,
+  AUTO_CACHE_SCAN_PAGE_SIZE,
+  AUTO_CACHE_SCAN_PAGES,
   cancelDownloadTask: cancelGoDownloadTask,
   chatDetails,
   chatMedia,
