@@ -35,7 +35,7 @@ expectRelogin("chatMedia 对遗留账号返回 409", () => tg.chatMedia(USER, AC
 expectRelogin("sendText 对遗留账号返回 409", () => tg.sendText(USER, ACCOUNT, "peer-1", "hi"));
 expectRelogin("clickMessageButton 对遗留账号返回 409", () => tg.clickMessageButton(USER, ACCOUNT, "peer-1", 1, Buffer.from("{}").toString("base64")));
 expectRelogin("resolveTelegramLink 对遗留账号返回 409", () => tg.resolveTelegramLink(USER, ACCOUNT, "https://t.me/durov"));
-expectRelogin("search 对遗留账号返回 409", () => tg.search(USER, ACCOUNT, "hello"));
+// R4.70：search 已随死路由 /api/search 一并删除（前端零引用），原守卫用例移除。
 expectRelogin("downloadMedia 对遗留账号返回 409", () => tg.downloadMedia(USER, ACCOUNT, "peer-1", 1));
 expectRelogin("mediaThumbnail 对遗留账号返回 409", () => tg.mediaThumbnail(USER, ACCOUNT, "peer-1", 1));
 expectRelogin("profilePhoto 对遗留账号返回 409", () => tg.profilePhoto(USER, ACCOUNT, "peer-1"));

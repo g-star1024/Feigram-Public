@@ -572,18 +572,6 @@ async function resolveTelegramLink(userId, accountId, url) {
   throw reloginError(accountId);
 }
 
-async function search(userId, accountId, query) {
-  // M4.4：native 账号的会话检索已由 Go 提供，全局消息搜索改走 Go 的 messages.search。
-  if (await nativeAccountRecord(userId, accountId)) {
-    const dialogs = await listChats(userId, accountId, query);
-    const messages = await downloaderSidecar
-      .accountSearch({ userId, accountId, query })
-      .catch(() => []);
-    return { chats: dialogs, messages };
-  }
-  throw reloginError(accountId);
-}
-
 async function mediaFileInfo(userId, accountId, message, contentType, kind) {
   const directories = await cacheSettings();
   const extension = mime.extension(contentType);
@@ -1436,7 +1424,6 @@ module.exports = {
   profilePhoto,
   resolveTelegramLink,
   restoreBackgroundTasks: restoreGoBackgroundTasks,
-  search,
   sendText,
   startLogin
 };
