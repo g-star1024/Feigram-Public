@@ -12,7 +12,7 @@ on:
       - "Feigram*"
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 env:
@@ -36,6 +36,35 @@ jobs:
             echo "APP_VERSION=dev" >> "$GITHUB_ENV"
           fi
 
+      # --- 自动构建 FPK 并发布 GitHub Release（仅推 Feigram* tag 时）---
+      # 说明：FPK 构建依赖 Node 22 + 网络（prepare 脚本会自行 curl 下载 Go/Node 运行时），
+      # 与 build-fpk.yml 前置一致，无需 setup-go。
+      - name: Setup Node.js
+        if: github.event_name == 'push'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install client dependencies
+        if: github.event_name == 'push'
+        run: npm --prefix client ci
+
+      - name: Build FPK package
+        if: github.event_name == 'push'
+        env:
+          VERSION: ${{ env.APP_VERSION }}
+        run: scripts/build-native-fpk.sh
+
+      - name: Create GitHub Release with FPK asset
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Feigram ${{ env.APP_VERSION }}
+          files: release/*.fpk
+          generate_release_notes: true
+
+      # --- Docker 镜像构建与推送（原有）---
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
