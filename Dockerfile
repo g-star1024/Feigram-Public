@@ -24,11 +24,16 @@ RUN npm run build
 # ---------- Stage 3：运行层 ----------
 FROM node:22-bookworm-slim
 WORKDIR /app
+# ARG 是 per-stage 的：Stage 1 声明的 ARG 在本层不可见（R4.69 根因）。
+# Node 侧 serverVersion / 诊断自报版本 / 迁移落库均依赖 process.env.APP_VERSION，
+# 缺失时会回落 package.json 的 0.1.0 或 "dev"，导致健康接口与「更新检查」全部失真。
+ARG APP_VERSION=dev
 # Node 网关与 Go 下载器的全部持久化数据默认收敛到 /data（可用环境变量覆盖）
 ENV NODE_ENV=production \
     DATA_DIR=/data \
     DOWNLOAD_DIR=/data/downloads \
-    FEIGRAM_DOWNLOADER_PORT=3090
+    FEIGRAM_DOWNLOADER_PORT=3090 \
+    APP_VERSION=${APP_VERSION}
 COPY server/package*.json ./server/
 RUN cd server && npm ci --omit=dev \
     && npm cache clean --force

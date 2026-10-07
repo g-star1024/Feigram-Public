@@ -19,7 +19,6 @@ const { ensureStore, findUserByUsername, readUsers, safeId, upsertUser } = requi
 const { hashPassword } = require("./cryptoBox");
 const { publicSettings, readSettings, writeSettings } = require("./settings");
 const { maskProxyUrl } = require("./proxyConfig");
-const { readPolicies } = require("./policies");
 const { readAbout, readAnnouncements } = require("./releaseContent");
 const { checkForUpdates, diagnostics, clearLog } = require("./diagnostics");
 const downloaderSidecar = require("./downloaderSidecar");
@@ -106,7 +105,6 @@ app.get("/api/health", asyncRoute(async (_req, res) => {
 app.get("/api/bootstrap/status", asyncRoute(bootstrapStatus));
 app.post("/api/bootstrap", rateLimit({ windowMs: 60000, max: 5 }), asyncRoute(bootstrap));
 app.post("/api/login", rateLimit({ windowMs: 60000, max: 12 }), asyncRoute(login));
-app.get("/api/policies", asyncRoute(async (_req, res) => res.json(await readPolicies())));
 app.get("/api/about", asyncRoute(async (_req, res) => res.json(readAbout())));
 
 // M4.1：移除 Node 侧 GramJS 内部媒体桥（原 internal/media* 路由）；
@@ -310,10 +308,6 @@ app.post("/api/messages/callback", asyncRoute(async (req, res) => {
 app.post("/api/resolve-link", asyncRoute(async (req, res) => {
   const { account, url } = req.body || {};
   res.json(await tg.resolveTelegramLink(req.user.id, account, url));
-}));
-
-app.get("/api/search", asyncRoute(async (req, res) => {
-  res.json(await tg.search(req.user.id, req.query.account, req.query.query || ""));
 }));
 
 app.get("/api/avatar/:account/:peer?", asyncRoute(async (req, res) => {

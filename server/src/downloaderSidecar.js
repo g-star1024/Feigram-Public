@@ -285,10 +285,6 @@ function accountResolve({ userId, accountId, link, messageId = 0 }) {
   return request(accountChatPath(accountId, "resolve", { userId, peer: link, message: messageId }), { timeoutMs: 30000 });
 }
 
-function accountSearch({ userId, accountId, query, limit = 0 }) {
-  return request(accountChatPath(accountId, "search", { userId, query, limit }), { timeoutMs: 45000 });
-}
-
 // 头像是二进制，不能用 JSON request()，单独走 arrayBuffer。
 async function accountAvatar({ userId, accountId, peer }) {
   const controller = new AbortController();
@@ -346,6 +342,5 @@ module.exports = {
   accountSend,
   accountButton,
   accountDetails,
-  accountResolve,
-  accountSearch
+  accountResolve
 };

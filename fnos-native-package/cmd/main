@@ -27,8 +27,8 @@ export FEIGRAM_DOWNLOADER_URL="http://127.0.0.1:${DOWNLOADER_PORT}"
 export FEIGRAM_DOWNLOADER_LOG="$DOWNLOADER_LOG_FILE"
 export FEIGRAM_DOWNLOADER_SECRET_FILE="${DATA_HOME}/data/app-secret"
 export APP_EDITION="Feigram 2.0 fnOS Client Edition"
-export APP_VERSION="2.6.46"
-export APP_CHANGELOG="新增 Docker 部署：官方多架构镜像（amd64/arm64）发布到 ghcr.io，其他 NAS 与服务器 docker run/compose 即可部署，数据单卷持久化；README 重写为最新功能说明"
+export APP_VERSION="2.6.48"
+export APP_CHANGELOG="修复后台缓存扫描分页：页大小超过 messages.getHistory 硬上限导致「1 页 100 条即判已到历史尽头」"
 export NODE_ENV="production"
 
 is_running() {

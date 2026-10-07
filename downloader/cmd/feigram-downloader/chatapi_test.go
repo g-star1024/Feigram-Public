@@ -516,3 +516,161 @@ func dialogRequestLiterals(source []byte) [][]byte {
 	}
 	return out
 }
+
+// --- R4.71：/messages 真分页守卫 -------------------------------------------
+//
+// 根因回顾：messages.getHistory 的 limit 上限是 100（Telegram 官方 offsets 文档
+// 「typically between 1 and 100」），而 /messages 曾把调用方请求量（可达 200）
+// 直接透传 → 服务端静默只回 100 条 → 客户端「本页不满一页 = 已到历史尽头」的判定
+// 在**第 1 页**就成立。用户实测 2.6.47：35328 个视频的群，后台缓存扫描永远只扫
+// 1 页 100 条消息、重复点击零新增。
+//
+// 下面五个用例分别锁住：页大小不越界、请求量被如实兑现、**短页不等于尽头**、
+// 预算耗尽不等于尽头、分页失败不返回部分结果。
+
+func TestChatHistoryServerLimitWithinTelegramHardCap(t *testing.T) {
+	if chatHistoryServerLimit > 100 {
+		t.Fatalf("chatHistoryServerLimit = %d，超过 messages.getHistory 的服务端硬上限 100（会导致静默截断）", chatHistoryServerLimit)
+	}
+	if nativeMessagePageRounds < 1 {
+		t.Fatalf("nativeMessagePageRounds = %d，必须 ≥ 1", nativeMessagePageRounds)
+	}
+}
+
+// fakeDescendingPage 构造一页「ID 从 startID 递减 count 条」的正常返回。
+func fakeDescendingPage(startID int, count int) nativeHistoryPage {
+	page := nativeHistoryPage{RawEntries: count}
+	for i := 0; i < count; i++ {
+		page.Messages = append(page.Messages, &tg.Message{ID: startID - i})
+	}
+	return page
+}
+
+func collectHistoryForTest(fetch func(int, int) (nativeHistoryPage, error), limit int, maxPages int) ([]map[string]any, nativeHistoryStats, error) {
+	return collectHistoryMessages(limit, 0, maxPages, fetch,
+		func(message *tg.Message) map[string]any { return map[string]any{"id": message.ID} },
+		nil,
+	)
+}
+
+func TestCollectHistoryMessagesFillsRequestedLimitAcrossPages(t *testing.T) {
+	var requested []int
+	items, stats, err := collectHistoryForTest(func(offsetID int, pageSize int) (nativeHistoryPage, error) {
+		requested = append(requested, pageSize)
+		if pageSize > chatHistoryServerLimit {
+			t.Fatalf("请求页大小 %d 超过服务端硬上限 %d", pageSize, chatHistoryServerLimit)
+		}
+		start := 1000
+		if offsetID > 0 {
+			start = offsetID - 1
+		}
+		return fakeDescendingPage(start, pageSize), nil
+	}, 200, 20)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(items) != 200 {
+		t.Fatalf("请求 200 条必须被如实兑现，实际 %d 条", len(items))
+	}
+	if stats.Pages != 2 {
+		t.Fatalf("期望翻 2 页，实际 %d 页", stats.Pages)
+	}
+	if stats.ReachedEnd {
+		t.Fatal("取满请求量时不得标记「已到历史尽头」")
+	}
+	if len(requested) != 2 || requested[0] != chatHistoryServerLimit || requested[1] != chatHistoryServerLimit {
+		t.Fatalf("期望每页请求 %d 条，实际 %v", chatHistoryServerLimit, requested)
+	}
+}
+
+// 本用例就是回归本体：旧实现（只按「本页不满一页」判尽头）会在第 2 页收工。
+func TestCollectHistoryMessagesShortPageDoesNotMeanEnd(t *testing.T) {
+	calls := 0
+	items, stats, err := collectHistoryForTest(func(offsetID int, pageSize int) (nativeHistoryPage, error) {
+		calls++
+		switch calls {
+		case 1:
+			return fakeDescendingPage(500, 100), nil
+		case 2:
+			// 不满一页（30 < 100）但历史显然未尽——旧实现正是在这里误判并收工。
+			return fakeDescendingPage(400, 30), nil
+		default:
+			return nativeHistoryPage{}, nil
+		}
+	}, 200, 20)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(items) != 130 {
+		t.Fatalf("期望 130 条，实际 %d 条", len(items))
+	}
+	if stats.Pages != 3 {
+		t.Fatalf("短页后必须继续翻到空页确认，期望 3 页，实际 %d 页", stats.Pages)
+	}
+	if !stats.ReachedEnd {
+		t.Fatal("空页必须标记「已到历史尽头」")
+	}
+}
+
+func TestCollectHistoryMessagesBudgetExhaustedIsNotEnd(t *testing.T) {
+	items, stats, err := collectHistoryForTest(func(offsetID int, pageSize int) (nativeHistoryPage, error) {
+		start := 5000
+		if offsetID > 0 {
+			start = offsetID - 1
+		}
+		return fakeDescendingPage(start, pageSize), nil
+	}, 500, 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(items) != 300 || stats.Pages != 3 {
+		t.Fatalf("期望 3 页 300 条，实际 %d 页 %d 条", stats.Pages, len(items))
+	}
+	if stats.ReachedEnd {
+		t.Fatal("预算耗尽代表「还有更早历史」，不得标记已到尽头")
+	}
+	if stats.LastCursor != 4701 {
+		t.Fatalf("末页游标应为 4701，实际 %d", stats.LastCursor)
+	}
+}
+
+func TestCollectHistoryMessagesErrorNeverReturnsPartialResults(t *testing.T) {
+	calls := 0
+	items, stats, err := collectHistoryForTest(func(offsetID int, pageSize int) (nativeHistoryPage, error) {
+		calls++
+		if calls == 2 {
+			return nativeHistoryPage{}, errors.New("rpc error code 420: FLOOD_WAIT (24)")
+		}
+		return fakeDescendingPage(300, pageSize), nil
+	}, 200, 20)
+	if err == nil {
+		t.Fatal("分页失败必须上抛错误（否则会被上层误读成「已到历史尽头」）")
+	}
+	if items != nil {
+		t.Fatalf("分页失败时不得返回部分结果，实际返回 %d 条", len(items))
+	}
+	if stats.Pages != 1 {
+		t.Fatalf("期望已记录的页数为 1，实际 %d", stats.Pages)
+	}
+}
+
+func TestCollectHistoryMessagesStopsWhenCursorDoesNotAdvance(t *testing.T) {
+	calls := 0
+	items, stats, err := collectHistoryForTest(func(offsetID int, pageSize int) (nativeHistoryPage, error) {
+		calls++
+		// 服务端忽略游标、永远返回同一页（模拟异常返回）。
+		return fakeDescendingPage(900, pageSize), nil
+	}, 500, 20)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls > 2 {
+		t.Fatalf("游标未前进时必须停止翻页，实际请求了 %d 次", calls)
+	}
+	if len(items) != 100 {
+		t.Fatalf("跨页必须去重，期望 100 条，实际 %d 条", len(items))
+	}
+	if stats.ReachedEnd {
+		t.Fatal("游标卡死不等于已到历史尽头")
+	}
+}

@@ -60,9 +60,24 @@ const (
 	nativeDialogPageGap     = 200 * time.Millisecond
 	defaultChatMessageLimit = 50
 	maxChatMessageLimit     = 200
-	avatarChunkSize         = 256 * 1024
-	maxAvatarBytes          = 8 * 1024 * 1024
-	chatQueryTimeout        = 60 * time.Second
+	// chatHistoryServerLimit 是 messages.getHistory 单次 RPC 的**硬上限**：
+	// Telegram 官方 offsets 文档（core.telegram.org/api/offsets）明确
+	// 「limit … typically between 1 and 100」，超过 100 一律按 100 回。
+	// R4.71 根因：此前把 maxChatMessageLimit(200) 当作「单次可拉取量」直接透传给
+	// 服务端，服务端只回 100 条 → 调用方「本页不满一页 = 已到历史尽头」的判定在
+	// **第 1 页**即误判（用户实测 2.6.47：35328 个视频的群，后台缓存扫描永远只扫
+	// 1 页 100 条消息、重复点击零新增）。与 R4.36 的会话列表单页上限同源，
+	// 属同一类根因的第二次出现——「单页上限 ≠ 总量上限」。
+	chatHistoryServerLimit = 100
+	// nativeMessagePageRounds 是单次 /messages 请求内部最多翻多少页
+	// （100 × 20 = 2000 条原始条目），用于把「调用方请求量」如实兑现。
+	nativeMessagePageRounds = 20
+	// nativeMessagePageGap 是页间小间隔：连发 getHistory 会自造限流
+	// （同 nativeDialogPageGap 的教训：5 页连发触发过 FLOOD_WAIT(24)）。
+	nativeMessagePageGap = 150 * time.Millisecond
+	avatarChunkSize      = 256 * 1024
+	maxAvatarBytes       = 8 * 1024 * 1024
+	chatQueryTimeout     = 60 * time.Second
 )
 
 // nativePeerInfo 描述一个 Telegram peer 的最小可用元数据。
@@ -1062,6 +1077,115 @@ func nativeFilterMatchesChat(filter map[string]any, chat map[string]any) bool {
 
 // --- 消息历史 -------------------------------------------------------------
 
+// nativeHistoryPage 是一页 messages.getHistory 的归一化结果。
+// RawEntries 是服务端本页返回的**原始条目数**（含服务消息/空消息），
+// 它与 Messages 的差值会让「返回条数 < 请求条数」天然成立，因此
+// **不能**用「收到的消息条数」判历史尽头（R4.71 的误判正是这一类）。
+type nativeHistoryPage struct {
+	Messages   []*tg.Message
+	RawEntries int
+}
+
+// nativeHistoryStats 是分页过程的可观测结果（供日志与单测断言）。
+type nativeHistoryStats struct {
+	Pages      int
+	RawEntries int
+	Messages   int
+	ReachedEnd bool
+	LastCursor int
+}
+
+// collectHistoryMessages 按 OffsetID 游标连续翻页并逐条序列化，直到：
+//
+//	① 已序列化条数达到 limit（调用方请求量已被如实兑现）；
+//	② 服务端返回**空页** —— 这是唯一可靠的「已到历史尽头」信号
+//	   （游标严格递减，空页即该位置之前再无消息）；
+//	③ 页数预算 maxPages 用尽 —— 此时 ReachedEnd 保持 false，表示「还有更早历史」；
+//	④ 游标无法推进（本页无可用消息 ID，或服务端未按游标前进）——防原地打转。
+//
+// **刻意不采用「本页不满一页即判尽头」**：一页里可能含服务消息，序列化后天然少于
+// 请求量；且第三方库/TDLib 文档均提示「返回条数可以小于指定 limit」。用条数猜尽头
+// 会把「一次抖动」固化成「永久截断」。代价仅是在真尽头多花 1 次 RPC 取空页确认。
+//
+// 任一分页 RPC 失败即整体返回 error，**绝不静默返回部分结果**：
+// R4.39 教训——部分结果会被上层「不满一页」判据误读成「已到历史尽头」。
+//
+// 抽成纯函数（fetch/serialize 均为注入回调）是为了让分页游标推进、末尾判定、
+// 跨页去重这三件最易出错的事可离线单测（铁律 4 的真实验证）。
+func collectHistoryMessages(
+	limit int,
+	before int,
+	maxPages int,
+	fetch func(offsetID int, pageSize int) (nativeHistoryPage, error),
+	serialize func(message *tg.Message) map[string]any,
+	logf func(format string, args ...any),
+) ([]map[string]any, nativeHistoryStats, error) {
+	items := []map[string]any{}
+	stats := nativeHistoryStats{}
+	seen := map[int]bool{}
+	cursor := before
+	for page := 0; page < maxPages; page++ {
+		// 页大小必须锁在服务端硬上限之内：超过 100 服务端会静默截断，
+		// 于是「返回 < 请求」被误读为「已到末尾」（R4.71 根因）。
+		pageSize := chatHistoryServerLimit
+		if remain := limit - len(items); remain > 0 && remain < pageSize {
+			pageSize = remain
+		}
+		chunk, err := fetch(cursor, pageSize)
+		if err != nil {
+			return nil, stats, err
+		}
+		stats.Pages++
+		stats.RawEntries += chunk.RawEntries
+		if chunk.RawEntries == 0 {
+			stats.ReachedEnd = true
+			break
+		}
+		added := 0
+		pageCursor := 0
+		for _, message := range chunk.Messages {
+			if message == nil || message.ID <= 0 {
+				continue
+			}
+			// pageCursor 取本页**全部**返回消息的最小 ID（含已去重的），
+			// 这样即便服务端重发旧页也能让游标继续前进，不会卡死。
+			if pageCursor == 0 || message.ID < pageCursor {
+				pageCursor = message.ID
+			}
+			if seen[message.ID] {
+				continue
+			}
+			seen[message.ID] = true
+			items = append(items, serialize(message))
+			added++
+		}
+		stats.Messages = len(items)
+		if logf != nil {
+			logf("history page %d：请求 %d 条 / 服务端返回 %d 条原始条目 / 新增 %d 条消息（累计 %d，下一页游标 %d）",
+				stats.Pages, pageSize, chunk.RawEntries, added, stats.Messages, pageCursor)
+		}
+		if len(items) >= limit {
+			break
+		}
+		if pageCursor <= 0 {
+			// 本页没有任何可用消息 ID（整页服务消息等）——无法推进游标。
+			// 不算「已到尽头」，交由上层按需继续（例如换个起点再扫）。
+			break
+		}
+		if cursor > 0 && pageCursor >= cursor {
+			// 服务端未按游标前进（返回了 ≥ 游标的消息）：再翻只会原地打转。
+			break
+		}
+		cursor = pageCursor
+		stats.LastCursor = pageCursor
+		if nativeMessagePageGap > 0 {
+			time.Sleep(nativeMessagePageGap)
+		}
+	}
+	sortMessagesByID(items)
+	return items, stats, nil
+}
+
 func (a *App) fetchNativeMessages(ctx context.Context, api *tg.Client, account NativeAccount, peerID string, limit int, before int, around int) ([]map[string]any, error) {
 	info, err := a.resolveNativePeer(ctx, api, account, peerID)
 	if err != nil {
@@ -1071,46 +1195,108 @@ func (a *App) fetchNativeMessages(ctx context.Context, api *tg.Client, account N
 	if err != nil {
 		return nil, err
 	}
-	request := &tg.MessagesGetHistoryRequest{Peer: peer, Limit: limit}
-	switch {
-	case around > 0:
-		request.OffsetID = around
-		request.AddOffset = -limit / 2
-	case before > 0:
-		request.OffsetID = before
+	if limit <= 0 {
+		limit = defaultChatMessageLimit
 	}
-	result, err := api.MessagesGetHistory(ctx, request)
-	if err != nil {
-		return nil, fmt.Errorf("获取消息失败：%w", err)
+	if limit > maxChatMessageLimit {
+		limit = maxChatMessageLimit
 	}
 	index := loadNativePeerIndex(account.UserID, account.AccountID)
-	messages, users, chats, ok := flattenNativeMessages(result)
-	if !ok {
-		return nil, errors.New("Telegram 返回了不支持的消息结果")
+	mergePagePeers := func(users []tg.UserClass, chats []tg.ChatClass) {
+		for id, peerInfo := range indexNativePeers(users, chats) {
+			index[id] = peerInfo
+		}
 	}
-	for id, peerInfo := range indexNativePeers(users, chats) {
-		index[id] = peerInfo
+
+	// fetchPage 是「一页」的真实实现。瞬态失败重试一次（R4.37 教训：真分页后中间
+	// 某页失败不应让整单报废），仍失败则上抛由上层决定重试/提示——绝不返回部分
+	// 结果（见 collectHistoryMessages 注释）。
+	fetchPage := func(offsetID int, pageSize int) (nativeHistoryPage, error) {
+		request := &tg.MessagesGetHistoryRequest{Peer: peer, Limit: pageSize}
+		if offsetID > 0 {
+			request.OffsetID = offsetID
+		}
+		var lastErr error
+		for attempt := 0; attempt < 2; attempt++ {
+			result, callErr := api.MessagesGetHistory(ctx, request)
+			if callErr == nil {
+				entries, users, chats, ok := flattenNativeMessages(result)
+				if !ok {
+					return nativeHistoryPage{}, errors.New("Telegram 返回了不支持的消息结果")
+				}
+				mergePagePeers(users, chats)
+				page := nativeHistoryPage{RawEntries: len(entries)}
+				for _, entry := range entries {
+					if message, ok := entry.(*tg.Message); ok && message != nil {
+						page.Messages = append(page.Messages, message)
+					}
+				}
+				return page, nil
+			}
+			lastErr = callErr
+			if ctx.Err() != nil {
+				break
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		return nativeHistoryPage{}, fmt.Errorf("获取消息失败：%w", lastErr)
 	}
-	storeNativePeerIndex(account.UserID, account.AccountID, index)
 
 	items := []map[string]any{}
-	found := false
-	for _, entry := range messages {
-		message, ok := entry.(*tg.Message)
-		if !ok || message == nil {
-			continue
+	if around > 0 {
+		// around（跳转到指定消息）语义是「以某条消息为中心的上下文窗口」，
+		// 必须单次请求完成——翻页会把窗口拉偏。页大小同样受硬上限约束。
+		request := &tg.MessagesGetHistoryRequest{
+			Peer:      peer,
+			Limit:     minInt(limit, chatHistoryServerLimit),
+			OffsetID:  around,
+			AddOffset: -limit / 2,
 		}
-		if around > 0 && message.ID == around {
-			found = true
+		result, callErr := api.MessagesGetHistory(ctx, request)
+		if callErr != nil {
+			return nil, fmt.Errorf("获取消息失败：%w", callErr)
 		}
-		items = append(items, serializeNativeMessage(message, index))
+		messages, users, chats, ok := flattenNativeMessages(result)
+		if !ok {
+			return nil, errors.New("Telegram 返回了不支持的消息结果")
+		}
+		mergePagePeers(users, chats)
+		found := false
+		for _, entry := range messages {
+			message, ok := entry.(*tg.Message)
+			if !ok || message == nil {
+				continue
+			}
+			if message.ID == around {
+				found = true
+			}
+			items = append(items, serializeNativeMessage(message, index))
+		}
+		if !found {
+			target, targetErr := a.fetchNativeMessageByID(ctx, api, info, around)
+			if targetErr == nil && target != nil {
+				items = append(items, serializeNativeMessage(target, index))
+			}
+		}
+	} else {
+		// R4.71 根因修复：此前 Limit 直接透传 limit（可达 200），服务端按硬上限
+		// 只回 100 条，调用方据此判「已到历史尽头」而停止翻页。现在内部按
+		// OffsetID 游标真分页把「调用方请求量」如实兑现，页大小锁在硬上限内。
+		var stats nativeHistoryStats
+		items, stats, err = collectHistoryMessages(
+			limit, before, nativeMessagePageRounds, fetchPage,
+			func(message *tg.Message) map[string]any { return serializeNativeMessage(message, index) },
+			log.Printf,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if stats.Pages > 1 || stats.RawEntries > stats.Messages {
+			log.Printf("chatapi: /messages 深翻 %d 页、%d 条原始条目 → %d 条消息（空页确认到尽头=%v，末页游标=%d）",
+				stats.Pages, stats.RawEntries, stats.Messages, stats.ReachedEnd, stats.LastCursor)
+		}
 	}
-	if around > 0 && !found {
-		target, targetErr := a.fetchNativeMessageByID(ctx, api, info, around)
-		if targetErr == nil && target != nil {
-			items = append(items, serializeNativeMessage(target, index))
-		}
-	}
+	storeNativePeerIndex(account.UserID, account.AccountID, index)
 	sortMessagesByID(items)
 	return items, nil
 }
