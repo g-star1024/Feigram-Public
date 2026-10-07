@@ -49,6 +49,8 @@ const IDLE_SPEED_RESET_MS = 20 * 1000;
 // R4.52：500 → 2000，与 Go 侧 maxChatDialogLimit 对齐——用户实测 545 条会话
 // 只显示 500 条，分页深翻能力（30 轮×100）本就足够，此前是总量上限卡住了。
 const DIALOG_FETCH_LIMIT = 2000;
+// ② 在线代理（proxyBlob）拉流超时：避免 Telegram/Go 侧卡死时前端永久转圈。
+const PROXY_BLOB_TIMEOUT_MS = 20 * 1000;
 
 function stableId(prefix, ...parts) {
   return `${prefix}_${crypto.createHash("sha1").update(parts.map((part) => String(part ?? "")).join("|")).digest("hex").slice(0, 24)}`;
@@ -681,7 +683,19 @@ async function cacheMedia(userId, accountId, peerId, messageId) {
 async function streamVideoMedia(userId, accountId, peerId, messageId, rangeHeader, res) {
   // B：原生账号视频走 Go blob 端点（支持 Range）；遗留 GramJS 账号需重新登录转原生。
   if (await nativeAccountRecord(userId, accountId)) {
-    return proxyBlob(res, goBlobSourceUrl(userId, accountId, peerId, messageId), { inline: true, fileName: `media-${messageId}`, range: rangeHeader });
+    // ① 本地缓存优先：已完成的下载任务其完整文件已在磁盘，直接本地直出（支持 Range 拖拽），
+    // 不依赖 Telegram 实时可达——这是「已缓存却一直转圈」的根治点。
+    const local = await nativeCachedFile(userId, accountId, peerId, messageId);
+    if (local) {
+      return serveLocalFile(res, local.filePath, local.size, rangeHeader);
+    }
+    // 本地缺失/不完整：回退 Go blob 在线拉流（带超时与显式报错）。
+    await proxyBlob(res, goBlobSourceUrl(userId, accountId, peerId, messageId), {
+      inline: true,
+      fileName: `media-${messageId}`,
+      range: rangeHeader
+    });
+    return true; // 已处理：成功则已流式输出，失败则 proxyBlob 已写错误状态码。
   }
   throw reloginError(accountId);
 }
@@ -728,8 +742,29 @@ function reloginError(accountId) {
 // B：原生账号媒体字节流统一经 Go 原生 blob 端点（支持 Range / FILE_MIGRATE / file_reference 续期），
 // Node 侧仅做服务端代理，不整份落地。
 async function proxyBlob(res, blobUrl, { inline = true, fileName = "media", range } = {}) {
-  const upstream = await fetch(blobUrl, { headers: range ? { Range: String(range) } : {} });
-  if (!upstream.ok && upstream.status !== 206) return false;
+  // ② 拉流超时：Telegram/Go 侧卡死时主动断开，避免前端永久转圈。
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROXY_BLOB_TIMEOUT_MS);
+  let upstream;
+  try {
+    upstream = await fetch(blobUrl, {
+      headers: range ? { Range: String(range) } : {},
+      signal: controller.signal
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    // ③ 超时/中断：显式 504，让前端 <video onError> 能触发（而非空响应死转）。
+    if (!res.headersSent) res.status(504).end();
+    return false;
+  }
+  clearTimeout(timer);
+  if (!upstream.ok && upstream.status !== 206) {
+    // ③ 上游非成功（file_reference 过期/账号不可达等）：显式错误码，绝不返回空响应。
+    if (!res.headersSent) {
+      res.status(upstream.status >= 400 ? upstream.status : 502).end();
+    }
+    return false;
+  }
   const status = upstream.status === 206 ? 206 : 200;
   const headers = {};
   const ct = upstream.headers.get("content-type");
@@ -742,11 +777,64 @@ async function proxyBlob(res, blobUrl, { inline = true, fileName = "media", rang
   headers["Cache-Control"] = "no-store";
   headers["Content-Disposition"] = `${inline ? "inline" : "attachment"}; filename="${encodeURIComponent(fileName)}"`;
   res.writeHead(status, headers);
-  for await (const chunk of upstream.body) {
-    if (res.destroyed) break;
-    if (!res.write(chunk)) await new Promise((resolve) => res.once("drain", resolve));
+  try {
+    for await (const chunk of upstream.body) {
+      if (res.destroyed) break;
+      if (!res.write(chunk)) await new Promise((resolve) => res.once("drain", resolve));
+    }
+    res.end();
+  } catch {
+    if (!res.destroyed) {
+      try { res.end(); } catch { /* already gone */ }
+    }
   }
-  res.end();
+  return true;
+}
+
+// ① 本地缓存优先：仅当下载任务已完成且完整文件确实在磁盘时才返回，播放/预览直接本地直出。
+// 这是「资源库已缓存视频却一直转圈」的根治点——此前播放永远走在线 blob 拉流。
+async function nativeCachedFile(userId, accountId, peerId, messageId) {
+  try {
+    const task = await downloaderSidecar.getTask(downloadTaskId(userId, accountId, peerId, messageId));
+    if (!task || task.status !== "completed") return null;
+    const filePath = task.filePath || "";
+    if (!filePath) return null;
+    const stat = await fs.stat(filePath).catch(() => null);
+    if (!stat || !stat.isFile() || stat.size <= 0) return null;
+    const expected = Number(task.size || 0);
+    // 声明大小存在则严格比对，避免半截 .part 残留被当成完整文件；无声明大小则退化为仅存在性校验。
+    if (expected > 0 && stat.size !== expected) return null;
+    return { filePath, size: stat.size };
+  } catch {
+    return null;
+  }
+}
+
+// ① 本地文件直出（支持 Range 拖拽/续播），与在线流保持相同响应头语义。
+function serveLocalFile(res, filePath, size, rangeHeader) {
+  const headers = {
+    "Content-Type": mime.lookup(filePath) || "application/octet-stream",
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "private, max-age=86400"
+  };
+  headers["Content-Disposition"] = `inline; filename="${encodeURIComponent(path.basename(filePath))}"`;
+  if (rangeHeader) {
+    const m = /bytes=(\d*)-(\d*)/.exec(rangeHeader);
+    if (m) {
+      const start = m[1] ? Number(m[1]) : 0;
+      const end = Math.min(m[2] ? Number(m[2]) : size - 1, size - 1);
+      if (Number.isFinite(start) && Number.isFinite(end) && start >= 0 && start <= end) {
+        headers["Content-Range"] = `bytes ${start}-${end}/${size}`;
+        headers["Content-Length"] = end - start + 1;
+        res.writeHead(206, headers);
+        fs.createReadStream(filePath, { start, end }).pipe(res);
+        return true;
+      }
+    }
+  }
+  headers["Content-Length"] = size;
+  res.writeHead(200, headers);
+  fs.createReadStream(filePath).pipe(res);
   return true;
 }
 
@@ -1435,6 +1523,11 @@ module.exports = {
   autoCachePagePlan,
   AUTO_CACHE_SCAN_PAGE_SIZE,
   AUTO_CACHE_SCAN_PAGES,
+  // R4.73：以下三项仅供单测（本地优先播放逻辑 + 在线代理超时/报错），不参与运行时业务逻辑。
+  nativeCachedFile,
+  serveLocalFile,
+  proxyBlob,
+  PROXY_BLOB_TIMEOUT_MS,
   cancelDownloadTask: cancelGoDownloadTask,
   chatDetails,
   chatMedia,
