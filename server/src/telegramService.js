@@ -1136,12 +1136,15 @@ async function deleteGoDownloadTask(userId, taskId) {
   return { ok: true };
 }
 
+// R4.76：返回可区分状态（queued/duplicate/cancelled/skip）。
+// 关键修正：此前 Node 排除 cancelled 做重复判断，但 Go 侧对 source=auto 的任务
+// 不会复活 cancelled 状态（R4.26 故意设计：后台缓存不得擅自复活用户取消的任务）。
+// 这导致「已取消」任务被重复计数为「已提交」，前端却过滤掉 cancelled，
+// 用户看到「提交 100 个、下载中心只有 2 个」的落差。
 async function cacheVideoSilentlyGo(userId, accountId, peerId, message, entity = null) {
   const contentType = message.document?.mimeType || "";
   const kind = mediaKind(message, contentType);
   const size = Number(message.file?.size || message.document?.size || 0);
-  // R4.57：返回可区分状态（queued/duplicate/skip），让调用方统计真实的
-  // 「新增/重复/跳过」，不再把三种情况混成一个 false。
   if (kind !== "video" || size <= VIDEO_CACHE_THRESHOLD) return "skip";
   const mediaInfo = await mediaFileInfo(userId, accountId, message, contentType, kind);
   const dedupKey = silentDedupKey(userId, accountId, peerId, mediaInfo.fileName, size);
@@ -1150,11 +1153,14 @@ async function cacheVideoSilentlyGo(userId, accountId, peerId, message, entity =
     task.userId === userId &&
     task.accountId === accountId &&
     task.peerId === peerId &&
-    task.status !== "cancelled" &&
     (task.id === goDownloaderTaskId(userId, accountId, peerId, message.id) ||
       silentDedupKey(task.userId, task.accountId, task.peerId, task.fileName, task.size) === dedupKey)
   ));
-  if (duplicate) return "duplicate";
+  if (duplicate) {
+    // cancelled 单独分类——Go 侧不会为 auto 来源复活它，
+    // 单独统计才能解释「为什么没新增」。
+    return duplicate.status === "cancelled" ? "cancelled" : "duplicate";
+  }
   await ensureGoDownloadTask(userId, accountId, peerId, message.id, {
     source: "auto",
     autoCache: true,
@@ -1264,6 +1270,7 @@ async function runAutoCacheScan(userId, accountId, peerId, job, key) {
     const entity = await resolveNativePeerEntity(userId, accountId, peerId);
     let queued = 0;
     let duplicates = 0;
+    let cancelled = 0;
     let skipped = 0;
     let failed = 0;
     let scanned = 0;
@@ -1295,6 +1302,7 @@ async function runAutoCacheScan(userId, accountId, peerId, job, key) {
           const status = await cacheVideoSilentlyGo(userId, accountId, peerId, message, entity);
           if (status === "queued") queued += 1;
           else if (status === "duplicate") duplicates += 1;
+          else if (status === "cancelled") cancelled += 1;
           else skipped += 1;
         } catch (err) {
           failed += 1;
@@ -1313,12 +1321,12 @@ async function runAutoCacheScan(userId, accountId, peerId, job, key) {
       }
     }
     job.result = {
-      queued, scanned, pages, duplicates, skipped, failed,
+      queued, scanned, pages, duplicates, cancelled, skipped, failed,
       capped: queued >= AUTO_CACHE_SUBMIT_CAP,
       reachedEnd
     };
     job.status = "done";
-    console.log(`[auto-cache] ${key} 完成：新增 ${queued}/重复 ${duplicates}/跳过 ${skipped}/失败 ${failed}，扫描 ${pages} 页 ${scanned} 条${reachedEnd ? "（已到历史尽头）" : ""}，总耗时 ${Date.now() - startedMs}ms`);
+    console.log(`[auto-cache] ${key} 完成：新增 ${queued}/重复 ${duplicates}/已取消 ${cancelled}/跳过 ${skipped}/失败 ${failed}，扫描 ${pages} 页 ${scanned} 条${reachedEnd ? "（已到历史尽头）" : ""}，总耗时 ${Date.now() - startedMs}ms`);
   } catch (err) {
     job.status = "error";
     job.error = err.message || String(err);
@@ -1523,6 +1531,8 @@ module.exports = {
   autoCachePagePlan,
   AUTO_CACHE_SCAN_PAGE_SIZE,
   AUTO_CACHE_SCAN_PAGES,
+  // R4.76：仅供单测（已取消任务不应被后台缓存重复计数为「已提交」）。
+  cacheVideoSilentlyGo,
   // R4.73：以下三项仅供单测（本地优先播放逻辑 + 在线代理超时/报错），不参与运行时业务逻辑。
   nativeCachedFile,
   serveLocalFile,

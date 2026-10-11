@@ -83,3 +83,51 @@ test("R4.71：本页无可用消息 ID 时停止翻页，且不判已到尽头",
   assert.equal(plan.stop, true);
   assert.equal(plan.reachedEnd, false);
 });
+
+// --- R4.76：已取消任务不得被后台缓存重复计数为「已提交」 ----------------------------
+//
+// 根因回顾：Node 侧重复判断排除 cancelled，但 Go 侧 upsertTaskLocked 对 source=auto
+// 的任务不会复活 cancelled（R4.26 故意设计）。于是重新扫描时，Node 把已取消任务
+// 计为 queued，Go 保持 cancelled，前端过滤掉 cancelled，用户看到「提交 100、实际 2」。
+
+test("R4.76：已取消的后台缓存任务应被识别为 cancelled，而非 queued", async () => {
+  const downloaderSidecar = require("../src/downloaderSidecar");
+  const originalListTasks = downloaderSidecar.listTasks;
+
+  // 构造一个与消息 12345 同文件/大小的已取消任务。
+  const cancelledTask = {
+    id: tg.cacheVideoSilentlyGo
+      ? "placeholder"
+      : "ignored",
+    userId: "u-cancel",
+    accountId: "a-cancel",
+    peerId: "p-cancel",
+    status: "cancelled",
+    fileName: "cancelled-video.mp4",
+    size: 200 * 1024 * 1024
+  };
+  // 用 stableId 生成与 Node 一致的 task id。
+  const crypto = require("node:crypto");
+  const expectedId = `download_${crypto.createHash("sha1")
+    .update(["u-cancel", "a-cancel", "p-cancel", "12345"].join("|"))
+    .digest("hex")
+    .slice(0, 24)}`;
+  cancelledTask.id = expectedId;
+
+  downloaderSidecar.listTasks = async () => [cancelledTask];
+  try {
+    const result = await tg.cacheVideoSilentlyGo(
+      "u-cancel",
+      "a-cancel",
+      "p-cancel",
+      {
+        id: 12345,
+        document: { mimeType: "video/mp4", size: 200 * 1024 * 1024 },
+        file: { name: "cancelled-video.mp4" }
+      }
+    );
+    assert.equal(result, "cancelled", "已取消任务必须返回 cancelled，不能当成 queued");
+  } finally {
+    downloaderSidecar.listTasks = originalListTasks;
+  }
+});

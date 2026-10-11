@@ -14,6 +14,18 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.51",
+    title: "Feigram 2.6.51 更新",
+    version: "2.6.51",
+    level: "success",
+    createdAt: "2026-10-11T09:30:00.000Z",
+    body: [
+      "修复后台缓存扫描的统计偏差：已取消任务不再被计入「已提交」",
+      "下载中心任务数与提示文案保持一致，避免「提交 100 实际只有 2 个」的落差",
+      "群后台缓存单次提交上限 100 保持，30→100 的改动不受影响"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.50",
     title: "Feigram 2.6.50 更新",
     version: "2.6.50",

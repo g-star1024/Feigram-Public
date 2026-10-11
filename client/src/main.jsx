@@ -2298,6 +2298,7 @@ function App() {
     if (result.queued > 0) {
       const extra = [];
       if (result.duplicates) extra.push(`${result.duplicates} 个已在队列`);
+      if (result.cancelled) extra.push(`${result.cancelled} 个已取消、不再自动提交`);
       if (result.failed) extra.push(`${result.failed} 个失败`);
       if (result.capped) extra.push("已达单次上限 100，重新勾选可继续向更早的视频补齐");
       else if (!result.reachedEnd) extra.push("重新勾选可继续向更早的视频补齐");
@@ -2305,9 +2306,11 @@ function App() {
     } else {
       const reason = result.failed
         ? `${result.failed} 个入队失败`
-        : result.duplicates
-          ? `${result.duplicates} 个已在队列，无需重复提交`
-          : "扫描范围内没有大于 100MB 的未提交视频";
+        : result.cancelled
+          ? `${result.cancelled} 个已取消、不再自动提交`
+          : result.duplicates
+            ? `${result.duplicates} 个已在队列，无需重复提交`
+            : "扫描范围内没有大于 100MB 的未提交视频";
       const tail = !result.reachedEnd ? "；重新勾选可继续向更早的视频补齐" : "";
       text = `${depth}，未新增缓存任务：${reason}${tail}`;
     }
