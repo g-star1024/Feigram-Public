@@ -2299,7 +2299,7 @@ function App() {
       const extra = [];
       if (result.duplicates) extra.push(`${result.duplicates} 个已在队列`);
       if (result.failed) extra.push(`${result.failed} 个失败`);
-      if (result.capped) extra.push("已达单次上限 30，重新勾选可继续向更早的视频补齐");
+      if (result.capped) extra.push("已达单次上限 100，重新勾选可继续向更早的视频补齐");
       else if (!result.reachedEnd) extra.push("重新勾选可继续向更早的视频补齐");
       text = `已提交 ${result.queued} 个后台视频缓存任务（${depth}${extra.length ? `，${extra.join("，")}` : ""}）`;
     } else {

@@ -1172,11 +1172,11 @@ async function cacheVideoSilentlyGo(userId, accountId, peerId, message, entity =
 // 现在提交即受理（秒回 { started:true }），扫描在后台执行，结果经同路径 GET
 // 状态接口轮询取回；各阶段打点日志，失败原因记入 job.error 不静默。
 const autoCacheJobs = new Map();
-// R4.65：单次后台缓存提交上限——大群几百个视频不再一次性全部入队。
-const AUTO_CACHE_SUBMIT_CAP = 30;
+// R4.75：单次后台缓存提交上限——用户要求由 30 提升至 100，大群一次可提交更多视频。
+const AUTO_CACHE_SUBMIT_CAP = 100;
 // R4.67：扫描深度翻页——R4.57 的「只扫最近 200 条」让下拉加载出的更早视频永远
 // 没机会入队（用户实测：绿勾只出现在首屏内容）。改为按 before 游标循环翻页；
-// 已入队的按重复跳过且不占 30 名额，因此重复勾选会逐轮向更早的历史补齐。
+// 已入队的按重复跳过且不占 100 名额，因此重复勾选会逐轮向更早的历史补齐。
 //
 // R4.71 修正：页大小必须 ≤ Go /messages 的单次 RPC 硬上限（messages.getHistory
 // 的 limit 上限为 100，见 Telegram 官方 offsets 文档「typically between 1 and 100」）。
@@ -1270,9 +1270,9 @@ async function runAutoCacheScan(userId, accountId, peerId, job, key) {
     let pages = 0;
     let reachedEnd = false;
     let before = 0;
-    // R4.65：单次提交上限 30——大群几百个视频不再一次性全部入队挤占
-    // 并发与磁盘；达到上限即停止翻页（不再像旧实现那样把剩余消息逐条计
-    // skipped），重复勾选时已入队的按重复跳过、不占名额，继续向更早历史补。
+    // R4.75：单次提交上限 100（原 30，用户要求提升）——大群一次可入队更多视频；
+    // 达到上限即停止翻页（不再像旧实现那样把剩余消息逐条计 skipped），
+    // 重复勾选时已入队的按重复跳过、不占名额，继续向更早历史补。
     pageLoop: for (let page = 0; page < AUTO_CACHE_SCAN_PAGES; page += 1) {
       const items = await downloaderSidecar.accountMessages({
         userId, accountId, peer: peerId, limit: AUTO_CACHE_SCAN_PAGE_SIZE, before

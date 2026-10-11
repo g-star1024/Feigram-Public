@@ -14,6 +14,18 @@ const about = {
 
 const announcements = [
   {
+    id: "release-2.6.50",
+    title: "Feigram 2.6.50 更新",
+    version: "2.6.50",
+    level: "success",
+    createdAt: "2026-10-11T08:35:00.000Z",
+    body: [
+"群后台缓存单次提交上限由 30 提升至 100",
+      "大群一次可提交更多视频，减少重复勾选补齐的轮次",
+      "扫描深度翻页与「已入队按重复跳过、不占名额」逻辑不变；达上限仍提示可继续向更早历史补齐"
+    ].join("\n")
+  },
+  {
     id: "release-2.6.49",
     title: "Feigram 2.6.49 更新",
     version: "2.6.49",
